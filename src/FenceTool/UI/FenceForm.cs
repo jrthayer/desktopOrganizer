@@ -398,24 +398,27 @@ public sealed class FenceForm : Form
             using (var marginFill = new SolidBrush(Color.FromArgb(8, 0, 0, 0)))
                 g.FillRectangle(marginFill, 0, 0, width, height);
 
-            g.TranslateTransform(OuterMargin, OuterMargin);
             // Items that overflow the fence's set height (more rows than fit) would otherwise get
             // drawn into the near-transparent margin band above - GDI+ compositing a bitmap's
             // semi-transparent edge pixels over a fully/near-transparent destination (rather than
             // the opaque body fill) produces garbage colors there, not just invisible overflow.
-            g.SetClip(new Rectangle(0, 0, contentWidth, contentHeight));
+            g.SetClip(new Rectangle(OuterMargin, OuterMargin, contentWidth, contentHeight));
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // DrawIcon's native GDI stretch looks jagged when scaling a source icon down to
             // IconSize - drawing icons as bitmaps under high-quality interpolation instead avoids that.
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-            using var body = RoundedRect(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1), CornerRadius);
+            // Coordinates below are content-relative (see Offset) rather than using
+            // Graphics.TranslateTransform - TextRenderer.DrawText (GDI, not GDI+) doesn't reliably
+            // respect a GDI+ world transform, which left title/item text rendered OuterMargin
+            // pixels too high while shapes and images (which do respect it) looked fine.
+            using var body = RoundedRect(ToWindow(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1)), CornerRadius);
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
             g.FillPath(bodyFill, body);
 
             using var titleFill = new SolidBrush(Color.FromArgb(255, 20, 20, 24));
-            using var titlePath = RoundedRectTop(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight), CornerRadius);
+            using var titlePath = RoundedRectTop(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight)), CornerRadius);
             g.FillPath(titleFill, titlePath);
 
             using var borderPen = new Pen(Color.FromArgb(255, 70, 70, 78));
@@ -423,7 +426,7 @@ public sealed class FenceForm : Form
 
             if (_renameBox is null)
             {
-                TextRenderer.DrawText(g, _model.Name, _font, new Rectangle(8, 0, contentWidth - 16, TitleBarHeight),
+                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleBarHeight)),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
 
@@ -457,7 +460,7 @@ public sealed class FenceForm : Form
             if (i == _hoverIndex && !isDragSource)
             {
                 using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
-                using var hoverRect = RoundedRect(new Rectangle(cellX, cellY, CellWidth, CellHeight), 4);
+                using var hoverRect = RoundedRect(ToWindow(new Rectangle(cellX, cellY, CellWidth, CellHeight)), 4);
                 g.FillPath(hoverBrush, hoverRect);
             }
 
@@ -466,7 +469,7 @@ public sealed class FenceForm : Form
             {
                 var iconX = cellX + (CellWidth - IconSize) / 2;
                 using var bitmap = icon.ToBitmap();
-                var iconRect = new Rectangle(iconX, cellY + IconTopPadding, IconSize, IconSize);
+                var iconRect = ToWindow(new Rectangle(iconX, cellY + IconTopPadding, IconSize, IconSize));
                 // Faded in place while its being dragged - the ghost near the cursor (painted
                 // after the grid, see PaintDragFeedback) is what's actually "held".
                 if (isDragSource)
@@ -478,7 +481,7 @@ public sealed class FenceForm : Form
             if (item.Path == _itemRenamePath)
                 continue;
 
-            var labelRect = new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, CellHeight - IconTopPadding - IconSize - 2);
+            var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, CellHeight - IconTopPadding - IconSize - 2));
             TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
         }
@@ -503,7 +506,7 @@ public sealed class FenceForm : Form
         var cellY = TitleBarHeight + GridPadding + targetIndex / columns * CellHeight;
 
         using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
-        using var targetRect = RoundedRect(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, CellHeight - 2), 4);
+        using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, CellHeight - 2)), 4);
         g.DrawPath(targetPen, targetRect);
     }
 
