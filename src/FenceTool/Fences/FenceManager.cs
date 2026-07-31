@@ -10,6 +10,7 @@ public sealed class FenceManager : IDisposable
     private readonly IDesktopAnchorStrategy _anchorStrategy;
     private readonly List<FenceModel> _models = new();
     private readonly Dictionary<Guid, FenceForm> _forms = new();
+    private readonly System.Windows.Forms.Timer _membershipTimer;
 
     public FenceManager()
     {
@@ -22,6 +23,13 @@ public sealed class FenceManager : IDisposable
         _anchorStrategy = new FloatingDesktopAnchorStrategy();
         _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
         _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
+
+        // Fence create/move/resize already refresh membership on their own, but that doesn't
+        // catch the far more common case: the user drags a real desktop icon onto an already-
+        // placed, stationary fence. Polling here is what actually makes an icon "go into" a fence.
+        _membershipTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _membershipTimer.Tick += (_, _) => DetectIconMovement();
+        _membershipTimer.Start();
     }
 
     /// <summary>Fires when explorer.exe is running at a different privilege level than this app,
@@ -68,7 +76,12 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
-    public void Dispose() => _desktopListView.Dispose();
+    public void Dispose()
+    {
+        _membershipTimer.Stop();
+        _membershipTimer.Dispose();
+        _desktopListView.Dispose();
+    }
 
     public void ArrangeFence(Guid id)
     {
@@ -103,27 +116,30 @@ public sealed class FenceManager : IDisposable
 
         var (horizontalSpacing, verticalSpacing) = IconMetrics.GetIconSpacing();
 
+        var placements = new List<(int Index, Point Position)>(members.Count);
+        for (int i = 0; i < members.Count; i++)
+            placements.Add((members[i].Index, GridSlotPosition(model, i, horizontalSpacing, verticalSpacing)));
+
+        _desktopListView.SetItemPositions(placements);
+    }
+
+    private static Point GridSlotPosition(FenceModel model, int slot, int horizontalSpacing, int verticalSpacing)
+    {
         var originX = model.Bounds.X + ArrangePadding;
         var originY = model.Bounds.Y + FenceForm.TitleBarHeight + ArrangePadding;
         var availableWidth = Math.Max(model.Bounds.Width - ArrangePadding * 2, horizontalSpacing);
         var columns = Math.Max(1, availableWidth / horizontalSpacing);
 
-        var placements = new List<(int Index, Point Position)>(members.Count);
-        for (int i = 0; i < members.Count; i++)
-        {
-            var column = i % columns;
-            var row = i / columns;
-            var position = new Point(originX + column * horizontalSpacing, originY + row * verticalSpacing);
-            placements.Add((members[i].Index, position));
-        }
-
-        _desktopListView.SetItemPositions(placements);
+        var column = slot % columns;
+        var row = slot / columns;
+        return new Point(originX + column * horizontalSpacing, originY + row * verticalSpacing);
     }
 
     /// <summary>
     /// Recomputes which desktop icons fall inside each fence's bounds (by the icon's current
-    /// position) and records them by label. Read-only for now - icons aren't actually moved
-    /// until the write path lands, so this just keeps each fence's membership list current.
+    /// position) and records them by label, without moving anything - used when a fence itself
+    /// is created/moved/resized, where snapping whatever now happens to be underneath it into a
+    /// grid would feel like an unexpected side effect of resizing.
     /// </summary>
     private void RefreshMembership()
     {
@@ -138,6 +154,54 @@ public sealed class FenceManager : IDisposable
                 .Select(icon => icon.Label)
                 .ToList();
         }
+    }
+
+    /// <summary>
+    /// Detects icons the user has manually dragged onto (or away from) a fence since the last
+    /// check, and snaps newly-arrived icons into the next open grid slot immediately - this is
+    /// what actually makes dragging an icon onto a fence feel like it "goes into" it. Icons
+    /// already tracked as members are left wherever they currently are, so this doesn't fight
+    /// the user by continuously re-arranging things they've manually repositioned.
+    /// </summary>
+    private void DetectIconMovement()
+    {
+        var icons = _desktopListView.EnumerateIcons();
+        if (icons.Count == 0)
+            return;
+
+        var changed = false;
+        var (horizontalSpacing, verticalSpacing) = IconMetrics.GetIconSpacing();
+
+        foreach (var model in _models)
+        {
+            var currentMembers = icons.Where(icon => model.Bounds.Contains(icon.Position)).ToList();
+            var currentLabels = currentMembers.Select(icon => icon.Label).ToHashSet();
+            var previousLabels = model.IconNames.ToHashSet();
+
+            var departed = model.IconNames.Where(name => !currentLabels.Contains(name)).ToList();
+            foreach (var name in departed)
+            {
+                model.IconNames.Remove(name);
+                changed = true;
+            }
+
+            var arrivals = currentMembers.Where(icon => !previousLabels.Contains(icon.Label)).ToList();
+            if (arrivals.Count == 0)
+                continue;
+
+            var placements = new List<(int Index, Point Position)>(arrivals.Count);
+            foreach (var icon in arrivals)
+            {
+                placements.Add((icon.Index, GridSlotPosition(model, model.IconNames.Count, horizontalSpacing, verticalSpacing)));
+                model.IconNames.Add(icon.Label);
+            }
+
+            _desktopListView.SetItemPositions(placements);
+            changed = true;
+        }
+
+        if (changed)
+            Save();
     }
 
     public void NotifyRenamed(Guid id, string name)
