@@ -42,8 +42,19 @@ public sealed class FenceForm : Form
     // Also doubles as where the settings cog now lives (always outside the visible fence, to the
     // right of its top-right corner) - sized to comfortably fit it, not just resize-grabbing.
     private const int OuterMargin = 26;
-    private const int CornerRadius = 16;
+    private const int CornerRadius = 22;
     private const float FenceOpacity = 0.85f;
+
+    // Accent used for selection-style indicators unrelated to fence activation - the item
+    // drag-target outline and the menu checkmark.
+    private static readonly Color AccentColor = Color.FromArgb(120, 170, 255);
+
+    // A fence being active highlights its own border instead - a brighter neutral gray (matching
+    // existing UI grays elsewhere, e.g. the menu checkbox outline) rather than the accent color, so
+    // it reads as "this fence" rather than "a selection", and a thicker pen so the highlight hugs
+    // the fence's actual edge directly instead of a separate frame floating out in the margin.
+    private static readonly Color ActiveBorderColor = Color.FromArgb(200, 150, 150, 158);
+    private const float ActiveBorderWidth = 8f;
 
     private const int WM_NCHITTEST = 0x0084;
     private const int WM_NCLBUTTONDBLCLK = 0x00A3;
@@ -268,17 +279,26 @@ public sealed class FenceForm : Form
         base.Dispose(disposing);
     }
 
-    protected override void OnActivated(EventArgs e)
-    {
-        base.OnActivated(e);
-        _isActive = true;
-        RenderAndPresent();
-    }
-
+    // _isActive (cog + drag-margin visibility) is intentionally NOT driven by OnActivated - that
+    // fires for any click that gives the window OS focus, including a plain click on a shortcut
+    // just to use it. It's set explicitly instead, only for right-click (anywhere) or a title-bar
+    // click (either button) - see WndProc's WM_NCLBUTTONDOWN/WM_NCRBUTTONDOWN handling and
+    // ShowContextMenu. Resizing deliberately does NOT activate the fence - HitTest turns the whole
+    // margin band into a move handle once already active, so resize and move never contend for the
+    // same pixels, but that also means resize has to stay unavailable to the (fence, click) pairs
+    // that would otherwise be ambiguous. Losing focus still deactivates unconditionally.
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
         _isActive = false;
+        RenderAndPresent();
+    }
+
+    private void ActivateFence()
+    {
+        if (_isActive)
+            return;
+        _isActive = true;
         RenderAndPresent();
     }
 
@@ -353,16 +373,12 @@ public sealed class FenceForm : Form
         {
             _dragArmIndex = index;
             _dragArmPoint = e.Location; // raw window-space is fine here - only ever used as a delta
-            return;
         }
 
-        if (_model.HideTitle)
-        {
-            // No title bar to grab when it's hidden - forward the click-drag to the OS's own
-            // caption-move handling, the standard trick for a draggable-by-its-body borderless window.
-            NativeMethods.ReleaseCapture();
-            NativeMethods.SendMessage(Handle, NativeMethods.WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
-        }
+        // Moving now happens via the margin band outside the visible fence (see HitTest's move-ring
+        // check) rather than by clicking empty content here - that band always exists, regardless of
+        // whether there's a title bar or how densely packed the grid is, so there's no more fallback
+        // needed at this layer.
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -481,8 +497,35 @@ public sealed class FenceForm : Form
                 // HitTest reports HTCAPTION for the title bar, so a double-click there arrives as
                 // this non-client message. Letting the default proc handle it would maximize the
                 // window (the OS's standard double-click-caption behavior) - rename here instead.
+                ActivateFence();
                 BeginRename();
                 return;
+
+            case NativeMethods.WM_NCLBUTTONDOWN:
+                // A left click on the title bar activates the fence - see OnDeactivate's comment
+                // for why resize edges deliberately don't. Not returning early: the default proc
+                // still needs this message to actually move/resize.
+                if ((int)m.WParam.ToInt64() == HTCAPTION)
+                    ActivateFence();
+                break;
+
+            case NativeMethods.WM_NCRBUTTONDOWN:
+                var ncRButtonHitTest = (int)m.WParam.ToInt64();
+                if (ncRButtonHitTest == HTCAPTION)
+                {
+                    // A real caption's right-click shows the system menu (Restore/Move/Close etc.)
+                    // via the default proc - there's no such menu for this custom-drawn title bar,
+                    // so show the header's own menu here instead of letting DefWindowProc pop one up.
+                    ActivateFence();
+                    ShowHeaderContextMenu();
+                    return;
+                }
+                // Right-clicking a resize edge/corner activates too - this only ever fires while
+                // inactive (resize hit-test codes stop occurring once active, see HitTest), so it's
+                // simply "resize is available right now, and you right-clicked in that area".
+                if (IsResizeHitTest(ncRButtonHitTest))
+                    ActivateFence();
+                break;
 
             case WM_ERASEBKGND:
                 m.Result = (IntPtr)1;
@@ -555,6 +598,9 @@ public sealed class FenceForm : Form
         }
     }
 
+    private static bool IsResizeHitTest(int hitTest) =>
+        hitTest is HTLEFT or HTRIGHT or HTTOP or HTBOTTOM or HTTOPLEFT or HTTOPRIGHT or HTBOTTOMLEFT or HTBOTTOMRIGHT;
+
     private int HitTest(IntPtr lParam)
     {
         long l = lParam.ToInt64();
@@ -574,25 +620,37 @@ public sealed class FenceForm : Form
         if (_isActive && GetCogRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
             return HTCLIENT;
 
-        // The resize-sensitive band spans from OuterMargin outside the visible fence to
-        // ResizeMargin inside it - i.e. measured from the window's true (padded) edge.
         int band = OuterMargin + ResizeMargin;
-        bool left = x <= band;
-        bool right = x >= width - band;
-        bool top = y <= band;
-        bool bottom = y >= height - band;
 
-        if (top && left) return HTTOPLEFT;
-        if (top && right) return HTTOPRIGHT;
-        if (bottom && left) return HTBOTTOMLEFT;
-        if (bottom && right) return HTBOTTOMRIGHT;
-        if (left) return HTLEFT;
-        if (right) return HTRIGHT;
-        if (top) return HTTOP;
-        if (bottom) return HTBOTTOM;
+        if (_isActive)
+        {
+            // The margin band is a move handle instead of a resize band while active - the same
+            // footprint resize used to claim, just reassigned rather than split into two adjacent
+            // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
+            // ActiveBorderColor highlight) without an ambiguous strip where both would apply.
+            // Resizing an active fence isn't available until it's deactivated again.
+            if (x <= band || x >= width - band || y <= band || y >= height - band)
+                return HTCAPTION;
+        }
+        else
+        {
+            bool left = x <= band;
+            bool right = x >= width - band;
+            bool top = y <= band;
+            bool bottom = y >= height - band;
 
-        // No title bar to grab when it's hidden - OnMouseDown forwards an empty-background drag
-        // to a native move instead (ReleaseCapture + WM_NCLBUTTONDOWN), so this stays HTCLIENT.
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+        }
+
+        // Empty space within the title bar itself (content-relative, not the margin above) works
+        // the same way for a fence that still has one.
         if (!_model.HideTitle && y - OuterMargin <= TitleBarHeight)
             return HTCAPTION;
 
@@ -626,16 +684,19 @@ public sealed class FenceForm : Form
 
             // OuterMargin needs a non-zero (if faint) alpha - Windows treats fully transparent
             // (alpha 0) pixels of a layered window as click-through, so a truly invisible margin
-            // couldn't receive the resize hit-testing it exists for. This gets drawn first and the
-            // opaque fence body then covers all of it except that outer band.
+            // couldn't receive the resize/move hit-testing it exists for. This gets drawn first and
+            // the opaque fence body then covers all of it except that outer band.
             using (var marginFill = new SolidBrush(Color.FromArgb(8, 0, 0, 0)))
                 g.FillRectangle(marginFill, 0, 0, width, height);
 
-            // Items that overflow the fence's set height (more rows than fit) would otherwise get
-            // drawn into the near-transparent margin band above - GDI+ compositing a bitmap's
-            // semi-transparent edge pixels over a fully/near-transparent destination (rather than
-            // the opaque body fill) produces garbage colors there, not just invisible overflow.
-            g.SetClip(new Rectangle(OuterMargin, OuterMargin, contentWidth, contentHeight));
+            // Not clipped to the content rect here - PaintItems applies its own tighter clip via
+            // CombineMode.Intersect before drawing any items (still preventing overflowed items from
+            // painting into the near-transparent margin, since the intersection stays at least that
+            // tight regardless of what's set here). Clipping this early would instead cut off the
+            // outer half of the active border's thick stroke along straight edges while leaving the
+            // rounded corners (which curve inward from the clip rect) unclipped - an asymmetry that
+            // reads as a square notch at each corner rather than a uniformly thick rounded outline.
+            g.SetClip(new Rectangle(0, 0, width, height));
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // DrawIcon's native GDI stretch looks jagged when scaling a source icon down to
             // IconSize - drawing icons as bitmaps under high-quality interpolation instead avoids that.
@@ -657,12 +718,18 @@ public sealed class FenceForm : Form
                 g.FillPath(titleFill, titlePath);
             }
 
-            using var borderPen = new Pen(Color.FromArgb(255, 70, 70, 78));
+            // A brighter, thicker border signals the fence is active - the margin band around it is
+            // now a move handle (see HitTest), and this highlight hugs the fence's actual edge
+            // directly rather than a separate frame floating out in the margin.
+            using var borderPen = new Pen(_isActive ? ActiveBorderColor : Color.FromArgb(255, 70, 70, 78), _isActive ? ActiveBorderWidth : 1f);
+            // Pen.LineJoin defaults to Miter, which squares off the outer edge of a thick stroke at
+            // the rounded corners instead of following their curve - Round keeps it hugging the arc.
+            borderPen.LineJoin = LineJoin.Round;
             g.DrawPath(borderPen, body);
 
             if (!_model.HideTitle && _renameBox is null)
             {
-                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleBarHeight)),
+                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(14, 0, contentWidth - 22, TitleBarHeight)),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
 
@@ -670,18 +737,17 @@ public sealed class FenceForm : Form
             {
                 var cogRect = ToWindow(GetCogRect(contentWidth));
 
-                // The cog now lives in the near-transparent OuterMargin band (see that constant's
+                // The cog lives in the near-transparent OuterMargin band (see that constant's
                 // comment) rather than on the opaque title bar it used to sit on. GDI's
-                // TextRenderer.DrawText only ever writes RGB, never alpha, so without an opaque
-                // backing first, the glyph would inherit the margin's near-zero alpha and vanish
-                // once WritePremultipliedPixels scales it down - the same class of bug as the old
-                // scrolled-item-over-transparent-background issue, just for text instead of images.
-                using var cogBackingFill = new SolidBrush(Color.FromArgb(255, 40, 40, 46));
-                using var cogBackingPath = RoundedRect(Rectangle.Inflate(cogRect, 3, 3), 6);
-                g.FillPath(cogBackingFill, cogBackingPath);
-
-                TextRenderer.DrawText(g, "\uE713", _cogFont, cogRect, Color.Silver,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                // TextRenderer.DrawText only ever writes RGB, never alpha, so drawn there directly it
+                // would inherit the margin's near-zero alpha and vanish once WritePremultipliedPixels
+                // scales it down - the same class of bug as the old scrolled-item-over-transparent-
+                // background issue, just for text instead of images. GDI+'s DrawString doesn't have
+                // that problem (it writes real alpha), so it's used here instead of adding a solid
+                // backing plate behind the glyph just to work around GDI's limitation.
+                using var cogBrush = new SolidBrush(Color.Silver);
+                using var cogFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                g.DrawString("\uE713", _cogFont, cogBrush, cogRect, cogFormat);
             }
 
             PaintItems(g, contentWidth, contentHeight);
@@ -798,7 +864,7 @@ public sealed class FenceForm : Form
         var cellX = GridPadding + targetIndex % columns * CellWidth;
         var cellY = GridTop + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
 
-        using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
+        using var targetPen = new Pen(Color.FromArgb(200, AccentColor), 2);
         using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, EffectiveCellHeight - 2)), 4);
         g.DrawPath(targetPen, targetRect);
     }
@@ -863,26 +929,25 @@ public sealed class FenceForm : Form
         return index >= 0 && index < _model.Files.Count ? index : null;
     }
 
+    /// <summary>Right-click on an item. Fence-level actions live elsewhere now: Rename only on the
+    /// header (see ShowHeaderContextMenu) and Delete Fence only in the cog dropdown (see
+    /// ShowFenceOptionsMenu) - a plain background right-click has nothing of its own to offer, so it
+    /// just activates the fence (see ActivateFence) without popping up an empty menu.</summary>
     private void ShowContextMenu(Point clientPoint)
     {
+        ActivateFence();
         _contextItem = FileAtGridPosition(clientPoint);
+        if (_contextItem is null)
+            return;
+
         NativeMethods.GetCursorPos(out var pt);
 
         var hMenu = NativeMethods.CreatePopupMenu();
         try
         {
-            if (_contextItem is not null)
-            {
-                AppendItem(hMenu, CmdOpenItem, false);
-                AppendItem(hMenu, CmdRenameItem, false);
-                AppendItem(hMenu, CmdRemoveItem, false);
-            }
-            else
-            {
-                AppendItem(hMenu, CmdRename, false);
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-                AppendItem(hMenu, CmdDelete, false);
-            }
+            AppendItem(hMenu, CmdOpenItem, false);
+            AppendItem(hMenu, CmdRenameItem, false);
+            AppendItem(hMenu, CmdRemoveItem, false);
 
             ApplyDarkMenuTheme(hMenu);
 
@@ -895,12 +960,37 @@ public sealed class FenceForm : Form
         }
     }
 
-    /// <summary>Per-fence settings, opened via the cog that appears in the title bar once this
-    /// fence is the active window (see OnActivated/OnDeactivate and the cog hit-test carve-out).
-    /// Builds a 2-level tree: this menu -> "OCD Formatting", whose own submenu holds a "Fence
-    /// Dimensions" header (a plain disabled label, not a further nested submenu - see AppendHeader)
-    /// followed by its three resize actions. AppendPopup stays available as general infrastructure
-    /// for a real third level if a future subcategory needs one.</summary>
+    /// <summary>Right-click on the header - the title bar, or (while active) the move margin
+    /// standing in for it on a headless fence, since both report HTCAPTION - see WndProc's
+    /// WM_NCRBUTTONDOWN handling. The only fence-level action tied to this specific spot rather than
+    /// the fence generally.</summary>
+    private void ShowHeaderContextMenu()
+    {
+        NativeMethods.GetCursorPos(out var pt);
+
+        var hMenu = NativeMethods.CreatePopupMenu();
+        try
+        {
+            AppendItem(hMenu, CmdRename, false);
+
+            ApplyDarkMenuTheme(hMenu);
+
+            NativeMethods.SetForegroundWindow(Handle);
+            NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_RIGHTBUTTON, pt.X, pt.Y, Handle, IntPtr.Zero);
+        }
+        finally
+        {
+            NativeMethods.DestroyMenu(hMenu);
+        }
+    }
+
+    /// <summary>Per-fence settings, opened via the cog that appears once this fence is active (see
+    /// OnDeactivate and the cog hit-test carve-out). Builds a 2-level tree: this menu -> "OCD
+    /// Formatting", whose own submenu holds a "Fence Dimensions" header (a plain disabled label, not
+    /// a further nested submenu - see AppendHeader) followed by its three resize actions.
+    /// AppendPopup stays available as general infrastructure for a real third level if a future
+    /// subcategory needs one. "Delete Fence" lives here rather than any right-click menu now, same
+    /// as "Rename" moved to the header's own context menu - see ShowContextMenu/ShowHeaderContextMenu.</summary>
     private void ShowFenceOptionsMenu()
     {
         var contentSize = GetContentSize();
@@ -926,6 +1016,8 @@ public sealed class FenceForm : Form
             AppendItem(hMenu, CmdToggleHideLabels, _model.HideLabels);
             AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
             AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
+            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
+            AppendItem(hMenu, CmdDelete, false);
 
             ApplyDarkMenuTheme(hMenu);
 
@@ -1034,7 +1126,7 @@ public sealed class FenceForm : Form
 
             if (isChecked)
             {
-                using var checkMarkPen = new Pen(Color.FromArgb(255, 120, 170, 255), 2);
+                using var checkMarkPen = new Pen(AccentColor, 2);
                 g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
                 g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
             }

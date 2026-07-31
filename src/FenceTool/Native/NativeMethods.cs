@@ -188,6 +188,7 @@ internal static class NativeMethods
     public const int WM_DRAWITEM = 0x002B;
     public const int WM_MEASUREITEM = 0x002C;
     public const int WM_NCLBUTTONDOWN = 0x00A1;
+    public const int WM_NCRBUTTONDOWN = 0x00A4;
     public const uint ODT_MENU = 1;
     public const uint MIM_BACKGROUND = 0x00000002;
     public const uint MIM_APPLYTOSUBMENUS = 0x80000000;
