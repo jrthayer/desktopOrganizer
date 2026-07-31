@@ -100,6 +100,20 @@ internal struct MENUINFO
     public IntPtr dwMenuData;
 }
 
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+internal struct TOOLINFO
+{
+    public uint cbSize;
+    public uint uFlags;
+    public IntPtr hwnd;
+    public IntPtr uId;
+    public RECT rect;
+    public IntPtr hinst;
+    public string lpszText;
+    public IntPtr lParam;
+    public IntPtr lpReserved;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct LVITEM
 {
@@ -195,6 +209,20 @@ internal static class NativeMethods
     public const uint ODS_SELECTED = 0x0001;
     public const uint ODS_CHECKED = 0x0008;
     public const int WM_CTLCOLOREDIT = 0x0133;
+    public const int WM_MENUSELECT = 0x011F;
+    public const uint MF_POPUP_FLAG = 0x0010; // WM_MENUSELECT's HIWORD flags, not an AppendMenu flag - distinct from the MF_POPUP used there despite the same bit
+
+    public const int WM_USER = 0x0400;
+    public const int TTM_TRACKACTIVATE = WM_USER + 17;
+    public const int TTM_TRACKPOSITION = WM_USER + 18;
+    public const int TTM_ADDTOOLW = WM_USER + 50;
+    public const int TTM_UPDATETIPTEXTW = WM_USER + 57;
+    public const int TTM_SETTIPBKCOLOR = WM_USER + 19;
+    public const int TTM_SETTIPTEXTCOLOR = WM_USER + 20;
+    public const uint TTS_ALWAYSTIP = 0x01;
+    public const uint TTS_NOPREFIX = 0x02;
+    public const uint TTF_TRACK = 0x0020;
+    public const uint TTF_ABSOLUTE = 0x0080;
 
     public const int EM_SETSEL = 0x00B1;
 
@@ -227,6 +255,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref TOOLINFO lParam);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -429,4 +460,10 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     public static extern uint SetBkColor(IntPtr hdc, uint crColor);
+
+    // Opts a specific control out of visual-styles theming - needed for the menu-item tooltip,
+    // since a themed tooltip draws its background/text via UxTheme and silently ignores
+    // TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR, which only affect the older classic GDI rendering path.
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    public static extern int SetWindowTheme(IntPtr hWnd, string? pszSubAppName, string? pszSubIdList);
 }

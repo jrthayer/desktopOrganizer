@@ -53,6 +53,7 @@ public sealed class FenceModel
     public bool Collapsed { get; set; }
     public bool HideLabels { get; set; }
     public bool HideTitle { get; set; }
+    public bool OcdFenceSizing { get; set; }
 
     [JsonIgnore]
     public Rectangle Bounds

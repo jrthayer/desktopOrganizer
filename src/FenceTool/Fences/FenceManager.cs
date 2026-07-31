@@ -156,6 +156,15 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    public void SetOcdFenceSizing(Guid id, bool enabled)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null || model.OcdFenceSizing == enabled)
+            return;
+        model.OcdFenceSizing = enabled;
+        Save();
+    }
+
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)

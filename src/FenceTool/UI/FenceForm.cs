@@ -86,6 +86,7 @@ public sealed class FenceForm : Form
     private const int CmdResizeBoth = 9;
     private const int CmdResizeLeftRight = 10;
     private const int CmdResizeTopDown = 11;
+    private const int CmdToggleOcdSizing = 12;
 
     // Not real WM_COMMAND ids (clicking a submenu-anchor row just expands it, it never fires a
     // command) - these only tag an owner-draw row's itemData so DrawMenuItem/MeasureMenuItem know
@@ -143,6 +144,18 @@ public sealed class FenceForm : Form
     // the fence body color, for everything that would otherwise default to a native white/light
     // control background. Lives for the form's whole lifetime rather than being recreated per menu.
     private readonly IntPtr _darkBrush = NativeMethods.CreateSolidBrush(ColorRef(Color.FromArgb(32, 32, 36)));
+
+    // Whether the drag that's about to start on WM_NCLBUTTONDOWN is a resize (as opposed to a
+    // move) - set from that message's own hit-test code, read back on WM_EXITSIZEMOVE to decide
+    // whether OcdFenceSizing should auto-run "Both" now that the resize is done. WM_EXITSIZEMOVE
+    // fires after a move just as much as a resize, so this is the only reliable way to tell them
+    // apart at that point.
+    private bool _resizeInProgress;
+
+    // Lazily created native tooltip common control, tracked manually (TTF_TRACK) rather than the
+    // control's own automatic hover detection, since it has to follow WM_MENUSELECT on a raw HMENU
+    // instead of a real child control's mouse events - see ShowMenuItemTooltip/HideMenuItemTooltip.
+    private IntPtr _menuTooltip = IntPtr.Zero;
 
     public Guid FenceId => _model.Id;
 
@@ -273,6 +286,8 @@ public sealed class FenceForm : Form
             _font.Dispose();
             _cogFont.Dispose();
             NativeMethods.DeleteObject(_darkBrush);
+            if (_menuTooltip != IntPtr.Zero)
+                NativeMethods.DestroyWindow(_menuTooltip);
             foreach (var icon in _iconCache.Values)
                 icon?.Dispose();
         }
@@ -505,8 +520,12 @@ public sealed class FenceForm : Form
                 // A left click on the title bar activates the fence - see OnDeactivate's comment
                 // for why resize edges deliberately don't. Not returning early: the default proc
                 // still needs this message to actually move/resize.
-                if ((int)m.WParam.ToInt64() == HTCAPTION)
+                var ncLButtonHitTest = (int)m.WParam.ToInt64();
+                if (ncLButtonHitTest == HTCAPTION)
                     ActivateFence();
+                // Remembered for WM_EXITSIZEMOVE, which fires after a move just as much as a
+                // resize - OcdFenceSizing should only auto-run following an actual resize.
+                _resizeInProgress = IsResizeHitTest(ncLButtonHitTest);
                 break;
 
             case NativeMethods.WM_NCRBUTTONDOWN:
@@ -545,6 +564,10 @@ public sealed class FenceForm : Form
 
             case WM_COMMAND:
                 HandleCommand(m.WParam.ToInt32() & 0xFFFF);
+                return;
+
+            case NativeMethods.WM_MENUSELECT:
+                HandleMenuSelect(m.WParam, m.LParam);
                 return;
 
             case NativeMethods.WM_CTLCOLOREDIT:
@@ -589,6 +612,12 @@ public sealed class FenceForm : Form
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
                         rect.Left + OuterMargin, rect.Top + OuterMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
+
+                // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
+                // whatever size was just dragged to - not after a move, see _resizeInProgress.
+                if (_resizeInProgress && _model.OcdFenceSizing)
+                    FormatDimensions(adjustWidth: true, adjustHeight: true);
+                _resizeInProgress = false;
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -985,12 +1014,13 @@ public sealed class FenceForm : Form
     }
 
     /// <summary>Per-fence settings, opened via the cog that appears once this fence is active (see
-    /// OnDeactivate and the cog hit-test carve-out). Builds a 2-level tree: this menu -> "OCD
-    /// Formatting", whose own submenu holds a "Fence Dimensions" header (a plain disabled label, not
-    /// a further nested submenu - see AppendHeader) followed by its three resize actions.
-    /// AppendPopup stays available as general infrastructure for a real third level if a future
-    /// subcategory needs one. "Delete Fence" lives here rather than any right-click menu now, same
-    /// as "Rename" moved to the header's own context menu - see ShowContextMenu/ShowHeaderContextMenu.</summary>
+    /// OnDeactivate and the cog hit-test carve-out). Top level: the three checkbox toggles, then a
+    /// separator, then "OCD Formatting" (a submenu whose own "Fence Dimensions" header - a plain
+    /// disabled label, not a further nested submenu, see AppendHeader - sits above its three resize
+    /// actions), then another separator, then "Delete Fence". AppendPopup stays available as general
+    /// infrastructure for a real third level if a future subcategory needs one. "Delete Fence" lives
+    /// here rather than any right-click menu now, same as "Rename" moved to the header's own context
+    /// menu - see ShowContextMenu/ShowHeaderContextMenu.</summary>
     private void ShowFenceOptionsMenu()
     {
         var contentSize = GetContentSize();
@@ -1015,6 +1045,8 @@ public sealed class FenceForm : Form
 
             AppendItem(hMenu, CmdToggleHideLabels, _model.HideLabels);
             AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
+            AppendItem(hMenu, CmdToggleOcdSizing, _model.OcdFenceSizing);
+            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
             AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
             NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
             AppendItem(hMenu, CmdDelete, false);
@@ -1027,6 +1059,7 @@ public sealed class FenceForm : Form
         finally
         {
             NativeMethods.DestroyMenu(hMenu); // recursively destroys the attached submenu too
+            HideMenuItemTooltip(); // WM_MENUSELECT's own close notification already does this normally - just a backstop
         }
     }
 
@@ -1079,6 +1112,7 @@ public sealed class FenceForm : Form
         CmdResizeBoth => new MenuRowStyle("Both", false, false),
         CmdResizeLeftRight => new MenuRowStyle("Left/Right", false, false),
         CmdResizeTopDown => new MenuRowStyle("Top/Down", false, false),
+        CmdToggleOcdSizing => new MenuRowStyle("OCD Fence Sizing", true, false),
         CmdOpenItem => new MenuRowStyle("Open", false, false),
         CmdRenameItem => new MenuRowStyle("Rename", false, false),
         CmdRemoveItem => new MenuRowStyle("Remove From Fence", false, false),
@@ -1088,6 +1122,117 @@ public sealed class FenceForm : Form
     };
 
     private static uint ColorRef(Color c) => (uint)(c.R | (c.G << 8) | (c.B << 16));
+
+    /// <summary>Only rows worth explaining get one - most menu items are self-explanatory from
+    /// their label alone.</summary>
+    private static string? GetMenuTooltipText(int commandId) => commandId switch
+    {
+        CmdToggleOcdSizing =>
+            "After you resize this fence by hand, automatically snap it to the tightest size that fits its icons (same as OCD Formatting > Both).",
+        _ => null,
+    };
+
+    /// <summary>WM_MENUSELECT fires as the highlighted item changes in any menu owned by this
+    /// window, including nested submenus - used to track a hover tooltip since a raw HMENU has no
+    /// hover events of its own the way a real control would.</summary>
+    private void HandleMenuSelect(IntPtr wParam, IntPtr lParam)
+    {
+        var packed = wParam.ToInt64();
+        var itemIdOrPosition = (int)(packed & 0xFFFF);
+        var flags = (uint)((packed >> 16) & 0xFFFF);
+
+        // itemIdOrPosition is a real command id only for a plain (non-popup) item - for a
+        // submenu-anchor row (MF_POPUP set in flags, see AppendPopup) it's that submenu's position
+        // within its parent instead, which would collide with unrelated command ids by coincidence.
+        // The 0xFFFF/null-lParam pair is Windows' own sentinel for "the menu just closed".
+        if (lParam == IntPtr.Zero || itemIdOrPosition == 0xFFFF || (flags & NativeMethods.MF_POPUP_FLAG) != 0)
+        {
+            HideMenuItemTooltip();
+            return;
+        }
+
+        var tooltipText = GetMenuTooltipText(itemIdOrPosition);
+        if (tooltipText is null)
+            HideMenuItemTooltip();
+        else
+            ShowMenuItemTooltip(tooltipText);
+    }
+
+    private void EnsureMenuTooltip()
+    {
+        if (_menuTooltip != IntPtr.Zero)
+            return;
+
+        // WS_EX_TOPMOST here (and reasserted via SetWindowPos in ShowMenuItemTooltip) so the tooltip
+        // renders above the currently-tracked popup menu instead of behind it - a plain owned popup
+        // isn't guaranteed to stay above a native menu's own (topmost-ish) tracking window.
+        _menuTooltip = NativeMethods.CreateWindowEx(NativeMethods.WS_EX_TOPMOST, "tooltips_class32", string.Empty,
+            NativeMethods.WS_POPUP | (int)NativeMethods.TTS_ALWAYSTIP | (int)NativeMethods.TTS_NOPREFIX,
+            0, 0, 0, 0, Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+        // A themed tooltip draws itself via UxTheme and ignores TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR
+        // entirely - opting out of theming here is what makes those two calls actually take effect.
+        NativeMethods.SetWindowTheme(_menuTooltip, string.Empty, string.Empty);
+
+        // Matches the fence's own dark theme instead of the system tooltip's default light/yellow.
+        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPBKCOLOR, (IntPtr)ColorRef(Color.FromArgb(32, 32, 36)), IntPtr.Zero);
+        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPTEXTCOLOR, (IntPtr)ColorRef(Color.WhiteSmoke), IntPtr.Zero);
+
+        var toolInfo = new TOOLINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
+            uFlags = NativeMethods.TTF_TRACK | NativeMethods.TTF_ABSOLUTE,
+            hwnd = Handle,
+            uId = (IntPtr)1,
+            lpszText = string.Empty,
+        };
+        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_ADDTOOLW, IntPtr.Zero, ref toolInfo);
+    }
+
+    private void ShowMenuItemTooltip(string text)
+    {
+        EnsureMenuTooltip();
+
+        var toolInfo = new TOOLINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
+            uFlags = NativeMethods.TTF_TRACK | NativeMethods.TTF_ABSOLUTE,
+            hwnd = Handle,
+            uId = (IntPtr)1,
+            lpszText = text,
+        };
+        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_UPDATETIPTEXTW, IntPtr.Zero, ref toolInfo);
+
+        NativeMethods.GetCursorPos(out var pt);
+        // Offset from the cursor so the tooltip doesn't sit directly under it - short casts pack
+        // this as signed 16-bit components the same way WM_NCHITTEST's own lParam is unpacked
+        // elsewhere, since screen coordinates can be negative on a multi-monitor desktop.
+        var x = (short)(pt.X + 18);
+        var y = (short)(pt.Y + 22);
+        var position = (IntPtr)((int)(ushort)x | ((int)(ushort)y << 16));
+        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKPOSITION, IntPtr.Zero, position);
+        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKACTIVATE, (IntPtr)1, ref toolInfo);
+
+        // The popup menu currently being tracked can still end up above an already-topmost tooltip
+        // depending on creation order - reasserting topmost (without stealing activation/focus from
+        // the menu) each time keeps the tooltip visibly on top of it instead of hidden behind.
+        NativeMethods.SetWindowPos(_menuTooltip, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+    }
+
+    private void HideMenuItemTooltip()
+    {
+        if (_menuTooltip == IntPtr.Zero)
+            return;
+
+        var toolInfo = new TOOLINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
+            hwnd = Handle,
+            uId = (IntPtr)1,
+        };
+        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKACTIVATE, IntPtr.Zero, ref toolInfo);
+    }
 
     private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
     {
@@ -1153,6 +1298,7 @@ public sealed class FenceForm : Form
             case CmdResizeBoth: FormatDimensions(adjustWidth: true, adjustHeight: true); break;
             case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
             case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
+            case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
         }
     }
 
@@ -1192,6 +1338,12 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    private void ToggleOcdFenceSizing()
+    {
+        _manager.SetOcdFenceSizing(FenceId, !_model.OcdFenceSizing);
+        RenderAndPresent();
+    }
+
     /// <summary>"OCD Formatting -> Fence Dimensions" - shrinks or grows the fence to trim away
     /// wasted space around its current grid, keeping the top-left corner fixed. Trims to what's
     /// already on screen, not the fence's full contents: height never expands past however many
@@ -1210,7 +1362,10 @@ public sealed class FenceForm : Form
         var columns = adjustWidth ? Math.Min(currentColumns, _model.Files.Count) : currentColumns;
 
         var availableHeight = Math.Max(0, contentSize.Height - GridTop - GridPadding * 2);
-        var currentVisibleRows = Math.Max(1, availableHeight / EffectiveCellHeight);
+        // Rounds to the nearest row rather than always truncating down to whatever's fully visible -
+        // adding half a row's height before the integer division means a row that's more than half
+        // shown counts as shown (the fence grows/keeps enough height for it), not cut off.
+        var currentVisibleRows = Math.Max(1, (availableHeight + EffectiveCellHeight / 2) / EffectiveCellHeight);
         var totalRowsNeeded = (_model.Files.Count + columns - 1) / columns;
         var finalRows = adjustHeight ? Math.Min(currentVisibleRows, totalRowsNeeded) : currentVisibleRows;
 
