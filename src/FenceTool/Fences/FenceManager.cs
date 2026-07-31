@@ -14,12 +14,13 @@ public sealed class FenceManager : IDisposable
 
     public FenceManager()
     {
-        // EmbeddedDesktopAnchorStrategy's SetParent onto Progman/WorkerW does not stick against a
-        // System.Windows.Forms.Form - WinForms actively reasserts "top-level forms have no Win32
-        // parent" and undoes it immediately (confirmed empirically: parent reverts to null within
-        // the same call, both during and well after Application.Run's message loop is pumping).
-        // Achieving the true behind-icons compositing would require a raw Win32 window instead of
-        // a Form. Using the floating strategy for now so fences reliably appear.
+        // EmbeddedDesktopAnchorStrategy's SetParent mechanics work correctly (verified via
+        // GetAncestor), but once truly placed behind the icon view, the fence becomes invisible
+        // even in empty desktop areas, and mouse input there stops reaching it - the icon view
+        // appears to paint an opaque background rather than leaving transparent gaps. See that
+        // class's doc comment for details. Using the floating strategy so fences stay visible
+        // and interactive; this means dragging a real icon onto a fence still shows the OS's
+        // "no drop" cursor rather than passing through.
         _anchorStrategy = new FloatingDesktopAnchorStrategy();
         _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
         _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
@@ -216,7 +217,7 @@ public sealed class FenceManager : IDisposable
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)
-            form.Visible = visible;
+            form.SetVisible(visible);
     }
 
     private Rectangle NextDefaultBounds()

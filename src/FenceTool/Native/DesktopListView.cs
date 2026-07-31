@@ -253,7 +253,18 @@ public sealed class DesktopListView : IDisposable
                     continue;
 
                 NativeMethods.SendMessage(_hListView, NativeMethods.LVM_SETITEMPOSITION32, (IntPtr)index, remotePoint);
+
+                // LVM_SETITEMPOSITION32 updates the ListView's internal bookkeeping but doesn't
+                // reliably repaint the affected screen area on its own (unlike a real user drag,
+                // which has its own visual feedback) - without this, the icon logically moves
+                // (reads back correctly) but visually stays put or renders nowhere until
+                // something else forces a repaint. LVM_REDRAWITEMS targets the specific item
+                // (unlike a blanket InvalidateRect, which alone wasn't enough).
+                NativeMethods.SendMessage(_hListView, NativeMethods.LVM_REDRAWITEMS, (IntPtr)index, (IntPtr)index);
             }
+
+            NativeMethods.InvalidateRect(_hListView, IntPtr.Zero, true);
+            NativeMethods.UpdateWindow(_hListView);
 
             return true;
         }

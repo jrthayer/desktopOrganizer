@@ -2,17 +2,23 @@ namespace FenceTool.Native;
 
 /// <summary>
 /// SetParent's a fence window onto the Progman/WorkerW window that hosts the desktop's icon
-/// view, then places it immediately behind SHELLDLL_DefView in z-order. Because the icon
-/// ListView paints no background, this is meant to let the fence's own translucent rectangle
-/// show through in the gaps between icons while the icon glyphs/labels stay drawn on top - the
-/// "sits behind icons, above wallpaper" look, same technique native desktop-widget tools like
-/// Rainmeter use.
+/// view, then places it immediately behind SHELLDLL_DefView in z-order - the same technique
+/// native desktop-widget tools like Rainmeter use to sit "behind icons, above wallpaper".
 ///
-/// NOT CURRENTLY ACTIVE: confirmed empirically that WinForms actively reasserts its "top-level
-/// forms have no Win32 parent" invariant and undoes the SetParent here almost immediately, even
-/// well after the message loop is running normally. Achieving this for real would need the fence
-/// window to be a raw Win32 window instead of a System.Windows.Forms.Form. FenceManager currently
-/// uses FloatingDesktopAnchorStrategy instead; this class is kept for whenever that rewrite happens.
+/// NOT CURRENTLY ACTIVE. The SetParent mechanics themselves work correctly here (verified via
+/// GetAncestor(hwnd, GA_PARENT), which is the reliable way to check this - plain GetParent is
+/// documented as unreliable for WS_POPUP windows and gave false negatives during development).
+/// The blocker is more fundamental: once genuinely placed behind SHELLDLL_DefView, the fence
+/// renders as completely invisible - even in desktop regions with no icons at all, regardless of
+/// WS_EX_LAYERED - indicating the icon view paints an opaque background across its entire area
+/// rather than leaving transparent gaps for whatever is behind it to show through. A right-click
+/// at the fence's location also produced no menu at all (neither the fence's nor the desktop's),
+/// suggesting the icon view - sitting in front - also swallows mouse input there. So embedding a
+/// window behind it this way risks making the fence both invisible and unclickable at once, which
+/// defeats the purpose. FenceManager uses FloatingDesktopAnchorStrategy instead. This class is
+/// kept in case a future Windows version's icon view behaves differently, but achieving the
+/// actual "sits behind icons" look likely needs a different mechanism entirely (e.g. hooking the
+/// shell's own drag-drop notifications) rather than a plain sibling-window z-order trick.
 /// </summary>
 public sealed class EmbeddedDesktopAnchorStrategy : IDesktopAnchorStrategy
 {
