@@ -13,7 +13,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("New Fence", null, OnNewFence);
-        menu.Items.Add("Arrange All", null, OnArrangeAll);
         menu.Items.Add("Show/Hide All", null, OnShowHideAll);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
@@ -43,8 +42,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
-
-    private void OnArrangeAll(object? sender, EventArgs e) => _fenceManager.ArrangeAll();
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {

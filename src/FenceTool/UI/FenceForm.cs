@@ -5,13 +5,23 @@ using FenceTool.Native;
 namespace FenceTool.UI;
 
 /// <summary>
-/// A raw Win32 window (via NativeWindow) rather than a WinForms Form or Control - both were found
-/// to fight or fail at genuinely being reparented onto Progman/WorkerW via SetParent (Form actively
-/// reasserts a "top-level forms have no Win32 parent" invariant; a plain Control's reparenting was
-/// observed to silently revert too, for reasons that weren't fully pinned down). NativeWindow has
-/// none of that machinery, so the anchor strategy's SetParent call has nothing working against it.
+/// A real WinForms Form (custom-drawn, WS_POPUP, no native chrome) rather than a raw NativeWindow.
+/// An earlier version used a raw NativeWindow to avoid Form/Control fighting SetParent-based
+/// z-order embedding onto Progman/WorkerW - but that embedding strategy is currently disabled
+/// (see FenceManager, which uses FloatingDesktopAnchorStrategy instead) so that concern doesn't
+/// apply right now. Being a real Form matters for a different reason: drag-and-drop needs to
+/// register as an OLE drop target, and a hand-rolled P/Invoke RegisterDragDrop/IDropTarget CCW
+/// turned out not to reliably receive DragEnter/Drop callbacks, while WinForms' own
+/// AllowDrop/OnDragEnter/OnDragDrop machinery does.
+///
+/// A fence owns its contents as a plain list of file paths (FenceModel.Files) and draws its own
+/// icon+label for each one (PaintItems) - the same approach used by NoFences
+/// (https://github.com/Twometer/NoFences), an open-source Stardock Fences alternative this app's
+/// drag-and-drop model is based on (see README's Credits section). It never touches the real
+/// desktop's icons/positions; dropping a file here just adds a reference to it, leaving whatever
+/// is on the actual desktop completely alone.
 /// </summary>
-public sealed class FenceForm : NativeWindow, IDisposable
+public sealed class FenceForm : Form
 {
     internal const int TitleBarHeight = 26;
     private const int ResizeMargin = 6;
@@ -38,16 +48,53 @@ public sealed class FenceForm : NativeWindow, IDisposable
     private const int HTBOTTOMRIGHT = 17;
 
     private const int CmdRename = 1;
-    private const int CmdArrange = 2;
     private const int CmdDelete = 3;
+    private const int CmdOpenItem = 4;
+    private const int CmdRemoveItem = 5;
+    private const int CmdRenameItem = 6;
+
+    private const int IconSize = 48;
+    private const int GridPadding = 8;
+    private const int IconTopPadding = 8;
+    private const int CellWidth = 84;
+    private const int CellHeight = 94;
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
     private readonly IDesktopAnchorStrategy _anchorStrategy;
     private readonly Font _font = new("Segoe UI", 9f);
+    private readonly Dictionary<string, Icon?> _iconCache = new();
     private EditBox? _renameBox;
+    private EditBox? _itemRenameBox;
+    private string? _itemRenamePath;
+    private string? _contextItem;
+    private int _hoverIndex = -1;
 
     public Guid FenceId => _model.Id;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+
+            // Control's base constructor probes CreateParams before our own constructor body has
+            // run (so _model is still null at that point) - the real, model-driven CreateParams
+            // request comes later, when the constructor body first touches Handle.
+            if (_model is null)
+                return cp;
+
+            // WS_CLIPCHILDREN is essential: without it, our own WM_PAINT full-repaint draws
+            // over the rename EditBox child window instead of leaving its area alone.
+            cp.Style = NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPCHILDREN;
+            cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
+            cp.X = _model.Bounds.X;
+            cp.Y = _model.Bounds.Y;
+            cp.Width = _model.Bounds.Width;
+            cp.Height = _model.Bounds.Height;
+            return cp;
+        }
+    }
 
     public FenceForm(FenceModel model, FenceManager manager, IDesktopAnchorStrategy anchorStrategy)
     {
@@ -55,25 +102,17 @@ public sealed class FenceForm : NativeWindow, IDisposable
         _manager = manager;
         _anchorStrategy = anchorStrategy;
 
-        var cp = new CreateParams
-        {
-            // WS_CLIPCHILDREN is essential: without it, our own WM_PAINT full-repaint draws
-            // over the rename EditBox child window instead of leaving its area alone.
-            Style = NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPCHILDREN,
-            ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED,
-            X = model.Bounds.X,
-            Y = model.Bounds.Y,
-            Width = model.Bounds.Width,
-            Height = model.Bounds.Height,
-        };
-        CreateHandle(cp);
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        AllowDrop = true;
 
         NativeMethods.SetLayeredWindowAttributes(Handle, 0, (byte)(0.85 * 255), NativeMethods.LWA_ALPHA);
         ApplyRoundedRegion(model.Bounds.Width, model.Bounds.Height);
         Reanchor();
     }
 
-    public void Show() => NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
+    public new void Show() => NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
 
     public void SetVisible(bool visible) =>
         NativeMethods.ShowWindow(Handle, visible ? NativeMethods.SW_SHOWNOACTIVATE : NativeMethods.SW_HIDE);
@@ -84,12 +123,58 @@ public sealed class FenceForm : NativeWindow, IDisposable
     /// convention the current native parent implies.</summary>
     public void Reanchor() => _anchorStrategy.Apply(Handle, _model.Bounds);
 
-    public void Dispose()
+    protected override void Dispose(bool disposing)
     {
-        _renameBox?.Dispose();
-        _font.Dispose();
-        if (Handle != IntPtr.Zero)
-            DestroyHandle();
+        if (disposing)
+        {
+            _renameBox?.Dispose();
+            _itemRenameBox?.Dispose();
+            _font.Dispose();
+            foreach (var icon in _iconCache.Values)
+                icon?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    protected override void OnDragEnter(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true)
+            e.Effect = DragDropEffects.Move;
+    }
+
+    protected override void OnDragDrop(DragEventArgs e)
+    {
+        if (e.Data?.GetData(DataFormats.FileDrop) is not string[] paths)
+            return;
+
+        _manager.AddFiles(FenceId, paths);
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        OpenItem(FileAtGridPosition(e.Location));
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        SetHoverIndex(IndexAtGridPosition(e.Location) ?? -1);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        SetHoverIndex(-1);
+    }
+
+    private void SetHoverIndex(int index)
+    {
+        if (index == _hoverIndex)
+            return;
+        _hoverIndex = index;
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
     }
 
     protected override void WndProc(ref Message m)
@@ -108,15 +193,16 @@ public sealed class FenceForm : NativeWindow, IDisposable
                 return;
 
             case WM_ERASEBKGND:
-                m.Result = (IntPtr)1; // Paint() always fills the whole client area; avoids flicker
+                m.Result = (IntPtr)1; // PaintFence() always fills the whole client area; avoids flicker
                 return;
 
             case WM_PAINT:
-                Paint();
+                PaintFence();
                 return;
 
             case WM_RBUTTONUP:
-                ShowContextMenu();
+                var clientPoint = new Point((short)(m.LParam.ToInt64() & 0xFFFF), (short)((m.LParam.ToInt64() >> 16) & 0xFFFF));
+                ShowContextMenu(clientPoint);
                 return;
 
             case WM_COMMAND:
@@ -185,7 +271,7 @@ public sealed class FenceForm : NativeWindow, IDisposable
         return HTCLIENT;
     }
 
-    private void Paint()
+    private void PaintFence()
     {
         var hdc = NativeMethods.BeginPaint(Handle, out var ps);
         try
@@ -196,6 +282,10 @@ public sealed class FenceForm : NativeWindow, IDisposable
 
             using var g = Graphics.FromHdc(hdc);
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            // DrawIcon's native GDI stretch looks jagged when scaling a source icon down to
+            // IconSize - drawing icons as bitmaps under high-quality interpolation instead avoids that.
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
             using var body = RoundedRect(new Rectangle(0, 0, width - 1, height - 1), CornerRadius);
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
@@ -213,11 +303,118 @@ public sealed class FenceForm : NativeWindow, IDisposable
                 TextRenderer.DrawText(g, _model.Name, _font, new Rectangle(8, 0, width - 16, TitleBarHeight),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
+
+            PaintItems(g, width);
         }
         finally
         {
             NativeMethods.EndPaint(Handle, ref ps);
         }
+    }
+
+    /// <summary>
+    /// Draws this fence's own icon+label for each file it holds, in a simple grid below the title
+    /// bar - the fence never touches the real desktop icons (see FenceManager.AddFiles), so this is
+    /// the only place those files are actually represented on screen.
+    /// </summary>
+    private void PaintItems(Graphics g, int width)
+    {
+        if (_model.Files.Count == 0)
+            return;
+
+        var columns = Math.Max(1, (width - GridPadding * 2) / CellWidth);
+
+        for (int i = 0; i < _model.Files.Count; i++)
+        {
+            var item = _model.Files[i];
+            var column = i % columns;
+            var row = i / columns;
+            var cellX = GridPadding + column * CellWidth;
+            var cellY = TitleBarHeight + GridPadding + row * CellHeight;
+
+            if (i == _hoverIndex)
+            {
+                using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
+                using var hoverRect = RoundedRect(new Rectangle(cellX, cellY, CellWidth, CellHeight), 4);
+                g.FillPath(hoverBrush, hoverRect);
+            }
+
+            var icon = GetIcon(item.Path);
+            if (icon is not null)
+            {
+                var iconX = cellX + (CellWidth - IconSize) / 2;
+                using var bitmap = icon.ToBitmap();
+                g.DrawImage(bitmap, new Rectangle(iconX, cellY + IconTopPadding, IconSize, IconSize));
+            }
+
+            if (item.Path == _itemRenamePath)
+                continue;
+
+            var labelRect = new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, CellHeight - IconTopPadding - IconSize - 2);
+            TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
+        }
+    }
+
+    /// <summary>An explicit rename (set via the item's context menu) always wins; otherwise
+    /// shortcuts display without their .lnk extension, matching how Explorer shows them on the
+    /// real desktop, and other files keep their extension.</summary>
+    private static string GetDisplayName(FenceItem item)
+    {
+        if (!string.IsNullOrEmpty(item.DisplayName))
+            return item.DisplayName;
+
+        return string.Equals(Path.GetExtension(item.Path), ".lnk", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileNameWithoutExtension(item.Path)
+            : Path.GetFileName(item.Path);
+    }
+
+    private Icon? GetIcon(string path)
+    {
+        if (_iconCache.TryGetValue(path, out var cached))
+            return cached;
+
+        Icon? icon = null;
+        try
+        {
+            // The shell's large image list gives a genuinely high-resolution icon (crisp at
+            // IconSize) rather than the ~32px one Icon.ExtractAssociatedIcon returns, which looks
+            // blurry once drawn at a larger size - only fall back to it if the shell lookup fails.
+            icon = ShellIcons.ExtractLargeIcon(path) ?? Icon.ExtractAssociatedIcon(path);
+        }
+        catch (IOException)
+        {
+            // File may have been moved/deleted since it was dropped here.
+        }
+        catch (System.Security.SecurityException)
+        {
+        }
+
+        _iconCache[path] = icon;
+        return icon;
+    }
+
+    private string? FileAtGridPosition(Point clientLocation)
+    {
+        var index = IndexAtGridPosition(clientLocation);
+        return index is int i ? _model.Files[i].Path : null;
+    }
+
+    private int? IndexAtGridPosition(Point clientLocation)
+    {
+        if (_model.Files.Count == 0 || clientLocation.Y < TitleBarHeight)
+            return null;
+
+        NativeMethods.GetClientRect(Handle, out var clientRect);
+        var columns = Math.Max(1, (clientRect.Right - GridPadding * 2) / CellWidth);
+
+        var column = (clientLocation.X - GridPadding) / CellWidth;
+        var row = (clientLocation.Y - TitleBarHeight - GridPadding) / CellHeight;
+        if (column < 0 || column >= columns || row < 0)
+            return null;
+
+        var index = row * columns + column;
+        return index >= 0 && index < _model.Files.Count ? index : null;
     }
 
     private void ApplyRoundedRegion(int width, int height)
@@ -230,17 +427,26 @@ public sealed class FenceForm : NativeWindow, IDisposable
         NativeMethods.SetWindowRgn(Handle, hrgn, true);
     }
 
-    private void ShowContextMenu()
+    private void ShowContextMenu(Point clientPoint)
     {
+        _contextItem = FileAtGridPosition(clientPoint);
         NativeMethods.GetCursorPos(out var pt);
 
         var hMenu = NativeMethods.CreatePopupMenu();
         try
         {
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRename, "Rename");
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdArrange, "Arrange Icons Now");
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdDelete, "Delete Fence");
+            if (_contextItem is not null)
+            {
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdOpenItem, "Open");
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRenameItem, "Rename");
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRemoveItem, "Remove From Fence");
+            }
+            else
+            {
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRename, "Rename");
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
+                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdDelete, "Delete Fence");
+            }
 
             NativeMethods.SetForegroundWindow(Handle);
             NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_RIGHTBUTTON, pt.X, pt.Y, Handle, IntPtr.Zero);
@@ -256,9 +462,35 @@ public sealed class FenceForm : NativeWindow, IDisposable
         switch (id)
         {
             case CmdRename: BeginRename(); break;
-            case CmdArrange: _manager.ArrangeFence(FenceId); break;
             case CmdDelete: ConfirmDelete(); break;
+            case CmdOpenItem: OpenItem(_contextItem); break;
+            case CmdRemoveItem: RemoveItem(_contextItem); break;
+            case CmdRenameItem: BeginRenameItem(_contextItem); break;
         }
+    }
+
+    private void OpenItem(string? path)
+    {
+        if (path is null)
+            return;
+
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // The file may have been moved/deleted since it was dropped here - nothing to do.
+        }
+    }
+
+    private void RemoveItem(string? path)
+    {
+        if (path is null)
+            return;
+
+        _manager.RemoveFile(FenceId, path);
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
     }
 
     private void BeginRename()
@@ -293,10 +525,55 @@ public sealed class FenceForm : NativeWindow, IDisposable
         NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
     }
 
+    private void BeginRenameItem(string? path)
+    {
+        if (path is null || _itemRenameBox is not null)
+            return;
+
+        var index = _model.Files.FindIndex(f => f.Path == path);
+        if (index < 0 || !NativeMethods.GetClientRect(Handle, out var clientRect))
+            return;
+
+        var columns = Math.Max(1, (clientRect.Right - GridPadding * 2) / CellWidth);
+        var column = index % columns;
+        var row = index / columns;
+        var cellX = GridPadding + column * CellWidth;
+        var cellY = TitleBarHeight + GridPadding + row * CellHeight;
+        var labelRect = new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20);
+
+        _itemRenamePath = path;
+        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), labelRect);
+        _itemRenameBox.Commit += OnItemRenameCommit;
+        _itemRenameBox.Cancel += OnItemRenameCancel;
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+    }
+
+    private void OnItemRenameCommit(string newName)
+    {
+        _itemRenameBox?.Dispose();
+        _itemRenameBox = null;
+        var path = _itemRenamePath;
+        _itemRenamePath = null;
+
+        newName = newName.Trim();
+        if (!string.IsNullOrEmpty(newName) && path is not null)
+            _manager.RenameFile(FenceId, path, newName);
+
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+    }
+
+    private void OnItemRenameCancel()
+    {
+        _itemRenameBox?.Dispose();
+        _itemRenameBox = null;
+        _itemRenamePath = null;
+        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+    }
+
     private void ConfirmDelete()
     {
-        var result = MessageBox.Show(new Win32Window(Handle),
-            $"Delete fence \"{_model.Name}\"? Icons inside it will remain on the desktop.",
+        var result = MessageBox.Show(this,
+            $"Delete fence \"{_model.Name}\"? The files inside it won't be deleted.",
             "Delete Fence", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
 
         if (result == DialogResult.Yes)
@@ -324,11 +601,5 @@ public sealed class FenceForm : NativeWindow, IDisposable
         path.AddLine(bounds.Right, bounds.Bottom, bounds.X, bounds.Bottom);
         path.CloseFigure();
         return path;
-    }
-
-    private sealed class Win32Window : IWin32Window
-    {
-        public Win32Window(IntPtr handle) => Handle = handle;
-        public IntPtr Handle { get; }
     }
 }

@@ -194,12 +194,13 @@ public sealed class DesktopListView : IDisposable
             if (remoteLvItem == IntPtr.Zero || remoteText == IntPtr.Zero || remotePoint == IntPtr.Zero)
                 return Array.Empty<DesktopIcon>();
 
+            var origin = GetListViewOrigin();
             var results = new List<DesktopIcon>(count);
             for (int i = 0; i < count; i++)
             {
                 var label = ReadItemText(hProcess, i, remoteLvItem, remoteText, textBufferChars, lvItemSize);
                 var position = ReadItemPosition(hProcess, i, remotePoint, pointSize);
-                results.Add(new DesktopIcon(i, label, position));
+                results.Add(new DesktopIcon(i, label, new Point(position.X + origin.X, position.Y + origin.Y)));
             }
 
             return results;
@@ -245,9 +246,10 @@ public sealed class DesktopListView : IDisposable
             if (remotePoint == IntPtr.Zero)
                 return false;
 
+            var origin = GetListViewOrigin();
             foreach (var (index, position) in placements)
             {
-                var point = new POINT { X = position.X, Y = position.Y };
+                var point = new POINT { X = position.X - origin.X, Y = position.Y - origin.Y };
                 var bytes = StructToBytes(point, pointSize);
                 if (!NativeMethods.WriteProcessMemory(hProcess, remotePoint, bytes, (uint)pointSize, out _))
                     continue;
@@ -275,6 +277,17 @@ public sealed class DesktopListView : IDisposable
             NativeMethods.CloseHandle(hProcess);
         }
     }
+
+    /// <summary>
+    /// LVM_GETITEMPOSITION/LVM_SETITEMPOSITION32 use coordinates relative to the listview's own
+    /// client area, which starts at the top-left of the *virtual* screen (spanning all monitors) -
+    /// not at (0, 0). On a multi-monitor setup where another monitor sits left of or above the
+    /// primary one, that origin is a negative screen coordinate. Everything else in this app (fence
+    /// bounds, via GetWindowRect) works in absolute screen coordinates, so reads/writes here must
+    /// translate through this origin or icons land shifted by exactly that monitor's offset.
+    /// </summary>
+    private Point GetListViewOrigin() =>
+        NativeMethods.GetWindowRect(_hListView, out var rect) ? new Point(rect.Left, rect.Top) : Point.Empty;
 
     private string ReadItemText(IntPtr hProcess, int index, IntPtr remoteLvItem, IntPtr remoteText,
         int textBufferChars, int lvItemSize)

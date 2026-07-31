@@ -10,7 +10,6 @@ public sealed class FenceManager : IDisposable
     private readonly IDesktopAnchorStrategy _anchorStrategy;
     private readonly List<FenceModel> _models = new();
     private readonly Dictionary<Guid, FenceForm> _forms = new();
-    private readonly System.Windows.Forms.Timer _membershipTimer;
 
     public FenceManager()
     {
@@ -19,22 +18,14 @@ public sealed class FenceManager : IDisposable
         // even in empty desktop areas, and mouse input there stops reaching it - the icon view
         // appears to paint an opaque background rather than leaving transparent gaps. See that
         // class's doc comment for details. Using the floating strategy so fences stay visible
-        // and interactive; this means dragging a real icon onto a fence still shows the OS's
-        // "no drop" cursor rather than passing through.
+        // and interactive.
         _anchorStrategy = new FloatingDesktopAnchorStrategy();
         _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
         _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
-
-        // Fence create/move/resize already refresh membership on their own, but that doesn't
-        // catch the far more common case: the user drags a real desktop icon onto an already-
-        // placed, stationary fence. Polling here is what actually makes an icon "go into" a fence.
-        _membershipTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-        _membershipTimer.Tick += (_, _) => DetectIconMovement();
-        _membershipTimer.Start();
     }
 
     /// <summary>Fires when explorer.exe is running at a different privilege level than this app,
-    /// so desktop icon management can't work until that's resolved.</summary>
+    /// so the desktop anchor can't be applied until that's resolved.</summary>
     public event EventHandler? DesktopAccessDenied;
 
     public void LoadAndShowAll()
@@ -43,7 +34,6 @@ public sealed class FenceManager : IDisposable
         _models.AddRange(_store.Load());
         foreach (var model in _models)
             ShowFence(model);
-        RefreshMembership();
     }
 
     public void CreateFence()
@@ -55,7 +45,6 @@ public sealed class FenceManager : IDisposable
         };
         _models.Add(model);
         ShowFence(model);
-        RefreshMembership();
         Save();
     }
 
@@ -73,136 +62,57 @@ public sealed class FenceManager : IDisposable
         if (model is null)
             return;
         model.Bounds = bounds;
-        RefreshMembership();
         Save();
     }
 
     public void Dispose()
     {
-        _membershipTimer.Stop();
-        _membershipTimer.Dispose();
         _desktopListView.Dispose();
     }
 
-    public void ArrangeFence(Guid id)
+    /// <summary>
+    /// Adds dropped files to a fence's own contents - unlike the desktop's real icons, these are
+    /// just paths the fence remembers and draws its own icon+label for (via FenceForm's paint
+    /// logic), the same way NoFences and similar tools work. The original file/shortcut on the
+    /// desktop (if any) is left completely alone; nothing about the real desktop icon layout is
+    /// touched. Paths that don't exist or are already in this fence are silently skipped.
+    /// </summary>
+    public void AddFiles(Guid fenceId, IReadOnlyList<string> filePaths)
     {
-        var model = _models.Find(m => m.Id == id);
+        var model = _models.Find(m => m.Id == fenceId);
         if (model is null)
             return;
 
-        ArrangeModel(model);
-        Save();
-    }
-
-    public void ArrangeAll()
-    {
-        foreach (var model in _models)
-            ArrangeModel(model);
-        Save();
-    }
-
-    private const int ArrangePadding = 8;
-
-    /// <summary>
-    /// Lays out this fence's member icons in a simple row-major grid inside its bounds
-    /// (below the title bar), using the user's actual desktop icon spacing so the grid
-    /// matches what Explorer would normally use.
-    /// </summary>
-    private void ArrangeModel(FenceModel model)
-    {
-        var icons = _desktopListView.EnumerateIcons();
-        var members = icons.Where(icon => model.IconNames.Contains(icon.Label)).ToList();
-        if (members.Count == 0)
-            return;
-
-        var (horizontalSpacing, verticalSpacing) = IconMetrics.GetIconSpacing();
-
-        var placements = new List<(int Index, Point Position)>(members.Count);
-        for (int i = 0; i < members.Count; i++)
-            placements.Add((members[i].Index, GridSlotPosition(model, i, horizontalSpacing, verticalSpacing)));
-
-        _desktopListView.SetItemPositions(placements);
-    }
-
-    private static Point GridSlotPosition(FenceModel model, int slot, int horizontalSpacing, int verticalSpacing)
-    {
-        var originX = model.Bounds.X + ArrangePadding;
-        var originY = model.Bounds.Y + FenceForm.TitleBarHeight + ArrangePadding;
-        var availableWidth = Math.Max(model.Bounds.Width - ArrangePadding * 2, horizontalSpacing);
-        var columns = Math.Max(1, availableWidth / horizontalSpacing);
-
-        var column = slot % columns;
-        var row = slot / columns;
-        return new Point(originX + column * horizontalSpacing, originY + row * verticalSpacing);
-    }
-
-    /// <summary>
-    /// Recomputes which desktop icons fall inside each fence's bounds (by the icon's current
-    /// position) and records them by label, without moving anything - used when a fence itself
-    /// is created/moved/resized, where snapping whatever now happens to be underneath it into a
-    /// grid would feel like an unexpected side effect of resizing.
-    /// </summary>
-    private void RefreshMembership()
-    {
-        var icons = _desktopListView.EnumerateIcons();
-        if (icons.Count == 0)
-            return;
-
-        foreach (var model in _models)
+        var added = false;
+        foreach (var path in filePaths)
         {
-            model.IconNames = icons
-                .Where(icon => model.Bounds.Contains(icon.Position))
-                .Select(icon => icon.Label)
-                .ToList();
-        }
-    }
-
-    /// <summary>
-    /// Detects icons the user has manually dragged onto (or away from) a fence since the last
-    /// check, and snaps newly-arrived icons into the next open grid slot immediately - this is
-    /// what actually makes dragging an icon onto a fence feel like it "goes into" it. Icons
-    /// already tracked as members are left wherever they currently are, so this doesn't fight
-    /// the user by continuously re-arranging things they've manually repositioned.
-    /// </summary>
-    private void DetectIconMovement()
-    {
-        var icons = _desktopListView.EnumerateIcons();
-        if (icons.Count == 0)
-            return;
-
-        var changed = false;
-        var (horizontalSpacing, verticalSpacing) = IconMetrics.GetIconSpacing();
-
-        foreach (var model in _models)
-        {
-            var currentMembers = icons.Where(icon => model.Bounds.Contains(icon.Position)).ToList();
-            var currentLabels = currentMembers.Select(icon => icon.Label).ToHashSet();
-            var previousLabels = model.IconNames.ToHashSet();
-
-            var departed = model.IconNames.Where(name => !currentLabels.Contains(name)).ToList();
-            foreach (var name in departed)
-            {
-                model.IconNames.Remove(name);
-                changed = true;
-            }
-
-            var arrivals = currentMembers.Where(icon => !previousLabels.Contains(icon.Label)).ToList();
-            if (arrivals.Count == 0)
+            if (model.Files.Any(f => f.Path == path) || (!File.Exists(path) && !Directory.Exists(path)))
                 continue;
-
-            var placements = new List<(int Index, Point Position)>(arrivals.Count);
-            foreach (var icon in arrivals)
-            {
-                placements.Add((icon.Index, GridSlotPosition(model, model.IconNames.Count, horizontalSpacing, verticalSpacing)));
-                model.IconNames.Add(icon.Label);
-            }
-
-            _desktopListView.SetItemPositions(placements);
-            changed = true;
+            model.Files.Add(new FenceItem { Path = path });
+            added = true;
         }
 
-        if (changed)
+        if (added)
             Save();
+    }
+
+    public void RemoveFile(Guid fenceId, string path)
+    {
+        var model = _models.Find(m => m.Id == fenceId);
+        if (model is null || model.Files.RemoveAll(f => f.Path == path) == 0)
+            return;
+        Save();
+    }
+
+    /// <summary>Sets an item's display name within this fence only - never renames the real file.</summary>
+    public void RenameFile(Guid fenceId, string path, string displayName)
+    {
+        var model = _models.Find(m => m.Id == fenceId);
+        var item = model?.Files.Find(f => f.Path == path);
+        if (item is null)
+            return;
+        item.DisplayName = displayName;
+        Save();
     }
 
     public void NotifyRenamed(Guid id, string name)
