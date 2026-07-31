@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using FenceTool.Fences;
 using FenceTool.Native;
 
@@ -38,7 +39,9 @@ public sealed class FenceForm : Form
     // since Windows treats fully-transparent pixels as click-through; a hard region couldn't do
     // this at all (you can't hit-test past a window's own rectangle). Painted at a barely-non-zero
     // alpha (see RenderAndPresent) since alpha 0 would be click-through too, defeating the point.
-    private const int OuterMargin = 8;
+    // Also doubles as where the settings cog now lives (always outside the visible fence, to the
+    // right of its top-right corner) - sized to comfortably fit it, not just resize-grabbing.
+    private const int OuterMargin = 26;
     private const int CornerRadius = 16;
     private const float FenceOpacity = 0.85f;
 
@@ -68,6 +71,7 @@ public sealed class FenceForm : Form
     private const int CmdRemoveItem = 5;
     private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
+    private const int CmdToggleHideTitle = 8;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -77,7 +81,9 @@ public sealed class FenceForm : Form
     private const int ScrollbarWidth = 6;
     private const int ScrollbarMargin = 3;
     private const int CogSize = 16;
-    private const int CogMargin = 6;
+    private const int CogTopOffset = 6;
+    private const int MenuCheckboxSize = 12;
+    private const int MenuTextPadding = 8;
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
@@ -117,6 +123,10 @@ public sealed class FenceForm : Form
     /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
     /// plus a little breathing room, since there's no label text to make room for underneath.</summary>
     private int EffectiveCellHeight => _model.HideLabels ? IconTopPadding + IconSize + 8 : CellHeight;
+
+    /// <summary>Where the item grid starts, content-relative - below the title bar normally, or
+    /// right at the top when FenceModel.HideTitle reclaims that space entirely.</summary>
+    private int GridTop => _model.HideTitle ? 0 : TitleBarHeight;
 
     protected override CreateParams CreateParams
     {
@@ -191,13 +201,16 @@ public sealed class FenceForm : Form
 
         var columns = GetColumns(contentWidth);
         var rows = (_model.Files.Count + columns - 1) / columns;
-        var availableHeight = Math.Max(0, contentHeight - TitleBarHeight - GridPadding * 2);
+        var availableHeight = Math.Max(0, contentHeight - GridTop - GridPadding * 2);
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Content-relative; only meaningful while _isActive (the cog isn't shown otherwise).</summary>
+    /// <summary>Content-relative, positioned just outside the visible fence (to the right of its
+    /// top-right corner, in the OuterMargin band) rather than inside the title bar - works the same
+    /// whether or not FenceModel.HideTitle leaves a title bar to put it in. Only meaningful while
+    /// _isActive (the cog isn't shown otherwise).</summary>
     private static Rectangle GetCogRect(int contentWidth) =>
-        new(contentWidth - CogSize - CogMargin, (TitleBarHeight - CogSize) / 2, CogSize, CogSize);
+        new(contentWidth + (OuterMargin - CogSize) / 2, CogTopOffset, CogSize, CogSize);
 
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
@@ -208,7 +221,7 @@ public sealed class FenceForm : Form
         if (maxScroll <= 0)
             return null;
 
-        var trackTop = TitleBarHeight + GridPadding;
+        var trackTop = GridTop + GridPadding;
         var trackHeight = Math.Max(0, contentHeight - trackTop - GridPadding);
         var trackX = contentWidth - ScrollbarWidth - ScrollbarMargin;
         var totalHeight = trackHeight + maxScroll;
@@ -266,7 +279,13 @@ public sealed class FenceForm : Form
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
-        OpenItem(FileAtGridPosition(ToContent(e.Location)));
+
+        var path = FileAtGridPosition(ToContent(e.Location));
+        if (path is not null)
+            OpenItem(path);
+        else if (_model.HideTitle)
+            // No title bar to double-click when it's hidden - empty background stands in for it.
+            BeginRename();
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -313,6 +332,15 @@ public sealed class FenceForm : Form
         {
             _dragArmIndex = index;
             _dragArmPoint = e.Location; // raw window-space is fine here - only ever used as a delta
+            return;
+        }
+
+        if (_model.HideTitle)
+        {
+            // No title bar to grab when it's hidden - forward the click-drag to the OS's own
+            // caption-move handling, the standard trick for a draggable-by-its-body borderless window.
+            NativeMethods.ReleaseCapture();
+            NativeMethods.SendMessage(Handle, NativeMethods.WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
         }
     }
 
@@ -454,6 +482,23 @@ public sealed class FenceForm : Form
             case WM_COMMAND:
                 HandleCommand(m.WParam.ToInt32() & 0xFFFF);
                 return;
+
+            case NativeMethods.WM_MEASUREITEM:
+                var mis = Marshal.PtrToStructure<MEASUREITEMSTRUCT>(m.LParam);
+                if (mis.CtlType == NativeMethods.ODT_MENU)
+                {
+                    MeasureMenuItem(ref mis);
+                    Marshal.StructureToPtr(mis, m.LParam, false);
+                }
+                m.Result = (IntPtr)1;
+                return;
+
+            case NativeMethods.WM_DRAWITEM:
+                var dis = Marshal.PtrToStructure<DRAWITEMSTRUCT>(m.LParam);
+                if (dis.CtlType == NativeMethods.ODT_MENU)
+                    DrawMenuItem(dis);
+                m.Result = (IntPtr)1;
+                return;
         }
 
         base.WndProc(ref m);
@@ -514,7 +559,9 @@ public sealed class FenceForm : Form
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
 
-        if (y - OuterMargin <= TitleBarHeight)
+        // No title bar to grab when it's hidden - OnMouseDown forwards an empty-background drag
+        // to a native move instead (ReleaseCapture + WM_NCLBUTTONDOWN), so this stays HTCLIENT.
+        if (!_model.HideTitle && y - OuterMargin <= TitleBarHeight)
             return HTCAPTION;
 
         return HTCLIENT;
@@ -571,26 +618,36 @@ public sealed class FenceForm : Form
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
             g.FillPath(bodyFill, body);
 
-            using var titleFill = new SolidBrush(Color.FromArgb(255, 20, 20, 24));
-            using var titlePath = RoundedRectTop(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight)), CornerRadius);
-            g.FillPath(titleFill, titlePath);
+            if (!_model.HideTitle)
+            {
+                using var titleFill = new SolidBrush(Color.FromArgb(255, 20, 20, 24));
+                using var titlePath = RoundedRectTop(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight)), CornerRadius);
+                g.FillPath(titleFill, titlePath);
+            }
 
             using var borderPen = new Pen(Color.FromArgb(255, 70, 70, 78));
             g.DrawPath(borderPen, body);
 
-            // Leave room for the cog so long fence names don't run under it, whether or not it's
-            // actually showing right now - avoids the title text visibly shifting width as the
-            // fence activates/deactivates.
-            var titleWidth = contentWidth - 16 - CogSize - CogMargin;
-            if (_renameBox is null)
+            if (!_model.HideTitle && _renameBox is null)
             {
-                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, titleWidth, TitleBarHeight)),
+                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleBarHeight)),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
 
             if (_isActive)
             {
                 var cogRect = ToWindow(GetCogRect(contentWidth));
+
+                // The cog now lives in the near-transparent OuterMargin band (see that constant's
+                // comment) rather than on the opaque title bar it used to sit on. GDI's
+                // TextRenderer.DrawText only ever writes RGB, never alpha, so without an opaque
+                // backing first, the glyph would inherit the margin's near-zero alpha and vanish
+                // once WritePremultipliedPixels scales it down - the same class of bug as the old
+                // scrolled-item-over-transparent-background issue, just for text instead of images.
+                using var cogBackingFill = new SolidBrush(Color.FromArgb(255, 40, 40, 46));
+                using var cogBackingPath = RoundedRect(Rectangle.Inflate(cogRect, 3, 3), 6);
+                g.FillPath(cogBackingFill, cogBackingPath);
+
                 TextRenderer.DrawText(g, "\uE713", _cogFont, cogRect, Color.Silver,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
@@ -611,9 +668,9 @@ public sealed class FenceForm : Form
         if (_model.Files.Count == 0)
             return;
 
-        // Items scrolled above the title bar or below the fence's bottom edge must not be able to
+        // Items scrolled above the grid top or below the fence's bottom edge must not be able to
         // paint there - see the SetClip comment above for why that's not just a visibility issue.
-        g.SetClip(ToWindow(new Rectangle(0, TitleBarHeight, width, height - TitleBarHeight)), CombineMode.Intersect);
+        g.SetClip(ToWindow(new Rectangle(0, GridTop, width, height - GridTop)), CombineMode.Intersect);
 
         var columns = GetColumns(width);
 
@@ -624,14 +681,14 @@ public sealed class FenceForm : Form
             var column = i % columns;
             var row = i / columns;
             var cellX = GridPadding + column * CellWidth;
-            var cellY = TitleBarHeight + GridPadding + row * EffectiveCellHeight - _scrollOffset;
+            var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollOffset;
 
-            // A scrolled row can straddle the title-bar boundary. g.Clip normally handles that for
+            // A scrolled row can straddle the grid-top boundary. g.Clip normally handles that for
             // shapes/icons (GDI+ respects it), but TextRenderer.DrawText (GDI) draws its text in
             // full regardless of the clip region - the same disregard-for-Graphics-state quirk as
             // TranslateTransform above, just for clipping instead of position. So icons rely on the
             // clip as usual, but labels only draw when their whole rect is already within bounds.
-            if (cellY + EffectiveCellHeight <= TitleBarHeight || cellY >= height)
+            if (cellY + EffectiveCellHeight <= GridTop || cellY >= height)
                 continue;
 
             if (i == _hoverIndex && !isDragSource)
@@ -660,7 +717,7 @@ public sealed class FenceForm : Form
 
             var labelTop = cellY + IconTopPadding + IconSize + 2;
             var labelHeight = CellHeight - IconTopPadding - IconSize - 2;
-            if (labelTop >= TitleBarHeight)
+            if (labelTop >= GridTop)
             {
                 // Only the bottom can need trimming here (the top is already in bounds), so
                 // shrinking the rect's height is a true clip - unlike g.Clip, TextRenderer.DrawText
@@ -707,7 +764,7 @@ public sealed class FenceForm : Form
 
         var columns = GetColumns(width);
         var cellX = GridPadding + targetIndex % columns * CellWidth;
-        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
+        var cellY = GridTop + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
 
         using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
         using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, EffectiveCellHeight - 2)), 4);
@@ -760,13 +817,13 @@ public sealed class FenceForm : Form
 
     private int? IndexAtGridPosition(Point contentLocation)
     {
-        if (_model.Files.Count == 0 || contentLocation.Y < TitleBarHeight)
+        if (_model.Files.Count == 0 || contentLocation.Y < GridTop)
             return null;
 
         var columns = GetColumns(GetContentSize().Width);
 
         var column = (contentLocation.X - GridPadding) / CellWidth;
-        var row = (contentLocation.Y - TitleBarHeight - GridPadding + _scrollOffset) / EffectiveCellHeight;
+        var row = (contentLocation.Y - GridTop - GridPadding + _scrollOffset) / EffectiveCellHeight;
         if (column < 0 || column >= columns || row < 0)
             return null;
 
@@ -813,10 +870,34 @@ public sealed class FenceForm : Form
         var menuPoint = PointToScreen(ToWindow(new Point(cogRect.X, cogRect.Bottom + 2)));
 
         var hMenu = NativeMethods.CreatePopupMenu();
+        var backBrush = IntPtr.Zero;
         try
         {
-            var hideLabelsFlags = NativeMethods.MF_STRING | (_model.HideLabels ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
-            NativeMethods.AppendMenu(hMenu, hideLabelsFlags, (IntPtr)CmdToggleHideLabels, "Hide Shortcut Names");
+            // MF_OWNERDRAW rather than MF_STRING so the menu can be painted dark (matching the
+            // fence) instead of the native Windows menu chrome - see MeasureMenuItem/DrawMenuItem,
+            // wired up via WM_MEASUREITEM/WM_DRAWITEM in WndProc. The label text isn't passed here
+            // (an owner-draw item's lpNewItem is stored as raw item data, not text, and the marshaled
+            // string pointer would be freed once this call returns anyway) - it's looked up from the
+            // command id instead, in GetMenuItemText.
+            var hideLabelsFlags = NativeMethods.MF_OWNERDRAW | (_model.HideLabels ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
+            NativeMethods.AppendMenu(hMenu, hideLabelsFlags, (IntPtr)CmdToggleHideLabels, string.Empty);
+
+            var hideTitleFlags = NativeMethods.MF_OWNERDRAW | (_model.HideTitle ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
+            NativeMethods.AppendMenu(hMenu, hideTitleFlags, (IntPtr)CmdToggleHideTitle, string.Empty);
+
+            // WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
+            // separately filled by the menu's own background brush, which defaults to the system's
+            // (light) COLOR_MENU and shows through as a stray light border around the dark rows
+            // unless replaced here to match.
+            const uint menuBackColorRef = 32 | (32 << 8) | (36 << 16); // COLORREF 0x00BBGGRR for (32,32,36)
+            backBrush = NativeMethods.CreateSolidBrush(menuBackColorRef);
+            var menuInfo = new MENUINFO
+            {
+                cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
+                fMask = NativeMethods.MIM_BACKGROUND,
+                hbrBack = backBrush,
+            };
+            NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
 
             NativeMethods.SetForegroundWindow(Handle);
             NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_LEFTBUTTON, menuPoint.X, menuPoint.Y, Handle, IntPtr.Zero);
@@ -824,7 +905,56 @@ public sealed class FenceForm : Form
         finally
         {
             NativeMethods.DestroyMenu(hMenu);
+            if (backBrush != IntPtr.Zero)
+                NativeMethods.DeleteObject(backBrush);
         }
+    }
+
+    /// <summary>Owner-draw items don't carry their own text (see ShowFenceOptionsMenu) - it's
+    /// looked up here from the command id instead, shared by both MeasureMenuItem and DrawMenuItem.</summary>
+    private static string GetMenuItemText(int commandId) => commandId switch
+    {
+        CmdToggleHideLabels => "Hide Shortcut Names",
+        CmdToggleHideTitle => "Hide Title",
+        _ => string.Empty,
+    };
+
+    private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
+    {
+        var size = TextRenderer.MeasureText(GetMenuItemText((int)mis.itemID), _font);
+        mis.itemWidth = (uint)(size.Width + MenuCheckboxSize + MenuTextPadding * 3);
+        mis.itemHeight = (uint)Math.Max(size.Height + 8, 22);
+    }
+
+    /// <summary>Paints one row of the fence-options dropdown to match the fence's own dark theme,
+    /// instead of the native Windows menu look - background, a hand-drawn checkbox (no checkmark
+    /// glyph font is used, to sidestep the encoding issues that bit the cog glyph earlier - see the
+    /// cog's own  escape-sequence comment history), and the item's label text.</summary>
+    private void DrawMenuItem(DRAWITEMSTRUCT dis)
+    {
+        using var g = Graphics.FromHdc(dis.hDC);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var rect = Rectangle.FromLTRB(dis.rcItem.Left, dis.rcItem.Top, dis.rcItem.Right, dis.rcItem.Bottom);
+        var selected = (dis.itemState & NativeMethods.ODS_SELECTED) != 0;
+        var isChecked = (dis.itemState & NativeMethods.ODS_CHECKED) != 0;
+
+        using (var background = new SolidBrush(selected ? Color.FromArgb(255, 55, 55, 62) : Color.FromArgb(255, 32, 32, 36)))
+            g.FillRectangle(background, rect);
+
+        var checkRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
+        using (var checkPen = new Pen(Color.FromArgb(255, 150, 150, 158)))
+            g.DrawRectangle(checkPen, checkRect);
+
+        if (isChecked)
+        {
+            using var checkMarkPen = new Pen(Color.FromArgb(255, 120, 170, 255), 2);
+            g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
+            g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
+        }
+
+        var textRect = new Rectangle(checkRect.Right + MenuTextPadding, rect.Y, rect.Width - checkRect.Width - MenuTextPadding * 2, rect.Height);
+        TextRenderer.DrawText(g, GetMenuItemText((int)dis.itemID), _font, textRect, Color.WhiteSmoke,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 
     private void HandleCommand(int id)
@@ -837,6 +967,7 @@ public sealed class FenceForm : Form
             case CmdRemoveItem: RemoveItem(_contextItem); break;
             case CmdRenameItem: BeginRenameItem(_contextItem); break;
             case CmdToggleHideLabels: ToggleHideLabels(); break;
+            case CmdToggleHideTitle: ToggleHideTitle(); break;
         }
     }
 
@@ -867,6 +998,12 @@ public sealed class FenceForm : Form
     private void ToggleHideLabels()
     {
         _manager.SetHideLabels(FenceId, !_model.HideLabels);
+        RenderAndPresent();
+    }
+
+    private void ToggleHideTitle()
+    {
+        _manager.SetHideTitle(FenceId, !_model.HideTitle);
         RenderAndPresent();
     }
 
@@ -918,11 +1055,11 @@ public sealed class FenceForm : Form
         var column = index % columns;
         var row = index / columns;
         var cellX = GridPadding + column * CellWidth;
-        var absoluteCellY = TitleBarHeight + GridPadding + row * EffectiveCellHeight;
+        var absoluteCellY = GridTop + GridPadding + row * EffectiveCellHeight;
 
         // Scroll the item's row fully into view first if it's currently scrolled off - otherwise
-        // the edit box could end up positioned above the title bar or below the fence entirely.
-        var gridTop = TitleBarHeight + GridPadding;
+        // the edit box could end up positioned above the grid top or below the fence entirely.
+        var gridTop = GridTop + GridPadding;
         var gridBottom = contentSize.Height - GridPadding;
         if (absoluteCellY - _scrollOffset < gridTop)
             _scrollOffset = Math.Max(0, absoluteCellY - gridTop);

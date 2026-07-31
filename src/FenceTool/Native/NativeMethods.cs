@@ -64,6 +64,43 @@ internal struct PAINTSTRUCT
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct MEASUREITEMSTRUCT
+{
+    public uint CtlType;
+    public uint CtlID;
+    public uint itemID;
+    public uint itemWidth;
+    public uint itemHeight;
+    public IntPtr itemData;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct DRAWITEMSTRUCT
+{
+    public uint CtlType;
+    public uint CtlID;
+    public uint itemID;
+    public uint itemAction;
+    public uint itemState;
+    public IntPtr hwndItem;
+    public IntPtr hDC;
+    public RECT rcItem;
+    public IntPtr itemData;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct MENUINFO
+{
+    public uint cbSize;
+    public uint fMask;
+    public uint dwStyle;
+    public uint cyMax;
+    public IntPtr hbrBack;
+    public uint dwContextHelpID;
+    public IntPtr dwMenuData;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct LVITEM
 {
     public uint mask;
@@ -141,8 +178,17 @@ internal static class NativeMethods
     public const uint MF_SEPARATOR = 0x0800;
     public const uint MF_CHECKED = 0x0008;
     public const uint MF_UNCHECKED = 0x0000;
+    public const uint MF_OWNERDRAW = 0x0100;
     public const uint TPM_LEFTBUTTON = 0x0000;
     public const uint TPM_RIGHTBUTTON = 0x0002;
+
+    public const int WM_DRAWITEM = 0x002B;
+    public const int WM_MEASUREITEM = 0x002C;
+    public const int WM_NCLBUTTONDOWN = 0x00A1;
+    public const uint ODT_MENU = 1;
+    public const uint MIM_BACKGROUND = 0x00000002;
+    public const uint ODS_SELECTED = 0x0001;
+    public const uint ODS_CHECKED = 0x0008;
 
     public const int EM_SETSEL = 0x00B1;
 
@@ -351,4 +397,15 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,
         IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetMenuInfo(IntPtr hMenu, ref MENUINFO lpcmi);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateSolidBrush(uint crColor);
 }

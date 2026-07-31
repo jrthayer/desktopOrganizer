@@ -52,6 +52,7 @@ public sealed class FenceModel
     public List<FenceItem> Files { get; set; } = new();
     public bool Collapsed { get; set; }
     public bool HideLabels { get; set; }
+    public bool HideTitle { get; set; }
 
     [JsonIgnore]
     public Rectangle Bounds
