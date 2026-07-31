@@ -25,6 +25,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
+        _trayIcon.DoubleClick += OnShowHideAll;
 
         _fenceManager.DesktopAccessDenied += OnDesktopAccessDenied;
         _fenceManager.LoadAndShowAll();
