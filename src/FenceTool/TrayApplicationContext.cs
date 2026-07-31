@@ -1,8 +1,12 @@
+using FenceTool.Fences;
+
 namespace FenceTool;
 
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _trayIcon;
+    private readonly FenceManager _fenceManager = new();
+    private bool _allVisible = true;
 
     public TrayApplicationContext()
     {
@@ -20,13 +24,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
+
+        _fenceManager.LoadAndShowAll();
     }
 
-    private void OnNewFence(object? sender, EventArgs e)
-    {
-        // TODO: wired up to FenceManager.CreateFence() in step 2.
-        MessageBox.Show("New Fence isn't implemented yet.", "Fence Tool");
-    }
+    private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
 
     private void OnArrangeAll(object? sender, EventArgs e)
     {
@@ -36,8 +38,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {
-        // TODO: wired up in step 10.
-        MessageBox.Show("Show/Hide All isn't implemented yet.", "Fence Tool");
+        _allVisible = !_allVisible;
+        _fenceManager.SetAllVisible(_allVisible);
     }
 
     private void OnExit(object? sender, EventArgs e)
