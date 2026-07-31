@@ -13,7 +13,13 @@ public sealed class FenceManager : IDisposable
 
     public FenceManager()
     {
-        _anchorStrategy = new EmbeddedDesktopAnchorStrategy(_desktopListView);
+        // EmbeddedDesktopAnchorStrategy's SetParent onto Progman/WorkerW does not stick against a
+        // System.Windows.Forms.Form - WinForms actively reasserts "top-level forms have no Win32
+        // parent" and undoes it immediately (confirmed empirically: parent reverts to null within
+        // the same call, both during and well after Application.Run's message loop is pumping).
+        // Achieving the true behind-icons compositing would require a raw Win32 window instead of
+        // a Form. Using the floating strategy for now so fences reliably appear.
+        _anchorStrategy = new FloatingDesktopAnchorStrategy();
         _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
         _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
     }
@@ -161,6 +167,7 @@ public sealed class FenceManager : IDisposable
         var form = new FenceForm(model, this, _anchorStrategy);
         _forms[model.Id] = form;
         form.Show();
+        form.Reanchor();
     }
 
     private void ReanchorAll()

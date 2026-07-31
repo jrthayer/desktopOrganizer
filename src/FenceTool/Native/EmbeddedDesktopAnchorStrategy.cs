@@ -3,10 +3,16 @@ namespace FenceTool.Native;
 /// <summary>
 /// SetParent's a fence window onto the Progman/WorkerW window that hosts the desktop's icon
 /// view, then places it immediately behind SHELLDLL_DefView in z-order. Because the icon
-/// ListView paints no background, this lets the fence's own translucent rectangle show through
-/// in the gaps between icons while the icon glyphs/labels stay drawn on top - the actual
-/// "sits behind icons, above wallpaper" look. This is the same technique desktop-widget tools
-/// like Rainmeter use.
+/// ListView paints no background, this is meant to let the fence's own translucent rectangle
+/// show through in the gaps between icons while the icon glyphs/labels stay drawn on top - the
+/// "sits behind icons, above wallpaper" look, same technique native desktop-widget tools like
+/// Rainmeter use.
+///
+/// NOT CURRENTLY ACTIVE: confirmed empirically that WinForms actively reasserts its "top-level
+/// forms have no Win32 parent" invariant and undoes the SetParent here almost immediately, even
+/// well after the message loop is running normally. Achieving this for real would need the fence
+/// window to be a raw Win32 window instead of a System.Windows.Forms.Form. FenceManager currently
+/// uses FloatingDesktopAnchorStrategy instead; this class is kept for whenever that rewrite happens.
 /// </summary>
 public sealed class EmbeddedDesktopAnchorStrategy : IDesktopAnchorStrategy
 {
