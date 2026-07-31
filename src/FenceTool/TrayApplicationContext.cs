@@ -7,6 +7,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _trayIcon;
     private readonly FenceManager _fenceManager = new();
     private bool _allVisible = true;
+    private bool _accessDeniedShown;
 
     public TrayApplicationContext()
     {
@@ -25,7 +26,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Visible = true,
         };
 
+        _fenceManager.DesktopAccessDenied += OnDesktopAccessDenied;
         _fenceManager.LoadAndShowAll();
+    }
+
+    private void OnDesktopAccessDenied(object? sender, EventArgs e)
+    {
+        if (_accessDeniedShown)
+            return;
+        _accessDeniedShown = true;
+
+        _trayIcon.ShowBalloonTip(10000, "Fence Tool",
+            "Explorer is running with different privileges than Fence Tool (e.g. elevated), " +
+            "so desktop icons can't be managed until that's resolved.", ToolTipIcon.Warning);
     }
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();

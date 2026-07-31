@@ -34,6 +34,11 @@ public sealed class DesktopListView : IDisposable
     /// should re-anchor in response, since those handles are now stale.</summary>
     public event EventHandler? ExplorerRestarted;
 
+    /// <summary>Fires when a cross-process operation fails because explorer.exe is running at a
+    /// different integrity level than this process (e.g. elevated) - no retry will fix this on
+    /// its own, so callers should surface it to the user instead of silently doing nothing.</summary>
+    public event EventHandler? AccessDenied;
+
     public bool IsDiscovered => _hListView != IntPtr.Zero && NativeMethods.IsWindow(_hListView);
 
     public bool EnsureDiscovered() => IsDiscovered || Discover();
@@ -52,6 +57,17 @@ public sealed class DesktopListView : IDisposable
     {
         _hAnchor = _hDefView = _hListView = IntPtr.Zero;
         _listViewProcessId = 0;
+    }
+
+    /// <summary>OpenProcess against explorer.exe can fail for reasons that clear up on their own
+    /// (explorer mid-restart) or ones that won't (a real integrity-level mismatch) - only the
+    /// latter is worth telling the user about, so this checks which one actually happened.</summary>
+    private void NotifyOpenProcessFailed()
+    {
+        var error = Marshal.GetLastWin32Error();
+        Invalidate();
+        if (error == NativeMethods.ERROR_ACCESS_DENIED)
+            AccessDenied?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -153,8 +169,7 @@ public sealed class DesktopListView : IDisposable
 
         if (hProcess == IntPtr.Zero)
         {
-            // Explorer running at a different integrity level (elevated) than us - can't read across.
-            Invalidate();
+            NotifyOpenProcessFailed();
             return Array.Empty<DesktopIcon>();
         }
 
@@ -216,7 +231,7 @@ public sealed class DesktopListView : IDisposable
 
         if (hProcess == IntPtr.Zero)
         {
-            Invalidate();
+            NotifyOpenProcessFailed();
             return false;
         }
 

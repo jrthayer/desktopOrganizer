@@ -15,7 +15,12 @@ public sealed class FenceManager : IDisposable
     {
         _anchorStrategy = new EmbeddedDesktopAnchorStrategy(_desktopListView);
         _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
+        _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>Fires when explorer.exe is running at a different privilege level than this app,
+    /// so desktop icon management can't work until that's resolved.</summary>
+    public event EventHandler? DesktopAccessDenied;
 
     public void LoadAndShowAll()
     {
