@@ -134,6 +134,12 @@ public sealed class FenceForm : NativeWindow, IDisposable
                 var height = (int)((lParam >> 16) & 0xFFFF);
                 ApplyRoundedRegion(width, height);
                 _renameBox?.Resize(Math.Max(width - 12, 0));
+
+                // Without this, only the newly-exposed strip gets a fresh WM_PAINT, leaving
+                // stale copies of the custom-painted border behind as the window resizes - the
+                // raw-window equivalent of WinForms' ControlStyles.ResizeRedraw, which doesn't
+                // apply here since this is no longer a WinForms Control.
+                NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
                 break;
 
             case WM_EXITSIZEMOVE:
