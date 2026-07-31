@@ -5,7 +5,7 @@ namespace FenceTool.UI;
 
 public sealed class FenceForm : Form
 {
-    private const int TitleBarHeight = 26;
+    internal const int TitleBarHeight = 26;
     private const int ResizeMargin = 6;
     private const int CornerRadius = 10;
 
@@ -45,8 +45,7 @@ public sealed class FenceForm : Form
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Rename", null, (_, _) => BeginRename());
-        menu.Items.Add("Arrange Icons Now", null, (_, _) =>
-            MessageBox.Show(this, "Not implemented yet (arrives in a later milestone).", "Fence Tool"));
+        menu.Items.Add("Arrange Icons Now", null, (_, _) => _manager.ArrangeFence(FenceId));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Delete Fence", null, (_, _) => ConfirmDelete());
         ContextMenuStrip = menu;

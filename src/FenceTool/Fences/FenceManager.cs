@@ -52,6 +52,56 @@ public sealed class FenceManager : IDisposable
 
     public void Dispose() => _desktopListView.Dispose();
 
+    public void ArrangeFence(Guid id)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null)
+            return;
+
+        ArrangeModel(model);
+        Save();
+    }
+
+    public void ArrangeAll()
+    {
+        foreach (var model in _models)
+            ArrangeModel(model);
+        Save();
+    }
+
+    private const int ArrangePadding = 8;
+
+    /// <summary>
+    /// Lays out this fence's member icons in a simple row-major grid inside its bounds
+    /// (below the title bar), using the user's actual desktop icon spacing so the grid
+    /// matches what Explorer would normally use.
+    /// </summary>
+    private void ArrangeModel(FenceModel model)
+    {
+        var icons = _desktopListView.EnumerateIcons();
+        var members = icons.Where(icon => model.IconNames.Contains(icon.Label)).ToList();
+        if (members.Count == 0)
+            return;
+
+        var (horizontalSpacing, verticalSpacing) = IconMetrics.GetIconSpacing();
+
+        var originX = model.Bounds.X + ArrangePadding;
+        var originY = model.Bounds.Y + FenceForm.TitleBarHeight + ArrangePadding;
+        var availableWidth = Math.Max(model.Bounds.Width - ArrangePadding * 2, horizontalSpacing);
+        var columns = Math.Max(1, availableWidth / horizontalSpacing);
+
+        var placements = new List<(int Index, Point Position)>(members.Count);
+        for (int i = 0; i < members.Count; i++)
+        {
+            var column = i % columns;
+            var row = i / columns;
+            var position = new Point(originX + column * horizontalSpacing, originY + row * verticalSpacing);
+            placements.Add((members[i].Index, position));
+        }
+
+        _desktopListView.SetItemPositions(placements);
+    }
+
     /// <summary>
     /// Recomputes which desktop icons fall inside each fence's bounds (by the icon's current
     /// position) and records them by label. Read-only for now - icons aren't actually moved

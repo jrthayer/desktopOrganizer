@@ -30,11 +30,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
 
-    private void OnArrangeAll(object? sender, EventArgs e)
-    {
-        // TODO: wired up in step 6 once icon arrangement is implemented.
-        MessageBox.Show("Arrange All isn't implemented yet.", "Fence Tool");
-    }
+    private void OnArrangeAll(object? sender, EventArgs e) => _fenceManager.ArrangeAll();
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {

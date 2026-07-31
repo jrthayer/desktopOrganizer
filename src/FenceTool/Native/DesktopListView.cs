@@ -71,7 +71,24 @@ public sealed class DesktopListView : IDisposable
         _hDefView = hDefView;
         _hListView = hListView;
         NativeMethods.GetWindowThreadProcessId(_hListView, out _listViewProcessId);
+        DisableAutoArrange();
         return true;
+    }
+
+    /// <summary>
+    /// Clears auto-arrange/snap-to-grid so manually-set icon positions stick. This only affects
+    /// the live window style, not the user's persisted view settings, so it's reasserted here on
+    /// every (re)discovery rather than written to the registry - explorer restarts or the user
+    /// re-enabling it from the desktop's View menu will simply get cleared again next time we reconnect.
+    /// </summary>
+    private void DisableAutoArrange()
+    {
+        var style = NativeMethods.GetWindowLongPtr(_hListView, NativeMethods.GWL_STYLE).ToInt64();
+        style &= ~NativeMethods.LVS_AUTOARRANGE;
+        NativeMethods.SetWindowLongPtr(_hListView, NativeMethods.GWL_STYLE, (IntPtr)style);
+
+        NativeMethods.SendMessage(_hListView, NativeMethods.LVM_SETEXTENDEDLISTVIEWSTYLE,
+            (IntPtr)(NativeMethods.LVS_EX_SNAPTOGRID | NativeMethods.LVS_EX_AUTOAUTOARRANGE), IntPtr.Zero);
     }
 
     private static (IntPtr anchor, IntPtr defView) FindDefViewUnderWorkerW()
@@ -160,6 +177,58 @@ public sealed class DesktopListView : IDisposable
             if (remoteLvItem != IntPtr.Zero) NativeMethods.VirtualFreeEx(hProcess, remoteLvItem, 0, NativeMethods.MEM_RELEASE);
             if (remoteText != IntPtr.Zero) NativeMethods.VirtualFreeEx(hProcess, remoteText, 0, NativeMethods.MEM_RELEASE);
             if (remotePoint != IntPtr.Zero) NativeMethods.VirtualFreeEx(hProcess, remotePoint, 0, NativeMethods.MEM_RELEASE);
+            NativeMethods.CloseHandle(hProcess);
+        }
+    }
+
+    /// <summary>
+    /// Moves the given icons (by their current list index) to new positions in one batch,
+    /// reusing a single remote POINT buffer and process handle across all writes.
+    /// </summary>
+    public bool SetItemPositions(IReadOnlyList<(int Index, Point Position)> placements)
+    {
+        if (placements.Count == 0)
+            return true;
+
+        if (!EnsureDiscovered())
+            return false;
+
+        var hProcess = NativeMethods.OpenProcess(
+            NativeMethods.PROCESS_VM_OPERATION | NativeMethods.PROCESS_VM_WRITE | NativeMethods.PROCESS_QUERY_INFORMATION,
+            false, _listViewProcessId);
+
+        if (hProcess == IntPtr.Zero)
+        {
+            Invalidate();
+            return false;
+        }
+
+        var pointSize = Marshal.SizeOf<POINT>();
+        var remotePoint = IntPtr.Zero;
+
+        try
+        {
+            remotePoint = NativeMethods.VirtualAllocEx(hProcess, IntPtr.Zero, (uint)pointSize,
+                NativeMethods.MEM_COMMIT | NativeMethods.MEM_RESERVE, NativeMethods.PAGE_READWRITE);
+            if (remotePoint == IntPtr.Zero)
+                return false;
+
+            foreach (var (index, position) in placements)
+            {
+                var point = new POINT { X = position.X, Y = position.Y };
+                var bytes = StructToBytes(point, pointSize);
+                if (!NativeMethods.WriteProcessMemory(hProcess, remotePoint, bytes, (uint)pointSize, out _))
+                    continue;
+
+                NativeMethods.SendMessage(_hListView, NativeMethods.LVM_SETITEMPOSITION32, (IntPtr)index, remotePoint);
+            }
+
+            return true;
+        }
+        finally
+        {
+            if (remotePoint != IntPtr.Zero)
+                NativeMethods.VirtualFreeEx(hProcess, remotePoint, 0, NativeMethods.MEM_RELEASE);
             NativeMethods.CloseHandle(hProcess);
         }
     }

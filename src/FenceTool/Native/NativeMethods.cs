@@ -40,9 +40,17 @@ internal static class NativeMethods
     public const uint LVM_GETITEMCOUNT = LVM_FIRST + 4;
     public const uint LVM_GETITEMPOSITION = LVM_FIRST + 16;
     public const uint LVM_SETITEMPOSITION32 = LVM_FIRST + 49;
+    public const uint LVM_SETEXTENDEDLISTVIEWSTYLE = LVM_FIRST + 54;
     public const uint LVM_GETITEMTEXTW = LVM_FIRST + 115;
 
     public const uint LVIF_TEXT = 0x0001;
+
+    public const int GWL_STYLE = -16;
+    public const long LVS_AUTOARRANGE = 0x0100;
+    public const uint LVS_EX_SNAPTOGRID = 0x00080000;
+    public const uint LVS_EX_AUTOAUTOARRANGE = 0x01000000;
+
+    public const uint SPI_GETICONMETRICS = 0x002D;
 
     public const uint SMTO_ABORTIFHUNG = 0x0002;
 
@@ -113,4 +121,14 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, BestFitMapping = false)]
     public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 }
