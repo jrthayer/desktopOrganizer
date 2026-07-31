@@ -67,6 +67,7 @@ public sealed class FenceForm : Form
     private const int CmdOpenItem = 4;
     private const int CmdRemoveItem = 5;
     private const int CmdRenameItem = 6;
+    private const int CmdToggleHideLabels = 7;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -75,6 +76,8 @@ public sealed class FenceForm : Form
     private const int CellHeight = 94;
     private const int ScrollbarWidth = 6;
     private const int ScrollbarMargin = 3;
+    private const int CogSize = 16;
+    private const int CogMargin = 6;
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
@@ -104,7 +107,16 @@ public sealed class FenceForm : Form
     private int _scrollbarDragStartY;
     private int _scrollbarDragStartOffset;
 
+    // The settings cog only shows once the fence has been clicked (i.e. is the active window) -
+    // keeps the title bar quiet until you're actually interacting with that particular fence.
+    private bool _isActive;
+    private readonly Font _cogFont = new("Segoe MDL2 Assets", 9f);
+
     public Guid FenceId => _model.Id;
+
+    /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
+    /// plus a little breathing room, since there's no label text to make room for underneath.</summary>
+    private int EffectiveCellHeight => _model.HideLabels ? IconTopPadding + IconSize + 8 : CellHeight;
 
     protected override CreateParams CreateParams
     {
@@ -164,6 +176,8 @@ public sealed class FenceForm : Form
 
     private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - OuterMargin);
 
+    private static Point ToWindow(Point contentPoint) => new(contentPoint.X + OuterMargin, contentPoint.Y + OuterMargin);
+
     private static Rectangle ToWindow(Rectangle contentRect) =>
         new(contentRect.X + OuterMargin, contentRect.Y + OuterMargin, contentRect.Width, contentRect.Height);
 
@@ -178,8 +192,12 @@ public sealed class FenceForm : Form
         var columns = GetColumns(contentWidth);
         var rows = (_model.Files.Count + columns - 1) / columns;
         var availableHeight = Math.Max(0, contentHeight - TitleBarHeight - GridPadding * 2);
-        return Math.Max(0, rows * CellHeight - availableHeight);
+        return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
+
+    /// <summary>Content-relative; only meaningful while _isActive (the cog isn't shown otherwise).</summary>
+    private static Rectangle GetCogRect(int contentWidth) =>
+        new(contentWidth - CogSize - CogMargin, (TitleBarHeight - CogSize) / 2, CogSize, CogSize);
 
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
@@ -209,10 +227,25 @@ public sealed class FenceForm : Form
             _itemRenameBox?.Dispose();
             _dragGhost?.Dispose();
             _font.Dispose();
+            _cogFont.Dispose();
             foreach (var icon in _iconCache.Values)
                 icon?.Dispose();
         }
         base.Dispose(disposing);
+    }
+
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        _isActive = true;
+        RenderAndPresent();
+    }
+
+    protected override void OnDeactivate(EventArgs e)
+    {
+        base.OnDeactivate(e);
+        _isActive = false;
+        RenderAndPresent();
     }
 
     protected override void OnDragEnter(DragEventArgs e)
@@ -245,6 +278,12 @@ public sealed class FenceForm : Form
         var contentPoint = ToContent(e.Location);
         var contentSize = GetContentSize();
 
+        if (_isActive && GetCogRect(contentSize.Width).Contains(contentPoint))
+        {
+            ShowFenceOptionsMenu();
+            return;
+        }
+
         if (GetScrollbarGeometry(contentSize.Width, contentSize.Height) is { } sb)
         {
             // A little horizontal slack around the thin thumb/track makes it easier to grab.
@@ -262,7 +301,7 @@ public sealed class FenceForm : Form
             if (trackRect.Contains(contentPoint))
             {
                 // Clicking the track outside the thumb pages toward the click, like a normal scrollbar.
-                var page = Math.Max(CellHeight, sb.TrackHeight - CellHeight);
+                var page = Math.Max(EffectiveCellHeight, sb.TrackHeight - EffectiveCellHeight);
                 var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
                 _scrollOffset = Math.Clamp(_scrollOffset + (contentPoint.Y < sb.ThumbY ? -page : page), 0, maxScroll);
                 RenderAndPresent();
@@ -363,7 +402,7 @@ public sealed class FenceForm : Form
         if (maxScroll <= 0)
             return;
 
-        _scrollOffset = Math.Clamp(_scrollOffset - e.Delta / 120 * CellHeight, 0, maxScroll);
+        _scrollOffset = Math.Clamp(_scrollOffset - e.Delta / 120 * EffectiveCellHeight, 0, maxScroll);
         RenderAndPresent();
     }
 
@@ -453,6 +492,11 @@ public sealed class FenceForm : Form
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
 
+        // The cog sits near the top of the title bar, which overlaps the top resize band below -
+        // check it first so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
+        if (_isActive && GetCogRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
+            return HTCLIENT;
+
         // The resize-sensitive band spans from OuterMargin outside the visible fence to
         // ResizeMargin inside it - i.e. measured from the window's true (padded) edge.
         int band = OuterMargin + ResizeMargin;
@@ -469,7 +513,10 @@ public sealed class FenceForm : Form
         if (right) return HTRIGHT;
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
-        if (y - OuterMargin <= TitleBarHeight) return HTCAPTION;
+
+        if (y - OuterMargin <= TitleBarHeight)
+            return HTCAPTION;
+
         return HTCLIENT;
     }
 
@@ -531,10 +578,21 @@ public sealed class FenceForm : Form
             using var borderPen = new Pen(Color.FromArgb(255, 70, 70, 78));
             g.DrawPath(borderPen, body);
 
+            // Leave room for the cog so long fence names don't run under it, whether or not it's
+            // actually showing right now - avoids the title text visibly shifting width as the
+            // fence activates/deactivates.
+            var titleWidth = contentWidth - 16 - CogSize - CogMargin;
             if (_renameBox is null)
             {
-                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleBarHeight)),
+                TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(8, 0, titleWidth, TitleBarHeight)),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            }
+
+            if (_isActive)
+            {
+                var cogRect = ToWindow(GetCogRect(contentWidth));
+                TextRenderer.DrawText(g, "\uE713", _cogFont, cogRect, Color.Silver,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
 
             PaintItems(g, contentWidth, contentHeight);
@@ -566,20 +624,20 @@ public sealed class FenceForm : Form
             var column = i % columns;
             var row = i / columns;
             var cellX = GridPadding + column * CellWidth;
-            var cellY = TitleBarHeight + GridPadding + row * CellHeight - _scrollOffset;
+            var cellY = TitleBarHeight + GridPadding + row * EffectiveCellHeight - _scrollOffset;
 
             // A scrolled row can straddle the title-bar boundary. g.Clip normally handles that for
             // shapes/icons (GDI+ respects it), but TextRenderer.DrawText (GDI) draws its text in
             // full regardless of the clip region - the same disregard-for-Graphics-state quirk as
             // TranslateTransform above, just for clipping instead of position. So icons rely on the
             // clip as usual, but labels only draw when their whole rect is already within bounds.
-            if (cellY + CellHeight <= TitleBarHeight || cellY >= height)
+            if (cellY + EffectiveCellHeight <= TitleBarHeight || cellY >= height)
                 continue;
 
             if (i == _hoverIndex && !isDragSource)
             {
                 using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
-                using var hoverRect = RoundedRect(ToWindow(new Rectangle(cellX, cellY, CellWidth, CellHeight)), 4);
+                using var hoverRect = RoundedRect(ToWindow(new Rectangle(cellX, cellY, CellWidth, EffectiveCellHeight)), 4);
                 g.FillPath(hoverBrush, hoverRect);
             }
 
@@ -597,7 +655,7 @@ public sealed class FenceForm : Form
                     g.DrawImage(bitmap, iconRect);
             }
 
-            if (item.Path == _itemRenamePath)
+            if (item.Path == _itemRenamePath || _model.HideLabels)
                 continue;
 
             var labelTop = cellY + IconTopPadding + IconSize + 2;
@@ -649,10 +707,10 @@ public sealed class FenceForm : Form
 
         var columns = GetColumns(width);
         var cellX = GridPadding + targetIndex % columns * CellWidth;
-        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * CellHeight - _scrollOffset;
+        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
 
         using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
-        using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, CellHeight - 2)), 4);
+        using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, EffectiveCellHeight - 2)), 4);
         g.DrawPath(targetPen, targetRect);
     }
 
@@ -708,7 +766,7 @@ public sealed class FenceForm : Form
         var columns = GetColumns(GetContentSize().Width);
 
         var column = (contentLocation.X - GridPadding) / CellWidth;
-        var row = (contentLocation.Y - TitleBarHeight - GridPadding + _scrollOffset) / CellHeight;
+        var row = (contentLocation.Y - TitleBarHeight - GridPadding + _scrollOffset) / EffectiveCellHeight;
         if (column < 0 || column >= columns || row < 0)
             return null;
 
@@ -746,6 +804,29 @@ public sealed class FenceForm : Form
         }
     }
 
+    /// <summary>Per-fence settings, opened via the cog that appears in the title bar once this
+    /// fence is the active window (see OnActivated/OnDeactivate and the cog hit-test carve-out).</summary>
+    private void ShowFenceOptionsMenu()
+    {
+        var contentSize = GetContentSize();
+        var cogRect = GetCogRect(contentSize.Width);
+        var menuPoint = PointToScreen(ToWindow(new Point(cogRect.X, cogRect.Bottom + 2)));
+
+        var hMenu = NativeMethods.CreatePopupMenu();
+        try
+        {
+            var hideLabelsFlags = NativeMethods.MF_STRING | (_model.HideLabels ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
+            NativeMethods.AppendMenu(hMenu, hideLabelsFlags, (IntPtr)CmdToggleHideLabels, "Hide Shortcut Names");
+
+            NativeMethods.SetForegroundWindow(Handle);
+            NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_LEFTBUTTON, menuPoint.X, menuPoint.Y, Handle, IntPtr.Zero);
+        }
+        finally
+        {
+            NativeMethods.DestroyMenu(hMenu);
+        }
+    }
+
     private void HandleCommand(int id)
     {
         switch (id)
@@ -755,6 +836,7 @@ public sealed class FenceForm : Form
             case CmdOpenItem: OpenItem(_contextItem); break;
             case CmdRemoveItem: RemoveItem(_contextItem); break;
             case CmdRenameItem: BeginRenameItem(_contextItem); break;
+            case CmdToggleHideLabels: ToggleHideLabels(); break;
         }
     }
 
@@ -779,6 +861,12 @@ public sealed class FenceForm : Form
             return;
 
         _manager.RemoveFile(FenceId, path);
+        RenderAndPresent();
+    }
+
+    private void ToggleHideLabels()
+    {
+        _manager.SetHideLabels(FenceId, !_model.HideLabels);
         RenderAndPresent();
     }
 
@@ -830,7 +918,7 @@ public sealed class FenceForm : Form
         var column = index % columns;
         var row = index / columns;
         var cellX = GridPadding + column * CellWidth;
-        var absoluteCellY = TitleBarHeight + GridPadding + row * CellHeight;
+        var absoluteCellY = TitleBarHeight + GridPadding + row * EffectiveCellHeight;
 
         // Scroll the item's row fully into view first if it's currently scrolled off - otherwise
         // the edit box could end up positioned above the title bar or below the fence entirely.
@@ -838,8 +926,8 @@ public sealed class FenceForm : Form
         var gridBottom = contentSize.Height - GridPadding;
         if (absoluteCellY - _scrollOffset < gridTop)
             _scrollOffset = Math.Max(0, absoluteCellY - gridTop);
-        else if (absoluteCellY + CellHeight - _scrollOffset > gridBottom)
-            _scrollOffset = Math.Min(GetMaxScroll(contentSize.Width, contentSize.Height), absoluteCellY + CellHeight - gridBottom);
+        else if (absoluteCellY + EffectiveCellHeight - _scrollOffset > gridBottom)
+            _scrollOffset = Math.Min(GetMaxScroll(contentSize.Width, contentSize.Height), absoluteCellY + EffectiveCellHeight - gridBottom);
 
         var cellY = absoluteCellY - _scrollOffset;
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));

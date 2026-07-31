@@ -51,6 +51,7 @@ public sealed class FenceModel
     [JsonConverter(typeof(FenceItemListConverter))]
     public List<FenceItem> Files { get; set; } = new();
     public bool Collapsed { get; set; }
+    public bool HideLabels { get; set; }
 
     [JsonIgnore]
     public Rectangle Bounds

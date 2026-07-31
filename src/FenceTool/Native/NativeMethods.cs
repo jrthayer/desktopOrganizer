@@ -139,6 +139,9 @@ internal static class NativeMethods
 
     public const uint MF_STRING = 0x0000;
     public const uint MF_SEPARATOR = 0x0800;
+    public const uint MF_CHECKED = 0x0008;
+    public const uint MF_UNCHECKED = 0x0000;
+    public const uint TPM_LEFTBUTTON = 0x0000;
     public const uint TPM_RIGHTBUTTON = 0x0002;
 
     public const int EM_SETSEL = 0x00B1;

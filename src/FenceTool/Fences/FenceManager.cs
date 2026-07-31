@@ -138,6 +138,15 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    public void SetHideLabels(Guid id, bool hide)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null || model.HideLabels == hide)
+            return;
+        model.HideLabels = hide;
+        Save();
+    }
+
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)
