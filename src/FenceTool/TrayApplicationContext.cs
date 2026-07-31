@@ -46,6 +46,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
+        _fenceManager.Dispose();
         ExitThread();
     }
 }

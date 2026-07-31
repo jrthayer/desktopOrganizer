@@ -1,10 +1,12 @@
+using FenceTool.Native;
 using FenceTool.UI;
 
 namespace FenceTool.Fences;
 
-public sealed class FenceManager
+public sealed class FenceManager : IDisposable
 {
     private readonly FenceStore _store = new();
+    private readonly DesktopListView _desktopListView = new();
     private readonly List<FenceModel> _models = new();
     private readonly Dictionary<Guid, FenceForm> _forms = new();
 
@@ -14,6 +16,7 @@ public sealed class FenceManager
         _models.AddRange(_store.Load());
         foreach (var model in _models)
             ShowFence(model);
+        RefreshMembership();
     }
 
     public void CreateFence()
@@ -25,6 +28,7 @@ public sealed class FenceManager
         };
         _models.Add(model);
         ShowFence(model);
+        RefreshMembership();
         Save();
     }
 
@@ -42,7 +46,30 @@ public sealed class FenceManager
         if (model is null)
             return;
         model.Bounds = bounds;
+        RefreshMembership();
         Save();
+    }
+
+    public void Dispose() => _desktopListView.Dispose();
+
+    /// <summary>
+    /// Recomputes which desktop icons fall inside each fence's bounds (by the icon's current
+    /// position) and records them by label. Read-only for now - icons aren't actually moved
+    /// until the write path lands, so this just keeps each fence's membership list current.
+    /// </summary>
+    private void RefreshMembership()
+    {
+        var icons = _desktopListView.EnumerateIcons();
+        if (icons.Count == 0)
+            return;
+
+        foreach (var model in _models)
+        {
+            model.IconNames = icons
+                .Where(icon => model.Bounds.Contains(icon.Position))
+                .Select(icon => icon.Label)
+                .ToList();
+        }
     }
 
     public void NotifyRenamed(Guid id, string name)
