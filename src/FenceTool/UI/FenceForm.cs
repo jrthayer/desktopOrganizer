@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using FenceTool.Fences;
 using FenceTool.Native;
 
@@ -20,12 +21,26 @@ namespace FenceTool.UI;
 /// drag-and-drop model is based on (see README's Credits section). It never touches the real
 /// desktop's icons/positions; dropping a file here just adds a reference to it, leaving whatever
 /// is on the actual desktop completely alone.
+///
+/// Rendering is pushed via UpdateLayeredWindow (see LayeredWindowPresenter) rather than drawn in
+/// response to WM_PAINT with a SetWindowRgn-clipped shape. The region approach was tried first and
+/// works, but a GDI region is a hard-edged, non-antialiased mask, so the rounded corners always
+/// came out as a visible pixel staircase no matter the radius. Per-pixel alpha draws a genuinely
+/// smooth edge, and Windows uses that same alpha for hit-testing, so fully-transparent pixels
+/// (outside the rounded corner) are naturally click-through with no region needed at all.
 /// </summary>
 public sealed class FenceForm : Form
 {
     internal const int TitleBarHeight = 26;
-    private const int ResizeMargin = 6;
-    private const int CornerRadius = 10;
+    private const int ResizeMargin = 12;
+    // Extra invisible band around the visible fence, purely so the resize cursor is easier to
+    // grab - only possible now that per-pixel alpha (not SetWindowRgn) defines the window's shape,
+    // since Windows treats fully-transparent pixels as click-through; a hard region couldn't do
+    // this at all (you can't hit-test past a window's own rectangle). Painted at a barely-non-zero
+    // alpha (see RenderAndPresent) since alpha 0 would be click-through too, defeating the point.
+    private const int OuterMargin = 8;
+    private const int CornerRadius = 16;
+    private const float FenceOpacity = 0.85f;
 
     private const int WM_NCHITTEST = 0x0084;
     private const int WM_NCLBUTTONDBLCLK = 0x00A3;
@@ -70,6 +85,17 @@ public sealed class FenceForm : Form
     private string? _contextItem;
     private int _hoverIndex = -1;
 
+    // Internal drag state for reordering/removing items - this is all local mouse tracking, not
+    // OLE drag-and-drop (which is only for accepting drops from outside the app, via
+    // OnDragEnter/OnDragDrop above). "Armed" means the mouse is down on an item but hasn't moved
+    // far enough yet to count as a drag rather than a click.
+    private const int DragThreshold = 4;
+    private int? _dragArmIndex;
+    private Point _dragArmPoint;
+    private int? _draggingIndex;
+    private Point _dragCurrentPoint;
+    private DragGhostWindow? _dragGhost;
+
     public Guid FenceId => _model.Id;
 
     protected override CreateParams CreateParams
@@ -84,14 +110,12 @@ public sealed class FenceForm : Form
             if (_model is null)
                 return cp;
 
-            // WS_CLIPCHILDREN is essential: without it, our own WM_PAINT full-repaint draws
-            // over the rename EditBox child window instead of leaving its area alone.
             cp.Style = NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPCHILDREN;
             cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
-            cp.X = _model.Bounds.X;
-            cp.Y = _model.Bounds.Y;
-            cp.Width = _model.Bounds.Width;
-            cp.Height = _model.Bounds.Height;
+            cp.X = _model.Bounds.X - OuterMargin;
+            cp.Y = _model.Bounds.Y - OuterMargin;
+            cp.Width = _model.Bounds.Width + OuterMargin * 2;
+            cp.Height = _model.Bounds.Height + OuterMargin * 2;
             return cp;
         }
     }
@@ -107,9 +131,8 @@ public sealed class FenceForm : Form
         StartPosition = FormStartPosition.Manual;
         AllowDrop = true;
 
-        NativeMethods.SetLayeredWindowAttributes(Handle, 0, (byte)(0.85 * 255), NativeMethods.LWA_ALPHA);
-        ApplyRoundedRegion(model.Bounds.Width, model.Bounds.Height);
         Reanchor();
+        RenderAndPresent();
     }
 
     public new void Show() => NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
@@ -123,12 +146,26 @@ public sealed class FenceForm : Form
     /// convention the current native parent implies.</summary>
     public void Reanchor() => _anchorStrategy.Apply(Handle, _model.Bounds);
 
+    /// <summary>The visible fence's size, i.e. the actual (padded) window size minus OuterMargin
+    /// on all sides - all grid/hit-test math below is in this "content" space.</summary>
+    private Size GetContentSize()
+    {
+        NativeMethods.GetClientRect(Handle, out var clientRect);
+        return new Size(Math.Max(0, clientRect.Right - OuterMargin * 2), Math.Max(0, clientRect.Bottom - OuterMargin * 2));
+    }
+
+    private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - OuterMargin);
+
+    private static Rectangle ToWindow(Rectangle contentRect) =>
+        new(contentRect.X + OuterMargin, contentRect.Y + OuterMargin, contentRect.Width, contentRect.Height);
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
             _renameBox?.Dispose();
             _itemRenameBox?.Dispose();
+            _dragGhost?.Dispose();
             _font.Dispose();
             foreach (var icon in _iconCache.Values)
                 icon?.Dispose();
@@ -148,19 +185,81 @@ public sealed class FenceForm : Form
             return;
 
         _manager.AddFiles(FenceId, paths);
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
-        OpenItem(FileAtGridPosition(e.Location));
+        OpenItem(FileAtGridPosition(ToContent(e.Location)));
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left)
+            return;
+
+        if (IndexAtGridPosition(ToContent(e.Location)) is int index)
+        {
+            _dragArmIndex = index;
+            _dragArmPoint = e.Location; // raw window-space is fine here - only ever used as a delta
+        }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        SetHoverIndex(IndexAtGridPosition(e.Location) ?? -1);
+
+        if (_draggingIndex is null && _dragArmIndex is int armIndex && MouseButtons == MouseButtons.Left)
+        {
+            var dx = e.X - _dragArmPoint.X;
+            var dy = e.Y - _dragArmPoint.Y;
+            if (dx * dx + dy * dy >= DragThreshold * DragThreshold)
+            {
+                _draggingIndex = armIndex;
+                _dragArmIndex = null;
+                Capture = true;
+
+                var item = _model.Files[armIndex];
+                _dragGhost = new DragGhostWindow(GetIcon(item.Path), GetDisplayName(item));
+            }
+        }
+
+        if (_draggingIndex is not null)
+        {
+            _dragCurrentPoint = ToContent(e.Location);
+            _dragGhost?.MoveTo(PointToScreen(e.Location));
+            RenderAndPresent();
+            return;
+        }
+
+        SetHoverIndex(IndexAtGridPosition(ToContent(e.Location)) ?? -1);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left)
+            return;
+
+        _dragArmIndex = null;
+        if (_draggingIndex is not int sourceIndex)
+            return;
+
+        Capture = false;
+        _draggingIndex = null;
+        _dragGhost?.Dispose();
+        _dragGhost = null;
+
+        var contentPoint = ToContent(e.Location);
+        var path = _model.Files[sourceIndex].Path;
+        if (new Rectangle(Point.Empty, GetContentSize()).Contains(contentPoint))
+            _manager.MoveFile(FenceId, path, IndexAtGridPosition(contentPoint) ?? _model.Files.Count);
+        else
+            _manager.RemoveFile(FenceId, path);
+
+        RenderAndPresent();
     }
 
     protected override void OnMouseLeave(EventArgs e)
@@ -174,7 +273,7 @@ public sealed class FenceForm : Form
         if (index == _hoverIndex)
             return;
         _hoverIndex = index;
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     protected override void WndProc(ref Message m)
@@ -193,16 +292,19 @@ public sealed class FenceForm : Form
                 return;
 
             case WM_ERASEBKGND:
-                m.Result = (IntPtr)1; // PaintFence() always fills the whole client area; avoids flicker
+                m.Result = (IntPtr)1;
                 return;
 
             case WM_PAINT:
-                PaintFence();
+                // Content is pushed via UpdateLayeredWindow (RenderAndPresent), not drawn in
+                // response to WM_PAINT - just clear the update region so Windows stops re-posting it.
+                NativeMethods.BeginPaint(Handle, out var ps);
+                NativeMethods.EndPaint(Handle, ref ps);
                 return;
 
             case WM_RBUTTONUP:
                 var clientPoint = new Point((short)(m.LParam.ToInt64() & 0xFFFF), (short)((m.LParam.ToInt64() >> 16) & 0xFFFF));
-                ShowContextMenu(clientPoint);
+                ShowContextMenu(ToContent(clientPoint));
                 return;
 
             case WM_COMMAND:
@@ -215,22 +317,14 @@ public sealed class FenceForm : Form
         switch (m.Msg)
         {
             case WM_SIZE:
-                var lParam = m.LParam.ToInt64();
-                var width = (int)(lParam & 0xFFFF);
-                var height = (int)((lParam >> 16) & 0xFFFF);
-                ApplyRoundedRegion(width, height);
-                _renameBox?.Resize(Math.Max(width - 12, 0));
-
-                // Without this, only the newly-exposed strip gets a fresh WM_PAINT, leaving
-                // stale copies of the custom-painted border behind as the window resizes - the
-                // raw-window equivalent of WinForms' ControlStyles.ResizeRedraw, which doesn't
-                // apply here since this is no longer a WinForms Control.
-                NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+                _renameBox?.Resize(Math.Max(GetContentSize().Width - 12, 0));
+                RenderAndPresent();
                 break;
 
             case WM_EXITSIZEMOVE:
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
-                    _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom));
+                    _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
+                        rect.Left + OuterMargin, rect.Top + OuterMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -254,10 +348,13 @@ public sealed class FenceForm : Form
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
 
-        bool left = x <= ResizeMargin;
-        bool right = x >= width - ResizeMargin;
-        bool top = y <= ResizeMargin;
-        bool bottom = y >= height - ResizeMargin;
+        // The resize-sensitive band spans from OuterMargin outside the visible fence to
+        // ResizeMargin inside it - i.e. measured from the window's true (padded) edge.
+        int band = OuterMargin + ResizeMargin;
+        bool left = x <= band;
+        bool right = x >= width - band;
+        bool top = y <= band;
+        bool bottom = y >= height - band;
 
         if (top && left) return HTTOPLEFT;
         if (top && right) return HTTOPRIGHT;
@@ -267,32 +364,58 @@ public sealed class FenceForm : Form
         if (right) return HTRIGHT;
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
-        if (y <= TitleBarHeight) return HTCAPTION;
+        if (y - OuterMargin <= TitleBarHeight) return HTCAPTION;
         return HTCLIENT;
     }
 
-    private void PaintFence()
+    /// <summary>
+    /// Builds this frame's full appearance (body, title bar, items, drag feedback) into an
+    /// off-screen ARGB bitmap and pushes it to the screen via UpdateLayeredWindow. Called any time
+    /// something visible changes (hover, drag, rename, resize, items added/removed) rather than in
+    /// response to WM_PAINT, since a layered window's content isn't repainted by Windows itself.
+    /// </summary>
+    private void RenderAndPresent()
     {
-        var hdc = NativeMethods.BeginPaint(Handle, out var ps);
-        try
-        {
-            NativeMethods.GetClientRect(Handle, out var clientRect);
-            int width = clientRect.Right;
-            int height = clientRect.Bottom;
+        if (!NativeMethods.GetWindowRect(Handle, out var windowRect))
+            return;
 
-            using var g = Graphics.FromHdc(hdc);
+        int width = windowRect.Right - windowRect.Left;
+        int height = windowRect.Bottom - windowRect.Top;
+        int contentWidth = width - OuterMargin * 2;
+        int contentHeight = height - OuterMargin * 2;
+        if (contentWidth <= 0 || contentHeight <= 0)
+            return;
+
+        using var buffer = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(buffer))
+        {
+            g.Clear(Color.Transparent);
+
+            // OuterMargin needs a non-zero (if faint) alpha - Windows treats fully transparent
+            // (alpha 0) pixels of a layered window as click-through, so a truly invisible margin
+            // couldn't receive the resize hit-testing it exists for. This gets drawn first and the
+            // opaque fence body then covers all of it except that outer band.
+            using (var marginFill = new SolidBrush(Color.FromArgb(8, 0, 0, 0)))
+                g.FillRectangle(marginFill, 0, 0, width, height);
+
+            g.TranslateTransform(OuterMargin, OuterMargin);
+            // Items that overflow the fence's set height (more rows than fit) would otherwise get
+            // drawn into the near-transparent margin band above - GDI+ compositing a bitmap's
+            // semi-transparent edge pixels over a fully/near-transparent destination (rather than
+            // the opaque body fill) produces garbage colors there, not just invisible overflow.
+            g.SetClip(new Rectangle(0, 0, contentWidth, contentHeight));
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // DrawIcon's native GDI stretch looks jagged when scaling a source icon down to
             // IconSize - drawing icons as bitmaps under high-quality interpolation instead avoids that.
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-            using var body = RoundedRect(new Rectangle(0, 0, width - 1, height - 1), CornerRadius);
+            using var body = RoundedRect(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1), CornerRadius);
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
             g.FillPath(bodyFill, body);
 
             using var titleFill = new SolidBrush(Color.FromArgb(255, 20, 20, 24));
-            using var titlePath = RoundedRectTop(new Rectangle(0, 0, width - 1, TitleBarHeight), CornerRadius);
+            using var titlePath = RoundedRectTop(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight), CornerRadius);
             g.FillPath(titleFill, titlePath);
 
             using var borderPen = new Pen(Color.FromArgb(255, 70, 70, 78));
@@ -300,16 +423,14 @@ public sealed class FenceForm : Form
 
             if (_renameBox is null)
             {
-                TextRenderer.DrawText(g, _model.Name, _font, new Rectangle(8, 0, width - 16, TitleBarHeight),
+                TextRenderer.DrawText(g, _model.Name, _font, new Rectangle(8, 0, contentWidth - 16, TitleBarHeight),
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
 
-            PaintItems(g, width);
+            PaintItems(g, contentWidth, contentHeight);
         }
-        finally
-        {
-            NativeMethods.EndPaint(Handle, ref ps);
-        }
+
+        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), FenceOpacity);
     }
 
     /// <summary>
@@ -317,7 +438,7 @@ public sealed class FenceForm : Form
     /// bar - the fence never touches the real desktop icons (see FenceManager.AddFiles), so this is
     /// the only place those files are actually represented on screen.
     /// </summary>
-    private void PaintItems(Graphics g, int width)
+    private void PaintItems(Graphics g, int width, int height)
     {
         if (_model.Files.Count == 0)
             return;
@@ -327,12 +448,13 @@ public sealed class FenceForm : Form
         for (int i = 0; i < _model.Files.Count; i++)
         {
             var item = _model.Files[i];
+            var isDragSource = i == _draggingIndex;
             var column = i % columns;
             var row = i / columns;
             var cellX = GridPadding + column * CellWidth;
             var cellY = TitleBarHeight + GridPadding + row * CellHeight;
 
-            if (i == _hoverIndex)
+            if (i == _hoverIndex && !isDragSource)
             {
                 using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
                 using var hoverRect = RoundedRect(new Rectangle(cellX, cellY, CellWidth, CellHeight), 4);
@@ -344,7 +466,13 @@ public sealed class FenceForm : Form
             {
                 var iconX = cellX + (CellWidth - IconSize) / 2;
                 using var bitmap = icon.ToBitmap();
-                g.DrawImage(bitmap, new Rectangle(iconX, cellY + IconTopPadding, IconSize, IconSize));
+                var iconRect = new Rectangle(iconX, cellY + IconTopPadding, IconSize, IconSize);
+                // Faded in place while its being dragged - the ghost near the cursor (painted
+                // after the grid, see PaintDragFeedback) is what's actually "held".
+                if (isDragSource)
+                    DrawImageWithOpacity(g, bitmap, iconRect, 0.35f);
+                else
+                    g.DrawImage(bitmap, iconRect);
             }
 
             if (item.Path == _itemRenamePath)
@@ -354,20 +482,42 @@ public sealed class FenceForm : Form
             TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
         }
+
+        PaintDragFeedback(g, width, height);
     }
 
-    /// <summary>An explicit rename (set via the item's context menu) always wins; otherwise
-    /// shortcuts display without their .lnk extension, matching how Explorer shows them on the
-    /// real desktop, and other files keep their extension.</summary>
-    private static string GetDisplayName(FenceItem item)
+    /// <summary>Draws the drop-target outline while an in-progress item drag (started in
+    /// OnMouseDown/OnMouseMove) is over this fence. The dragged item's own ghost is a separate
+    /// floating window (DragGhostWindow) that follows the cursor, not drawn here.</summary>
+    private void PaintDragFeedback(Graphics g, int width, int height)
     {
-        if (!string.IsNullOrEmpty(item.DisplayName))
-            return item.DisplayName;
+        if (_draggingIndex is null)
+            return;
 
-        return string.Equals(Path.GetExtension(item.Path), ".lnk", StringComparison.OrdinalIgnoreCase)
-            ? Path.GetFileNameWithoutExtension(item.Path)
-            : Path.GetFileName(item.Path);
+        if (!new Rectangle(0, 0, width, height).Contains(_dragCurrentPoint) ||
+            IndexAtGridPosition(_dragCurrentPoint) is not int targetIndex)
+            return;
+
+        var columns = Math.Max(1, (width - GridPadding * 2) / CellWidth);
+        var cellX = GridPadding + targetIndex % columns * CellWidth;
+        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * CellHeight;
+
+        using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
+        using var targetRect = RoundedRect(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, CellHeight - 2), 4);
+        g.DrawPath(targetPen, targetRect);
     }
+
+    private static void DrawImageWithOpacity(Graphics g, Image image, Rectangle rect, float opacity)
+    {
+        using var attributes = new ImageAttributes();
+        attributes.SetColorMatrix(new ColorMatrix { Matrix33 = opacity }, ColorMatrixFlag.Default, ColorAdjustType.Bitmap);
+        g.DrawImage(image, rect, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attributes);
+    }
+
+    /// <summary>An explicit rename (set via the item's context menu) always wins; otherwise every
+    /// item displays without its extension, for now - regardless of type.</summary>
+    private static string GetDisplayName(FenceItem item) =>
+        !string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : Path.GetFileNameWithoutExtension(item.Path);
 
     private Icon? GetIcon(string path)
     {
@@ -394,37 +544,27 @@ public sealed class FenceForm : Form
         return icon;
     }
 
-    private string? FileAtGridPosition(Point clientLocation)
+    /// <summary>contentLocation is relative to the visible fence (see ToContent), not the padded window.</summary>
+    private string? FileAtGridPosition(Point contentLocation)
     {
-        var index = IndexAtGridPosition(clientLocation);
+        var index = IndexAtGridPosition(contentLocation);
         return index is int i ? _model.Files[i].Path : null;
     }
 
-    private int? IndexAtGridPosition(Point clientLocation)
+    private int? IndexAtGridPosition(Point contentLocation)
     {
-        if (_model.Files.Count == 0 || clientLocation.Y < TitleBarHeight)
+        if (_model.Files.Count == 0 || contentLocation.Y < TitleBarHeight)
             return null;
 
-        NativeMethods.GetClientRect(Handle, out var clientRect);
-        var columns = Math.Max(1, (clientRect.Right - GridPadding * 2) / CellWidth);
+        var columns = Math.Max(1, (GetContentSize().Width - GridPadding * 2) / CellWidth);
 
-        var column = (clientLocation.X - GridPadding) / CellWidth;
-        var row = (clientLocation.Y - TitleBarHeight - GridPadding) / CellHeight;
+        var column = (contentLocation.X - GridPadding) / CellWidth;
+        var row = (contentLocation.Y - TitleBarHeight - GridPadding) / CellHeight;
         if (column < 0 || column >= columns || row < 0)
             return null;
 
         var index = row * columns + column;
         return index >= 0 && index < _model.Files.Count ? index : null;
-    }
-
-    private void ApplyRoundedRegion(int width, int height)
-    {
-        using var path = RoundedRect(new Rectangle(0, 0, width, height), CornerRadius);
-        using var region = new Region(path);
-        using var g = Graphics.FromHwnd(Handle);
-        var hrgn = region.GetHrgn(g);
-        // SetWindowRgn takes ownership of hrgn - it must not be deleted/released afterward.
-        NativeMethods.SetWindowRgn(Handle, hrgn, true);
     }
 
     private void ShowContextMenu(Point clientPoint)
@@ -490,7 +630,7 @@ public sealed class FenceForm : Form
             return;
 
         _manager.RemoveFile(FenceId, path);
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void BeginRename()
@@ -498,10 +638,12 @@ public sealed class FenceForm : Form
         if (_renameBox is not null)
             return;
 
-        if (!NativeMethods.GetClientRect(Handle, out var clientRect))
+        var contentWidth = GetContentSize().Width;
+        if (contentWidth <= 0)
             return;
 
-        _renameBox = new EditBox(Handle, _model.Name, new Rectangle(6, 3, Math.Max(clientRect.Right - 12, 0), 20));
+        var rect = ToWindow(new Rectangle(6, 3, Math.Max(contentWidth - 12, 0), 20));
+        _renameBox = new EditBox(Handle, _model.Name, rect);
         _renameBox.Commit += OnRenameCommit;
         _renameBox.Cancel += OnRenameCancel;
     }
@@ -515,14 +657,14 @@ public sealed class FenceForm : Form
         if (!string.IsNullOrEmpty(newName) && newName != _model.Name)
             _manager.NotifyRenamed(FenceId, newName);
 
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void OnRenameCancel()
     {
         _renameBox?.Dispose();
         _renameBox = null;
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void BeginRenameItem(string? path)
@@ -531,21 +673,22 @@ public sealed class FenceForm : Form
             return;
 
         var index = _model.Files.FindIndex(f => f.Path == path);
-        if (index < 0 || !NativeMethods.GetClientRect(Handle, out var clientRect))
+        var contentWidth = GetContentSize().Width;
+        if (index < 0 || contentWidth <= 0)
             return;
 
-        var columns = Math.Max(1, (clientRect.Right - GridPadding * 2) / CellWidth);
+        var columns = Math.Max(1, (contentWidth - GridPadding * 2) / CellWidth);
         var column = index % columns;
         var row = index / columns;
         var cellX = GridPadding + column * CellWidth;
         var cellY = TitleBarHeight + GridPadding + row * CellHeight;
-        var labelRect = new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20);
+        var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;
         _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), labelRect);
         _itemRenameBox.Commit += OnItemRenameCommit;
         _itemRenameBox.Cancel += OnItemRenameCancel;
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void OnItemRenameCommit(string newName)
@@ -559,7 +702,7 @@ public sealed class FenceForm : Form
         if (!string.IsNullOrEmpty(newName) && path is not null)
             _manager.RenameFile(FenceId, path, newName);
 
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void OnItemRenameCancel()
@@ -567,7 +710,7 @@ public sealed class FenceForm : Form
         _itemRenameBox?.Dispose();
         _itemRenameBox = null;
         _itemRenamePath = null;
-        NativeMethods.InvalidateRect(Handle, IntPtr.Zero, true);
+        RenderAndPresent();
     }
 
     private void ConfirmDelete()

@@ -20,6 +20,38 @@ internal struct RECT
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct SIZE
+{
+    public int cx;
+    public int cy;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct BLENDFUNCTION
+{
+    public byte BlendOp;
+    public byte BlendFlags;
+    public byte SourceConstantAlpha;
+    public byte AlphaFormat;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct BITMAPINFOHEADER
+{
+    public uint biSize;
+    public int biWidth;
+    public int biHeight;
+    public ushort biPlanes;
+    public ushort biBitCount;
+    public uint biCompression;
+    public uint biSizeImage;
+    public int biXPelsPerMeter;
+    public int biYPelsPerMeter;
+    public uint biClrUsed;
+    public uint biClrImportant;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct PAINTSTRUCT
 {
     public IntPtr hdc;
@@ -94,12 +126,16 @@ internal static class NativeMethods
     public const int WS_BORDER = 0x00800000;
     public const int ES_AUTOHSCROLL = 0x0080;
     public const int WS_EX_LAYERED = 0x00080000;
+    public const int WS_EX_TRANSPARENT = 0x00000020;
+    public const int WS_EX_NOACTIVATE = 0x08000000;
+    public const int WS_EX_TOPMOST = 0x00000008;
     public const byte LWA_ALPHA = 0x2;
     public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_HIDE = 0;
 
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
 
     public const uint MF_STRING = 0x0000;
     public const uint MF_SEPARATOR = 0x0800;
@@ -118,6 +154,11 @@ internal static class NativeMethods
     public const uint MEM_RESERVE = 0x2000;
     public const uint MEM_RELEASE = 0x8000;
     public const uint PAGE_READWRITE = 0x04;
+
+    public const uint ULW_ALPHA = 0x2;
+    public const byte AC_SRC_OVER = 0x0;
+    public const byte AC_SRC_ALPHA = 0x1;
+    public const uint DIB_RGB_COLORS = 0;
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
@@ -278,4 +319,33 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteObject(IntPtr hObject);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER pbmi, uint usage,
+        out IntPtr ppvBits, IntPtr hSection, uint offset);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize,
+        IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
 }

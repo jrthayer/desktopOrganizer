@@ -104,6 +104,20 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    /// <summary>Reorders an item within its fence's own grid - dragging within the same fence,
+    /// not a real desktop icon operation. newIndex is clamped to the valid range.</summary>
+    public void MoveFile(Guid fenceId, string path, int newIndex)
+    {
+        var model = _models.Find(m => m.Id == fenceId);
+        var item = model?.Files.Find(f => f.Path == path);
+        if (model is null || item is null)
+            return;
+
+        model.Files.Remove(item);
+        model.Files.Insert(Math.Clamp(newIndex, 0, model.Files.Count), item);
+        Save();
+    }
+
     /// <summary>Sets an item's display name within this fence only - never renames the real file.</summary>
     public void RenameFile(Guid fenceId, string path, string displayName)
     {
