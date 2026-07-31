@@ -11,7 +11,6 @@ public sealed class FenceForm : Form
     private const int CornerRadius = 10;
 
     private const int WS_EX_TOOLWINDOW = 0x00000080;
-    private const int WS_EX_NOACTIVATE = 0x08000000;
     private const int WM_NCHITTEST = 0x0084;
 
     private const int HTCLIENT = 1;
@@ -47,6 +46,10 @@ public sealed class FenceForm : Form
         DoubleBuffered = true;
         Font = new Font("Segoe UI", 9f);
 
+        // Without this, resizing only repaints the newly-exposed strip of the window, leaving
+        // stale copies of the custom-painted border/edge behind as it grows or shrinks.
+        SetStyle(ControlStyles.ResizeRedraw, true);
+
         var menu = new ContextMenuStrip();
         menu.Items.Add("Rename", null, (_, _) => BeginRename());
         menu.Items.Add("Arrange Icons Now", null, (_, _) => _manager.ArrangeFence(FenceId));
@@ -60,7 +63,7 @@ public sealed class FenceForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
             return cp;
         }
     }
@@ -130,14 +133,6 @@ public sealed class FenceForm : Form
             short y = (short)((lParam >> 16) & 0xFFFF);
             var pt = PointToClient(new Point(x, y));
             m.Result = (IntPtr)HitTest(pt);
-            return;
-        }
-
-        if (m.Msg == NativeMethods.WM_MOUSEACTIVATE)
-        {
-            // Clicking/dragging a fence must never steal foreground focus from whatever
-            // app the user is using.
-            m.Result = (IntPtr)NativeMethods.MA_NOACTIVATE;
             return;
         }
 
