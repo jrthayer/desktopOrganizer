@@ -12,6 +12,7 @@ public sealed class FenceForm : Form
 
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WM_NCHITTEST = 0x0084;
+    private const int WM_NCLBUTTONDBLCLK = 0x00A3;
 
     private const int HTCLIENT = 1;
     private const int HTCAPTION = 2;
@@ -117,13 +118,6 @@ public sealed class FenceForm : Form
         }
     }
 
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
-    {
-        base.OnMouseDoubleClick(e);
-        if (e.Y <= TitleBarHeight)
-            BeginRename();
-    }
-
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_NCHITTEST)
@@ -133,6 +127,16 @@ public sealed class FenceForm : Form
             short y = (short)((lParam >> 16) & 0xFFFF);
             var pt = PointToClient(new Point(x, y));
             m.Result = (IntPtr)HitTest(pt);
+            return;
+        }
+
+        if (m.Msg == WM_NCLBUTTONDBLCLK)
+        {
+            // Because HitTest reports HTCAPTION for the title bar, a double-click there arrives
+            // as this non-client message, not a normal client-area double-click - and letting the
+            // OS's default handling run would maximize the window (its usual behavior for
+            // double-clicking any window's caption). Rename here instead and swallow the message.
+            BeginRename();
             return;
         }
 
@@ -209,13 +213,17 @@ public sealed class FenceForm : Form
 
     private void CommitRename()
     {
-        if (_renameBox is null)
+        // Removing/disposing a focused control fires its LostFocus event synchronously, which
+        // is also wired to call this method - null the field out before touching Controls/Dispose
+        // so that reentrant call sees _renameBox as already gone and simply returns.
+        var box = _renameBox;
+        if (box is null)
             return;
-
-        var newName = _renameBox.Text.Trim();
-        Controls.Remove(_renameBox);
-        _renameBox.Dispose();
         _renameBox = null;
+
+        var newName = box.Text.Trim();
+        Controls.Remove(box);
+        box.Dispose();
 
         if (!string.IsNullOrEmpty(newName) && newName != _model.Name)
             _manager.NotifyRenamed(FenceId, newName);
@@ -225,12 +233,16 @@ public sealed class FenceForm : Form
 
     private void CancelRename()
     {
-        if (_renameBox is null)
+        // Same reentrancy hazard as CommitRename (Controls.Remove below can synchronously fire
+        // LostFocus -> CommitRename) - null the field first so Escape reliably discards the
+        // edit instead of a reentrant LostFocus committing it anyway.
+        var box = _renameBox;
+        if (box is null)
             return;
-
-        Controls.Remove(_renameBox);
-        _renameBox.Dispose();
         _renameBox = null;
+
+        Controls.Remove(box);
+        box.Dispose();
         Invalidate();
     }
 
