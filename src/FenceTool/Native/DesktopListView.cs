@@ -22,12 +22,29 @@ public sealed class DesktopListView : IDisposable
     public DesktopListView()
     {
         _messageWindow = new BackgroundMessageWindow();
-        _messageWindow.TaskbarCreated += (_, _) => Invalidate();
+        _messageWindow.TaskbarCreated += (_, _) =>
+        {
+            Invalidate();
+            ExplorerRestarted?.Invoke(this, EventArgs.Empty);
+        };
     }
+
+    /// <summary>Fires after explorer.exe restarts, once handles have been invalidated. Callers
+    /// that cached the anchor/DefView handles (e.g. to re-parent a window onto the desktop)
+    /// should re-anchor in response, since those handles are now stale.</summary>
+    public event EventHandler? ExplorerRestarted;
 
     public bool IsDiscovered => _hListView != IntPtr.Zero && NativeMethods.IsWindow(_hListView);
 
     public bool EnsureDiscovered() => IsDiscovered || Discover();
+
+    /// <summary>The Progman or WorkerW window that directly parents SHELLDLL_DefView - the
+    /// window a fence should be SetParent'd onto to live on the desktop.</summary>
+    public IntPtr AnchorHandle => _hAnchor;
+
+    /// <summary>SHELLDLL_DefView - passing this as SetWindowPos's hwndInsertAfter places a
+    /// fence immediately behind the icon layer in z-order.</summary>
+    public IntPtr DefViewHandle => _hDefView;
 
     public void Dispose() => _messageWindow.Dispose();
 

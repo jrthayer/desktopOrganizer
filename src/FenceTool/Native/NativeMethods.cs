@@ -11,6 +11,15 @@ internal struct POINT
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct RECT
+{
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct LVITEM
 {
     public uint mask;
@@ -53,6 +62,13 @@ internal static class NativeMethods
     public const uint SPI_GETICONMETRICS = 0x002D;
 
     public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    public const int WM_DISPLAYCHANGE = 0x007E;
+    public const int WM_MOUSEACTIVATE = 0x0021;
+    public const int MA_NOACTIVATE = 3;
+
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOACTIVATE = 0x0010;
 
     public const uint PROCESS_VM_OPERATION = 0x0008;
     public const uint PROCESS_VM_READ = 0x0010;
@@ -131,4 +147,15 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 }

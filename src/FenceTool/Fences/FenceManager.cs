@@ -7,8 +7,15 @@ public sealed class FenceManager : IDisposable
 {
     private readonly FenceStore _store = new();
     private readonly DesktopListView _desktopListView = new();
+    private readonly IDesktopAnchorStrategy _anchorStrategy;
     private readonly List<FenceModel> _models = new();
     private readonly Dictionary<Guid, FenceForm> _forms = new();
+
+    public FenceManager()
+    {
+        _anchorStrategy = new EmbeddedDesktopAnchorStrategy(_desktopListView);
+        _desktopListView.ExplorerRestarted += (_, _) => ReanchorAll();
+    }
 
     public void LoadAndShowAll()
     {
@@ -146,9 +153,15 @@ public sealed class FenceManager : IDisposable
 
     private void ShowFence(FenceModel model)
     {
-        var form = new FenceForm(model, this);
+        var form = new FenceForm(model, this, _anchorStrategy);
         _forms[model.Id] = form;
         form.Show();
+    }
+
+    private void ReanchorAll()
+    {
+        foreach (var form in _forms.Values)
+            form.Reanchor();
     }
 
     private void Save() => _store.Save(_models);

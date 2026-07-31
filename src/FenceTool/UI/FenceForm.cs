@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using FenceTool.Fences;
+using FenceTool.Native;
 
 namespace FenceTool.UI;
 
@@ -10,6 +11,7 @@ public sealed class FenceForm : Form
     private const int CornerRadius = 10;
 
     private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
     private const int WM_NCHITTEST = 0x0084;
 
     private const int HTCLIENT = 1;
@@ -25,14 +27,16 @@ public sealed class FenceForm : Form
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
+    private readonly IDesktopAnchorStrategy _anchorStrategy;
     private TextBox? _renameBox;
 
     public Guid FenceId => _model.Id;
 
-    public FenceForm(FenceModel model, FenceManager manager)
+    public FenceForm(FenceModel model, FenceManager manager, IDesktopAnchorStrategy anchorStrategy)
     {
         _model = model;
         _manager = manager;
+        _anchorStrategy = anchorStrategy;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -56,15 +60,20 @@ public sealed class FenceForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             return cp;
         }
     }
+
+    /// <summary>Re-applies the desktop anchor (e.g. after explorer.exe restarts or a display
+    /// change invalidates the previous z-order/parenting).</summary>
+    public void Reanchor() => _anchorStrategy.Apply(Handle, Bounds);
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
         ApplyRoundedRegion();
+        Reanchor();
     }
 
     protected override void OnResize(EventArgs e)
@@ -121,6 +130,18 @@ public sealed class FenceForm : Form
             short y = (short)((lParam >> 16) & 0xFFFF);
             var pt = PointToClient(new Point(x, y));
             m.Result = (IntPtr)HitTest(pt);
+            return;
+        }
+
+        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
+        {
+            Reanchor();
+        }
+        else if (m.Msg == NativeMethods.WM_MOUSEACTIVATE)
+        {
+            // Clicking/dragging a fence must never steal foreground focus from whatever
+            // app the user is using.
+            m.Result = (IntPtr)NativeMethods.MA_NOACTIVATE;
             return;
         }
 
