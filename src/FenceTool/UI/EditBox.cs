@@ -4,9 +4,16 @@ using FenceTool.Native;
 namespace FenceTool.UI;
 
 /// <summary>
-/// Thin wrapper around a native Win32 "Edit" child control, subclassed (via NativeWindow.AssignHandle)
-/// to intercept Enter (commit) and Escape (cancel) - used for the fence rename textbox since FenceForm
+/// Thin wrapper around a native Win32 "Edit" control, subclassed (via NativeWindow.AssignHandle) to
+/// intercept Enter (commit) and Escape (cancel) - used for the fence rename textbox since FenceForm
 /// is a raw window with no WinForms Controls collection to host a real TextBox in.
+///
+/// A top-level WS_POPUP window owned by the fence, positioned in screen coordinates - NOT a
+/// WS_CHILD of the fence, even though visually it sits "inside" it. FenceForm paints itself via
+/// UpdateLayeredWindow (see LayeredWindowPresenter), and a layered window updated that way does not
+/// reliably composite child windows on top of its surface - the child still exists and can take
+/// focus, but never visually appears. DragGhostWindow works around the same limitation the same way
+/// (a separate top-level window rather than a child).
 /// </summary>
 internal sealed class EditBox : NativeWindow, IDisposable
 {
@@ -34,13 +41,17 @@ internal sealed class EditBox : NativeWindow, IDisposable
     public event Action<string>? Commit;
     public event Action? Cancel;
 
-    public EditBox(IntPtr parent, string initialText, Rectangle bounds)
+    /// <summary>bounds is in SCREEN coordinates (not parent-client-relative) - this is a top-level
+    /// window, not a child, so that's what CreateWindowEx's x/y expect. Callers position it via
+    /// Control.PointToScreen on whatever window-relative rect the fence itself would have used.</summary>
+    public EditBox(IntPtr owner, string initialText, Rectangle bounds)
     {
         var hwnd = NativeMethods.CreateWindowEx(
-            0, "Edit", initialText,
-            NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE | NativeMethods.WS_BORDER | NativeMethods.ES_AUTOHSCROLL,
+            0x00000080 /* WS_EX_TOOLWINDOW - keep it out of the taskbar/alt-tab */,
+            "Edit", initialText,
+            NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_BORDER | NativeMethods.ES_AUTOHSCROLL,
             bounds.X, bounds.Y, bounds.Width, bounds.Height,
-            parent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
 
         AssignHandle(hwnd);
         NativeMethods.SetFocus(hwnd);

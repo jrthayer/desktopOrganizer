@@ -72,6 +72,15 @@ public sealed class FenceForm : Form
     private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
     private const int CmdToggleHideTitle = 8;
+    private const int CmdResizeBoth = 9;
+    private const int CmdResizeLeftRight = 10;
+    private const int CmdResizeTopDown = 11;
+
+    // Not real WM_COMMAND ids (clicking a submenu-anchor row just expands it, it never fires a
+    // command) - these only tag an owner-draw row's itemData so DrawMenuItem/MeasureMenuItem know
+    // to render a submenu arrow instead of a checkbox. See ShowFenceOptionsMenu.
+    private const int TagOcdFormattingHeader = 1001;
+    private const int TagFenceDimensionsHeader = 1002;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -190,6 +199,11 @@ public sealed class FenceForm : Form
 
     private static Rectangle ToWindow(Rectangle contentRect) =>
         new(contentRect.X + OuterMargin, contentRect.Y + OuterMargin, contentRect.Width, contentRect.Height);
+
+    /// <summary>Window-relative (e.g. already run through ToWindow) to screen coordinates - needed
+    /// for EditBox, which (unlike everything else drawn here) is a real top-level window rather than
+    /// something painted into the fence's own layered bitmap. See EditBox's class doc comment.</summary>
+    private Rectangle ToScreen(Rectangle windowRect) => new(PointToScreen(windowRect.Location), windowRect.Size);
 
     private static int GetColumns(int contentWidth) => Math.Max(1, (contentWidth - GridPadding * 2) / CellWidth);
 
@@ -862,39 +876,48 @@ public sealed class FenceForm : Form
     }
 
     /// <summary>Per-fence settings, opened via the cog that appears in the title bar once this
-    /// fence is the active window (see OnActivated/OnDeactivate and the cog hit-test carve-out).</summary>
+    /// fence is the active window (see OnActivated/OnDeactivate and the cog hit-test carve-out).
+    /// Builds a 2-level tree: this menu -> "OCD Formatting", whose own submenu holds a "Fence
+    /// Dimensions" header (a plain disabled label, not a further nested submenu - see AppendHeader)
+    /// followed by its three resize actions. AppendPopup stays available as general infrastructure
+    /// for a real third level if a future subcategory needs one.</summary>
     private void ShowFenceOptionsMenu()
     {
         var contentSize = GetContentSize();
         var cogRect = GetCogRect(contentSize.Width);
         var menuPoint = PointToScreen(ToWindow(new Point(cogRect.X, cogRect.Bottom + 2)));
 
+        var hOcdMenu = NativeMethods.CreatePopupMenu();
         var hMenu = NativeMethods.CreatePopupMenu();
         var backBrush = IntPtr.Zero;
         try
         {
             // MF_OWNERDRAW rather than MF_STRING so the menu can be painted dark (matching the
             // fence) instead of the native Windows menu chrome - see MeasureMenuItem/DrawMenuItem,
-            // wired up via WM_MEASUREITEM/WM_DRAWITEM in WndProc. The label text isn't passed here
-            // (an owner-draw item's lpNewItem is stored as raw item data, not text, and the marshaled
-            // string pointer would be freed once this call returns anyway) - it's looked up from the
-            // command id instead, in GetMenuItemText.
-            var hideLabelsFlags = NativeMethods.MF_OWNERDRAW | (_model.HideLabels ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
-            NativeMethods.AppendMenu(hMenu, hideLabelsFlags, (IntPtr)CmdToggleHideLabels, string.Empty);
+            // wired up via WM_MEASUREITEM/WM_DRAWITEM in WndProc. Every owner-draw row's label and
+            // style is looked up from a tag carried in itemData (see AppendItem/GetMenuRowStyle)
+            // rather than the item's id - a submenu-anchor row (MF_POPUP) has no command id of its
+            // own to key off (its uIDNewItem slot holds the submenu handle instead), so itemData is
+            // the only thing that works for every row uniformly.
+            AppendHeader(hOcdMenu, TagFenceDimensionsHeader);
+            AppendItem(hOcdMenu, CmdResizeBoth, false);
+            AppendItem(hOcdMenu, CmdResizeLeftRight, false);
+            AppendItem(hOcdMenu, CmdResizeTopDown, false);
 
-            var hideTitleFlags = NativeMethods.MF_OWNERDRAW | (_model.HideTitle ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
-            NativeMethods.AppendMenu(hMenu, hideTitleFlags, (IntPtr)CmdToggleHideTitle, string.Empty);
+            AppendItem(hMenu, CmdToggleHideLabels, _model.HideLabels);
+            AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
+            AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
 
             // WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
             // separately filled by the menu's own background brush, which defaults to the system's
             // (light) COLOR_MENU and shows through as a stray light border around the dark rows
-            // unless replaced here to match.
+            // unless replaced here to match. MIM_APPLYTOSUBMENUS cascades this to the submenu too.
             const uint menuBackColorRef = 32 | (32 << 8) | (36 << 16); // COLORREF 0x00BBGGRR for (32,32,36)
             backBrush = NativeMethods.CreateSolidBrush(menuBackColorRef);
             var menuInfo = new MENUINFO
             {
                 cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
-                fMask = NativeMethods.MIM_BACKGROUND,
+                fMask = NativeMethods.MIM_BACKGROUND | NativeMethods.MIM_APPLYTOSUBMENUS,
                 hbrBack = backBrush,
             };
             NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
@@ -904,56 +927,95 @@ public sealed class FenceForm : Form
         }
         finally
         {
-            NativeMethods.DestroyMenu(hMenu);
+            NativeMethods.DestroyMenu(hMenu); // recursively destroys the attached submenu too
             if (backBrush != IntPtr.Zero)
                 NativeMethods.DeleteObject(backBrush);
         }
     }
 
-    /// <summary>Owner-draw items don't carry their own text (see ShowFenceOptionsMenu) - it's
-    /// looked up here from the command id instead, shared by both MeasureMenuItem and DrawMenuItem.</summary>
-    private static string GetMenuItemText(int commandId) => commandId switch
+    private static void AppendItem(IntPtr hMenu, int commandId, bool isChecked)
     {
-        CmdToggleHideLabels => "Hide Shortcut Names",
-        CmdToggleHideTitle => "Hide Title",
-        _ => string.Empty,
+        var flags = NativeMethods.MF_OWNERDRAW | (isChecked ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
+        NativeMethods.AppendMenu(hMenu, flags, (IntPtr)commandId, (IntPtr)commandId);
+    }
+
+    /// <summary>A non-interactive section label within a submenu (e.g. "Fence Dimensions" above the
+    /// resize actions) - MF_DISABLED|MF_GRAYED so it can't be clicked, hovered, or keyboard-selected;
+    /// DrawMenuItem dims its text instead of relying on the native grayed-out rendering, since we're
+    /// owner-drawing everything else in this menu anyway.</summary>
+    private static void AppendHeader(IntPtr hMenu, int headerTag) =>
+        NativeMethods.AppendMenu(hMenu, NativeMethods.MF_OWNERDRAW | NativeMethods.MF_DISABLED | NativeMethods.MF_GRAYED, (IntPtr)headerTag, (IntPtr)headerTag);
+
+    /// <summary>General infrastructure for a nested submenu-anchor row (e.g. "OCD Formatting") -
+    /// kept generic/reusable for a future third level, even though only one level currently uses it.</summary>
+    private static void AppendPopup(IntPtr hParentMenu, IntPtr hSubMenu, int headerTag) =>
+        NativeMethods.AppendMenu(hParentMenu, NativeMethods.MF_POPUP | NativeMethods.MF_OWNERDRAW, hSubMenu, (IntPtr)headerTag);
+
+    private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader);
+
+    /// <summary>Every owner-draw row's label and decoration, keyed by the tag carried in its
+    /// itemData (see AppendItem/AppendHeader/AppendPopup) rather than its item id. Submenu-anchor
+    /// rows (e.g. "OCD Formatting") need no flag here - Windows draws their arrow indicator itself,
+    /// in a margin outside our own owner-draw rect (see DrawMenuItem).</summary>
+    private static MenuRowStyle GetMenuRowStyle(int tag) => tag switch
+    {
+        CmdToggleHideLabels => new MenuRowStyle("Hide Shortcut Names", true, false),
+        CmdToggleHideTitle => new MenuRowStyle("Hide Title", true, false),
+        TagOcdFormattingHeader => new MenuRowStyle("OCD Formatting", false, false),
+        TagFenceDimensionsHeader => new MenuRowStyle("Fence Dimensions", false, true),
+        CmdResizeBoth => new MenuRowStyle("Both", false, false),
+        CmdResizeLeftRight => new MenuRowStyle("Left/Right", false, false),
+        CmdResizeTopDown => new MenuRowStyle("Top/Down", false, false),
+        _ => new MenuRowStyle(string.Empty, false, false),
     };
 
     private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
     {
-        var size = TextRenderer.MeasureText(GetMenuItemText((int)mis.itemID), _font);
-        mis.itemWidth = (uint)(size.Width + MenuCheckboxSize + MenuTextPadding * 3);
+        var style = GetMenuRowStyle((int)mis.itemData);
+        var size = TextRenderer.MeasureText(style.Text, _font);
+        var leftReserve = style.HasCheckbox ? MenuCheckboxSize + MenuTextPadding : 0;
+        // No right-side reserve for a submenu arrow - Windows always adds its own fixed arrow
+        // margin outside whatever width we report for an MF_POPUP row, so reserving space for one
+        // here too just doubled up as a second, hand-drawn arrow next to the native one.
+        mis.itemWidth = (uint)(MenuTextPadding + leftReserve + size.Width + MenuTextPadding);
         mis.itemHeight = (uint)Math.Max(size.Height + 8, 22);
     }
 
     /// <summary>Paints one row of the fence-options dropdown to match the fence's own dark theme,
     /// instead of the native Windows menu look - background, a hand-drawn checkbox (no checkmark
-    /// glyph font is used, to sidestep the encoding issues that bit the cog glyph earlier - see the
-    /// cog's own  escape-sequence comment history), and the item's label text.</summary>
+    /// glyph font, to sidestep the encoding issues that bit the cog glyph earlier), and the row's
+    /// label text. A submenu row's arrow indicator is left to Windows to draw natively (see
+    /// MeasureMenuItem) - drawing our own there duplicated it.
     private void DrawMenuItem(DRAWITEMSTRUCT dis)
     {
         using var g = Graphics.FromHdc(dis.hDC);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var rect = Rectangle.FromLTRB(dis.rcItem.Left, dis.rcItem.Top, dis.rcItem.Right, dis.rcItem.Bottom);
-        var selected = (dis.itemState & NativeMethods.ODS_SELECTED) != 0;
+        var style = GetMenuRowStyle((int)dis.itemData);
+        var selected = !style.IsHeader && (dis.itemState & NativeMethods.ODS_SELECTED) != 0;
         var isChecked = (dis.itemState & NativeMethods.ODS_CHECKED) != 0;
 
         using (var background = new SolidBrush(selected ? Color.FromArgb(255, 55, 55, 62) : Color.FromArgb(255, 32, 32, 36)))
             g.FillRectangle(background, rect);
 
-        var checkRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
-        using (var checkPen = new Pen(Color.FromArgb(255, 150, 150, 158)))
-            g.DrawRectangle(checkPen, checkRect);
-
-        if (isChecked)
+        if (style.HasCheckbox)
         {
-            using var checkMarkPen = new Pen(Color.FromArgb(255, 120, 170, 255), 2);
-            g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
-            g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
+            var checkRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
+            using (var checkPen = new Pen(Color.FromArgb(255, 150, 150, 158)))
+                g.DrawRectangle(checkPen, checkRect);
+
+            if (isChecked)
+            {
+                using var checkMarkPen = new Pen(Color.FromArgb(255, 120, 170, 255), 2);
+                g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
+                g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
+            }
         }
 
-        var textRect = new Rectangle(checkRect.Right + MenuTextPadding, rect.Y, rect.Width - checkRect.Width - MenuTextPadding * 2, rect.Height);
-        TextRenderer.DrawText(g, GetMenuItemText((int)dis.itemID), _font, textRect, Color.WhiteSmoke,
+        var textLeft = rect.X + MenuTextPadding + (style.HasCheckbox ? MenuCheckboxSize + MenuTextPadding : 0);
+        var textRect = new Rectangle(textLeft, rect.Y, Math.Max(0, rect.Right - MenuTextPadding - textLeft), rect.Height);
+        var textColor = style.IsHeader ? Color.FromArgb(255, 140, 140, 148) : Color.WhiteSmoke;
+        TextRenderer.DrawText(g, style.Text, _font, textRect, textColor,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 
@@ -968,6 +1030,9 @@ public sealed class FenceForm : Form
             case CmdRenameItem: BeginRenameItem(_contextItem); break;
             case CmdToggleHideLabels: ToggleHideLabels(); break;
             case CmdToggleHideTitle: ToggleHideTitle(); break;
+            case CmdResizeBoth: FormatDimensions(adjustWidth: true, adjustHeight: true); break;
+            case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
+            case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
         }
     }
 
@@ -1007,6 +1072,57 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>"OCD Formatting -> Fence Dimensions" - shrinks or grows the fence to trim away
+    /// wasted space around its current grid, keeping the top-left corner fixed. Trims to what's
+    /// already on screen, not the fence's full contents: height never expands past however many
+    /// rows are currently visible, so a fence that's deliberately kept short (scrollable) doesn't
+    /// get blown open to reveal everything. adjustWidth/adjustHeight let the three menu entries
+    /// (Both/Left-Right/Top-Down) share this one implementation.</summary>
+    private void FormatDimensions(bool adjustWidth, bool adjustHeight)
+    {
+        var contentSize = GetContentSize();
+        if (contentSize.Width <= 0 || contentSize.Height <= 0 || _model.Files.Count == 0)
+            return;
+
+        var currentColumns = GetColumns(contentSize.Width);
+        // Don't keep more column slots than there are icons to fill them - a fence with 2 icons
+        // and room for 5 columns is just as untidy as one with extra trailing padding.
+        var columns = adjustWidth ? Math.Min(currentColumns, _model.Files.Count) : currentColumns;
+
+        var availableHeight = Math.Max(0, contentSize.Height - GridTop - GridPadding * 2);
+        var currentVisibleRows = Math.Max(1, availableHeight / EffectiveCellHeight);
+        var totalRowsNeeded = (_model.Files.Count + columns - 1) / columns;
+        var finalRows = adjustHeight ? Math.Min(currentVisibleRows, totalRowsNeeded) : currentVisibleRows;
+
+        var newBounds = _model.Bounds;
+
+        if (adjustWidth)
+        {
+            newBounds.Width = GridPadding * 2 + columns * CellWidth;
+
+            // A fence that still won't show every row after this needs its own reserved strip for
+            // the scrollbar - GridPadding is just breathing room around the grid, not real estate
+            // set aside for it, so without this the scrollbar would have nowhere to go but
+            // overlapping the last column's icons.
+            if (finalRows < totalRowsNeeded)
+                newBounds.Width += ScrollbarWidth + ScrollbarMargin;
+        }
+
+        if (adjustHeight)
+            newBounds.Height = GridTop + GridPadding * 2 + finalRows * EffectiveCellHeight;
+
+        if (newBounds == _model.Bounds)
+            return;
+
+        // WM_SIZE (already handled in WndProc) re-renders with the new size once this returns -
+        // NotifyBoundsChanged just needs to persist it, the same way WM_EXITSIZEMOVE does after an
+        // interactive drag-resize.
+        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
+            newBounds.Width + OuterMargin * 2, newBounds.Height + OuterMargin * 2,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+        _manager.NotifyBoundsChanged(FenceId, newBounds);
+    }
+
     private void BeginRename()
     {
         if (_renameBox is not null)
@@ -1017,7 +1133,7 @@ public sealed class FenceForm : Form
             return;
 
         var rect = ToWindow(new Rectangle(6, 3, Math.Max(contentWidth - 12, 0), 20));
-        _renameBox = new EditBox(Handle, _model.Name, rect);
+        _renameBox = new EditBox(Handle, _model.Name, ToScreen(rect));
         _renameBox.Commit += OnRenameCommit;
         _renameBox.Cancel += OnRenameCancel;
     }
@@ -1070,7 +1186,7 @@ public sealed class FenceForm : Form
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;
-        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), labelRect);
+        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), ToScreen(labelRect));
         _itemRenameBox.Commit += OnItemRenameCommit;
         _itemRenameBox.Cancel += OnItemRenameCancel;
         RenderAndPresent();

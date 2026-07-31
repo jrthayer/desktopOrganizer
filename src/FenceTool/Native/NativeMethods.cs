@@ -179,6 +179,9 @@ internal static class NativeMethods
     public const uint MF_CHECKED = 0x0008;
     public const uint MF_UNCHECKED = 0x0000;
     public const uint MF_OWNERDRAW = 0x0100;
+    public const uint MF_POPUP = 0x0010;
+    public const uint MF_GRAYED = 0x0001;
+    public const uint MF_DISABLED = 0x0002;
     public const uint TPM_LEFTBUTTON = 0x0000;
     public const uint TPM_RIGHTBUTTON = 0x0002;
 
@@ -187,6 +190,7 @@ internal static class NativeMethods
     public const int WM_NCLBUTTONDOWN = 0x00A1;
     public const uint ODT_MENU = 1;
     public const uint MIM_BACKGROUND = 0x00000002;
+    public const uint MIM_APPLYTOSUBMENUS = 0x80000000;
     public const uint ODS_SELECTED = 0x0001;
     public const uint ODS_CHECKED = 0x0008;
 
@@ -352,6 +356,15 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool AppendMenu(IntPtr hMenu, uint uFlags, IntPtr uIDNewItem, string lpNewItem);
+
+    // Overload resolved by the lpNewItem argument's type - used for MF_OWNERDRAW items instead of
+    // the string overload above, so a small app-defined tag can be carried in itemData reliably
+    // (see MEASUREITEMSTRUCT/DRAWITEMSTRUCT.itemData): the string overload's marshaled buffer is
+    // freed once AppendMenu returns, which is fine when nothing reads it back, but itemData here
+    // needs to stay meaningful for as long as the menu is shown.
+    [DllImport("user32.dll", EntryPoint = "AppendMenuW", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AppendMenu(IntPtr hMenu, uint uFlags, IntPtr uIDNewItem, IntPtr lpNewItem);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
