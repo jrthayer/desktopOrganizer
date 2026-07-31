@@ -127,6 +127,12 @@ public sealed class FenceForm : Form
     private bool _isActive;
     private readonly Font _cogFont = new("Segoe MDL2 Assets", 9f);
 
+    // Backs both the rename EditBox (via WM_CTLCOLOREDIT, see WndProc) and every owner-draw popup
+    // menu (fence-options dropdown and right-click context menus) - one shared dark fill, matching
+    // the fence body color, for everything that would otherwise default to a native white/light
+    // control background. Lives for the form's whole lifetime rather than being recreated per menu.
+    private readonly IntPtr _darkBrush = NativeMethods.CreateSolidBrush(ColorRef(Color.FromArgb(32, 32, 36)));
+
     public Guid FenceId => _model.Id;
 
     /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
@@ -255,6 +261,7 @@ public sealed class FenceForm : Form
             _dragGhost?.Dispose();
             _font.Dispose();
             _cogFont.Dispose();
+            NativeMethods.DeleteObject(_darkBrush);
             foreach (var icon in _iconCache.Values)
                 icon?.Dispose();
         }
@@ -495,6 +502,17 @@ public sealed class FenceForm : Form
 
             case WM_COMMAND:
                 HandleCommand(m.WParam.ToInt32() & 0xFFFF);
+                return;
+
+            case NativeMethods.WM_CTLCOLOREDIT:
+                // Sent by the rename EditBox to its owner (GetParent resolves to us even though
+                // it's a top-level WS_POPUP, not a true child - see EditBox's class comment) each
+                // time it needs to know what to paint itself with. Recoloring here, rather than in
+                // EditBox itself, is the standard way to restyle a plain Edit control - it has no
+                // owner-draw hook of its own the way buttons/menus do.
+                NativeMethods.SetTextColor(m.WParam, ColorRef(Color.WhiteSmoke));
+                NativeMethods.SetBkColor(m.WParam, ColorRef(Color.FromArgb(32, 32, 36)));
+                m.Result = _darkBrush;
                 return;
 
             case NativeMethods.WM_MEASUREITEM:
@@ -855,16 +873,18 @@ public sealed class FenceForm : Form
         {
             if (_contextItem is not null)
             {
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdOpenItem, "Open");
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRenameItem, "Rename");
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRemoveItem, "Remove From Fence");
+                AppendItem(hMenu, CmdOpenItem, false);
+                AppendItem(hMenu, CmdRenameItem, false);
+                AppendItem(hMenu, CmdRemoveItem, false);
             }
             else
             {
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdRename, "Rename");
+                AppendItem(hMenu, CmdRename, false);
                 NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-                NativeMethods.AppendMenu(hMenu, NativeMethods.MF_STRING, (IntPtr)CmdDelete, "Delete Fence");
+                AppendItem(hMenu, CmdDelete, false);
             }
+
+            ApplyDarkMenuTheme(hMenu);
 
             NativeMethods.SetForegroundWindow(Handle);
             NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_RIGHTBUTTON, pt.X, pt.Y, Handle, IntPtr.Zero);
@@ -889,7 +909,6 @@ public sealed class FenceForm : Form
 
         var hOcdMenu = NativeMethods.CreatePopupMenu();
         var hMenu = NativeMethods.CreatePopupMenu();
-        var backBrush = IntPtr.Zero;
         try
         {
             // MF_OWNERDRAW rather than MF_STRING so the menu can be painted dark (matching the
@@ -908,19 +927,7 @@ public sealed class FenceForm : Form
             AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
             AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
 
-            // WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
-            // separately filled by the menu's own background brush, which defaults to the system's
-            // (light) COLOR_MENU and shows through as a stray light border around the dark rows
-            // unless replaced here to match. MIM_APPLYTOSUBMENUS cascades this to the submenu too.
-            const uint menuBackColorRef = 32 | (32 << 8) | (36 << 16); // COLORREF 0x00BBGGRR for (32,32,36)
-            backBrush = NativeMethods.CreateSolidBrush(menuBackColorRef);
-            var menuInfo = new MENUINFO
-            {
-                cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
-                fMask = NativeMethods.MIM_BACKGROUND | NativeMethods.MIM_APPLYTOSUBMENUS,
-                hbrBack = backBrush,
-            };
-            NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
+            ApplyDarkMenuTheme(hMenu);
 
             NativeMethods.SetForegroundWindow(Handle);
             NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_LEFTBUTTON, menuPoint.X, menuPoint.Y, Handle, IntPtr.Zero);
@@ -928,9 +935,23 @@ public sealed class FenceForm : Form
         finally
         {
             NativeMethods.DestroyMenu(hMenu); // recursively destroys the attached submenu too
-            if (backBrush != IntPtr.Zero)
-                NativeMethods.DeleteObject(backBrush);
         }
+    }
+
+    /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
+    /// separately filled by the menu's own background brush, which defaults to the system's (light)
+    /// COLOR_MENU and shows through as a stray light border around the dark rows unless replaced
+    /// here to match. MIM_APPLYTOSUBMENUS cascades this to any attached submenus too. Reuses
+    /// _darkBrush rather than creating/deleting a brush per menu invocation.</summary>
+    private void ApplyDarkMenuTheme(IntPtr hMenu)
+    {
+        var menuInfo = new MENUINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
+            fMask = NativeMethods.MIM_BACKGROUND | NativeMethods.MIM_APPLYTOSUBMENUS,
+            hbrBack = _darkBrush,
+        };
+        NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
     }
 
     private static void AppendItem(IntPtr hMenu, int commandId, bool isChecked)
@@ -966,8 +987,15 @@ public sealed class FenceForm : Form
         CmdResizeBoth => new MenuRowStyle("Both", false, false),
         CmdResizeLeftRight => new MenuRowStyle("Left/Right", false, false),
         CmdResizeTopDown => new MenuRowStyle("Top/Down", false, false),
+        CmdOpenItem => new MenuRowStyle("Open", false, false),
+        CmdRenameItem => new MenuRowStyle("Rename", false, false),
+        CmdRemoveItem => new MenuRowStyle("Remove From Fence", false, false),
+        CmdRename => new MenuRowStyle("Rename", false, false),
+        CmdDelete => new MenuRowStyle("Delete Fence", false, false),
         _ => new MenuRowStyle(string.Empty, false, false),
     };
+
+    private static uint ColorRef(Color c) => (uint)(c.R | (c.G << 8) | (c.B << 16));
 
     private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
     {
@@ -1133,7 +1161,7 @@ public sealed class FenceForm : Form
             return;
 
         var rect = ToWindow(new Rectangle(6, 3, Math.Max(contentWidth - 12, 0), 20));
-        _renameBox = new EditBox(Handle, _model.Name, ToScreen(rect));
+        _renameBox = new EditBox(Handle, _model.Name, ToScreen(rect), _font);
         _renameBox.Commit += OnRenameCommit;
         _renameBox.Cancel += OnRenameCancel;
     }
@@ -1186,7 +1214,7 @@ public sealed class FenceForm : Form
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;
-        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), ToScreen(labelRect));
+        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), ToScreen(labelRect), _font);
         _itemRenameBox.Commit += OnItemRenameCommit;
         _itemRenameBox.Cancel += OnItemRenameCancel;
         RenderAndPresent();

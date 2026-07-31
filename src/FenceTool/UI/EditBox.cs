@@ -21,8 +21,11 @@ internal sealed class EditBox : NativeWindow, IDisposable
     private const int WM_CHAR = 0x0102;
     private const int WM_KILLFOCUS = 0x0008;
     private const int WM_GETDLGCODE = 0x0087;
+    private const int WM_SETFONT = 0x0030;
     private const int VK_RETURN = 0x0D;
     private const int VK_ESCAPE = 0x1B;
+
+    private readonly IntPtr _hFont;
 
     // Without this, WinForms' own Application.Run message loop (which does IsDialogMessage-style
     // preprocessing for Enter/Escape/Tab on every window) swallows the Enter keydown before it
@@ -43,8 +46,11 @@ internal sealed class EditBox : NativeWindow, IDisposable
 
     /// <summary>bounds is in SCREEN coordinates (not parent-client-relative) - this is a top-level
     /// window, not a child, so that's what CreateWindowEx's x/y expect. Callers position it via
-    /// Control.PointToScreen on whatever window-relative rect the fence itself would have used.</summary>
-    public EditBox(IntPtr owner, string initialText, Rectangle bounds)
+    /// Control.PointToScreen on whatever window-relative rect the fence itself would have used.
+    /// font is applied via WM_SETFONT so the box's text matches the fence's own font instead of the
+    /// default system dialog font; colors are handled separately by the owner responding to
+    /// WM_CTLCOLOREDIT (a plain Edit control has no owner-draw hook of its own for that).</summary>
+    public EditBox(IntPtr owner, string initialText, Rectangle bounds, Font font)
     {
         var hwnd = NativeMethods.CreateWindowEx(
             0x00000080 /* WS_EX_TOOLWINDOW - keep it out of the taskbar/alt-tab */,
@@ -54,6 +60,8 @@ internal sealed class EditBox : NativeWindow, IDisposable
             owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
 
         AssignHandle(hwnd);
+        _hFont = font.ToHfont();
+        NativeMethods.SendMessage(hwnd, WM_SETFONT, _hFont, (IntPtr)1);
         NativeMethods.SetFocus(hwnd);
         NativeMethods.SendMessage(hwnd, NativeMethods.EM_SETSEL, IntPtr.Zero, (IntPtr)(-1));
     }
@@ -120,5 +128,7 @@ internal sealed class EditBox : NativeWindow, IDisposable
     {
         if (Handle != IntPtr.Zero)
             DestroyHandle();
+        if (_hFont != IntPtr.Zero)
+            NativeMethods.DeleteObject(_hFont);
     }
 }

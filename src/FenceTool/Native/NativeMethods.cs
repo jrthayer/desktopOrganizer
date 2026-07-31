@@ -193,6 +193,7 @@ internal static class NativeMethods
     public const uint MIM_APPLYTOSUBMENUS = 0x80000000;
     public const uint ODS_SELECTED = 0x0001;
     public const uint ODS_CHECKED = 0x0008;
+    public const int WM_CTLCOLOREDIT = 0x0133;
 
     public const int EM_SETSEL = 0x00B1;
 
@@ -421,4 +422,10 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     public static extern IntPtr CreateSolidBrush(uint crColor);
+
+    [DllImport("gdi32.dll")]
+    public static extern uint SetTextColor(IntPtr hdc, uint crColor);
+
+    [DllImport("gdi32.dll")]
+    public static extern uint SetBkColor(IntPtr hdc, uint crColor);
 }
