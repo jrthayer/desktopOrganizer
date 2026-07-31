@@ -73,6 +73,8 @@ public sealed class FenceForm : Form
     private const int IconTopPadding = 8;
     private const int CellWidth = 84;
     private const int CellHeight = 94;
+    private const int ScrollbarWidth = 6;
+    private const int ScrollbarMargin = 3;
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
@@ -95,6 +97,12 @@ public sealed class FenceForm : Form
     private int? _draggingIndex;
     private Point _dragCurrentPoint;
     private DragGhostWindow? _dragGhost;
+
+    // Vertical scroll for fences that hold more rows of items than fit in their set height.
+    private int _scrollOffset;
+    private bool _scrollbarDragging;
+    private int _scrollbarDragStartY;
+    private int _scrollbarDragStartOffset;
 
     public Guid FenceId => _model.Id;
 
@@ -159,6 +167,40 @@ public sealed class FenceForm : Form
     private static Rectangle ToWindow(Rectangle contentRect) =>
         new(contentRect.X + OuterMargin, contentRect.Y + OuterMargin, contentRect.Width, contentRect.Height);
 
+    private static int GetColumns(int contentWidth) => Math.Max(1, (contentWidth - GridPadding * 2) / CellWidth);
+
+    /// <summary>How far the grid can scroll (0 if every item's row already fits in contentHeight).</summary>
+    private int GetMaxScroll(int contentWidth, int contentHeight)
+    {
+        if (_model.Files.Count == 0)
+            return 0;
+
+        var columns = GetColumns(contentWidth);
+        var rows = (_model.Files.Count + columns - 1) / columns;
+        var availableHeight = Math.Max(0, contentHeight - TitleBarHeight - GridPadding * 2);
+        return Math.Max(0, rows * CellHeight - availableHeight);
+    }
+
+    private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
+
+    /// <summary>Null when the fence's content doesn't need to scroll (no scrollbar to draw or hit-test).</summary>
+    private ScrollbarGeometry? GetScrollbarGeometry(int contentWidth, int contentHeight)
+    {
+        var maxScroll = GetMaxScroll(contentWidth, contentHeight);
+        if (maxScroll <= 0)
+            return null;
+
+        var trackTop = TitleBarHeight + GridPadding;
+        var trackHeight = Math.Max(0, contentHeight - trackTop - GridPadding);
+        var trackX = contentWidth - ScrollbarWidth - ScrollbarMargin;
+        var totalHeight = trackHeight + maxScroll;
+        var thumbHeight = Math.Min(trackHeight, Math.Max(20, (int)((long)trackHeight * trackHeight / Math.Max(1, totalHeight))));
+        var maxThumbTravel = Math.Max(0, trackHeight - thumbHeight);
+        var thumbY = trackTop + (maxThumbTravel > 0 ? (int)((long)_scrollOffset * maxThumbTravel / maxScroll) : 0);
+
+        return new ScrollbarGeometry(trackX, trackTop, trackHeight, thumbY, thumbHeight);
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -200,7 +242,35 @@ public sealed class FenceForm : Form
         if (e.Button != MouseButtons.Left)
             return;
 
-        if (IndexAtGridPosition(ToContent(e.Location)) is int index)
+        var contentPoint = ToContent(e.Location);
+        var contentSize = GetContentSize();
+
+        if (GetScrollbarGeometry(contentSize.Width, contentSize.Height) is { } sb)
+        {
+            // A little horizontal slack around the thin thumb/track makes it easier to grab.
+            var thumbRect = new Rectangle(sb.TrackX - 2, sb.ThumbY, ScrollbarWidth + 4, sb.ThumbHeight);
+            if (thumbRect.Contains(contentPoint))
+            {
+                _scrollbarDragging = true;
+                _scrollbarDragStartY = e.Location.Y;
+                _scrollbarDragStartOffset = _scrollOffset;
+                Capture = true;
+                return;
+            }
+
+            var trackRect = new Rectangle(sb.TrackX - 2, sb.TrackTop, ScrollbarWidth + 4, sb.TrackHeight);
+            if (trackRect.Contains(contentPoint))
+            {
+                // Clicking the track outside the thumb pages toward the click, like a normal scrollbar.
+                var page = Math.Max(CellHeight, sb.TrackHeight - CellHeight);
+                var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
+                _scrollOffset = Math.Clamp(_scrollOffset + (contentPoint.Y < sb.ThumbY ? -page : page), 0, maxScroll);
+                RenderAndPresent();
+                return;
+            }
+        }
+
+        if (IndexAtGridPosition(contentPoint) is int index)
         {
             _dragArmIndex = index;
             _dragArmPoint = e.Location; // raw window-space is fine here - only ever used as a delta
@@ -210,6 +280,21 @@ public sealed class FenceForm : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+
+        if (_scrollbarDragging)
+        {
+            var contentSize = GetContentSize();
+            if (GetScrollbarGeometry(contentSize.Width, contentSize.Height) is { } sb && sb.TrackHeight > sb.ThumbHeight)
+            {
+                var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
+                var maxThumbTravel = sb.TrackHeight - sb.ThumbHeight;
+                var dy = e.Location.Y - _scrollbarDragStartY;
+                var newOffset = _scrollbarDragStartOffset + (int)((long)dy * maxScroll / maxThumbTravel);
+                _scrollOffset = Math.Clamp(newOffset, 0, maxScroll);
+                RenderAndPresent();
+            }
+            return;
+        }
 
         if (_draggingIndex is null && _dragArmIndex is int armIndex && MouseButtons == MouseButtons.Left)
         {
@@ -243,6 +328,13 @@ public sealed class FenceForm : Form
         if (e.Button != MouseButtons.Left)
             return;
 
+        if (_scrollbarDragging)
+        {
+            _scrollbarDragging = false;
+            Capture = false;
+            return;
+        }
+
         _dragArmIndex = null;
         if (_draggingIndex is not int sourceIndex)
             return;
@@ -259,6 +351,19 @@ public sealed class FenceForm : Form
         else
             _manager.RemoveFile(FenceId, path);
 
+        RenderAndPresent();
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+
+        var contentSize = GetContentSize();
+        var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
+        if (maxScroll <= 0)
+            return;
+
+        _scrollOffset = Math.Clamp(_scrollOffset - e.Delta / 120 * CellHeight, 0, maxScroll);
         RenderAndPresent();
     }
 
@@ -386,6 +491,8 @@ public sealed class FenceForm : Form
         if (contentWidth <= 0 || contentHeight <= 0)
             return;
 
+        _scrollOffset = Math.Clamp(_scrollOffset, 0, GetMaxScroll(contentWidth, contentHeight));
+
         using var buffer = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(buffer))
         {
@@ -446,7 +553,11 @@ public sealed class FenceForm : Form
         if (_model.Files.Count == 0)
             return;
 
-        var columns = Math.Max(1, (width - GridPadding * 2) / CellWidth);
+        // Items scrolled above the title bar or below the fence's bottom edge must not be able to
+        // paint there - see the SetClip comment above for why that's not just a visibility issue.
+        g.SetClip(ToWindow(new Rectangle(0, TitleBarHeight, width, height - TitleBarHeight)), CombineMode.Intersect);
+
+        var columns = GetColumns(width);
 
         for (int i = 0; i < _model.Files.Count; i++)
         {
@@ -455,7 +566,15 @@ public sealed class FenceForm : Form
             var column = i % columns;
             var row = i / columns;
             var cellX = GridPadding + column * CellWidth;
-            var cellY = TitleBarHeight + GridPadding + row * CellHeight;
+            var cellY = TitleBarHeight + GridPadding + row * CellHeight - _scrollOffset;
+
+            // A scrolled row can straddle the title-bar boundary. g.Clip normally handles that for
+            // shapes/icons (GDI+ respects it), but TextRenderer.DrawText (GDI) draws its text in
+            // full regardless of the clip region - the same disregard-for-Graphics-state quirk as
+            // TranslateTransform above, just for clipping instead of position. So icons rely on the
+            // clip as usual, but labels only draw when their whole rect is already within bounds.
+            if (cellY + CellHeight <= TitleBarHeight || cellY >= height)
+                continue;
 
             if (i == _hoverIndex && !isDragSource)
             {
@@ -481,12 +600,39 @@ public sealed class FenceForm : Form
             if (item.Path == _itemRenamePath)
                 continue;
 
-            var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, CellHeight - IconTopPadding - IconSize - 2));
-            TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
+            var labelTop = cellY + IconTopPadding + IconSize + 2;
+            var labelHeight = CellHeight - IconTopPadding - IconSize - 2;
+            if (labelTop >= TitleBarHeight)
+            {
+                // Only the bottom can need trimming here (the top is already in bounds), so
+                // shrinking the rect's height is a true clip - unlike g.Clip, TextRenderer.DrawText
+                // does respect its own rect parameter (DT_NOCLIP isn't set), cutting off whatever
+                // doesn't fit rather than needing the whole label to fit or nothing.
+                var visibleHeight = Math.Min(labelHeight, height - labelTop);
+                if (visibleHeight > 0)
+                {
+                    var labelRect = ToWindow(new Rectangle(cellX, labelTop, CellWidth, visibleHeight));
+                    TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
+                }
+            }
         }
 
         PaintDragFeedback(g, width, height);
+        PaintScrollbar(g, width, height);
+    }
+
+    private void PaintScrollbar(Graphics g, int width, int height)
+    {
+        if (GetScrollbarGeometry(width, height) is not { } sb)
+            return;
+
+        using var trackBrush = new SolidBrush(Color.FromArgb(30, 255, 255, 255));
+        g.FillRectangle(trackBrush, ToWindow(new Rectangle(sb.TrackX, sb.TrackTop, ScrollbarWidth, sb.TrackHeight)));
+
+        using var thumbBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
+        using var thumbPath = RoundedRect(ToWindow(new Rectangle(sb.TrackX, sb.ThumbY, ScrollbarWidth, sb.ThumbHeight)), ScrollbarWidth / 2);
+        g.FillPath(thumbBrush, thumbPath);
     }
 
     /// <summary>Draws the drop-target outline while an in-progress item drag (started in
@@ -501,9 +647,9 @@ public sealed class FenceForm : Form
             IndexAtGridPosition(_dragCurrentPoint) is not int targetIndex)
             return;
 
-        var columns = Math.Max(1, (width - GridPadding * 2) / CellWidth);
+        var columns = GetColumns(width);
         var cellX = GridPadding + targetIndex % columns * CellWidth;
-        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * CellHeight;
+        var cellY = TitleBarHeight + GridPadding + targetIndex / columns * CellHeight - _scrollOffset;
 
         using var targetPen = new Pen(Color.FromArgb(200, 120, 170, 255), 2);
         using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, CellHeight - 2)), 4);
@@ -559,10 +705,10 @@ public sealed class FenceForm : Form
         if (_model.Files.Count == 0 || contentLocation.Y < TitleBarHeight)
             return null;
 
-        var columns = Math.Max(1, (GetContentSize().Width - GridPadding * 2) / CellWidth);
+        var columns = GetColumns(GetContentSize().Width);
 
         var column = (contentLocation.X - GridPadding) / CellWidth;
-        var row = (contentLocation.Y - TitleBarHeight - GridPadding) / CellHeight;
+        var row = (contentLocation.Y - TitleBarHeight - GridPadding + _scrollOffset) / CellHeight;
         if (column < 0 || column >= columns || row < 0)
             return null;
 
@@ -676,15 +822,26 @@ public sealed class FenceForm : Form
             return;
 
         var index = _model.Files.FindIndex(f => f.Path == path);
-        var contentWidth = GetContentSize().Width;
-        if (index < 0 || contentWidth <= 0)
+        var contentSize = GetContentSize();
+        if (index < 0 || contentSize.Width <= 0)
             return;
 
-        var columns = Math.Max(1, (contentWidth - GridPadding * 2) / CellWidth);
+        var columns = GetColumns(contentSize.Width);
         var column = index % columns;
         var row = index / columns;
         var cellX = GridPadding + column * CellWidth;
-        var cellY = TitleBarHeight + GridPadding + row * CellHeight;
+        var absoluteCellY = TitleBarHeight + GridPadding + row * CellHeight;
+
+        // Scroll the item's row fully into view first if it's currently scrolled off - otherwise
+        // the edit box could end up positioned above the title bar or below the fence entirely.
+        var gridTop = TitleBarHeight + GridPadding;
+        var gridBottom = contentSize.Height - GridPadding;
+        if (absoluteCellY - _scrollOffset < gridTop)
+            _scrollOffset = Math.Max(0, absoluteCellY - gridTop);
+        else if (absoluteCellY + CellHeight - _scrollOffset > gridBottom)
+            _scrollOffset = Math.Min(GetMaxScroll(contentSize.Width, contentSize.Height), absoluteCellY + CellHeight - gridBottom);
+
+        var cellY = absoluteCellY - _scrollOffset;
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;
