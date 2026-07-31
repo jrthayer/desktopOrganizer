@@ -64,6 +64,7 @@ internal static class NativeMethods
     public const uint SMTO_ABORTIFHUNG = 0x0002;
 
     public const int WM_DISPLAYCHANGE = 0x007E;
+    public const int WM_DPICHANGED = 0x02E0;
     public const int WM_MOUSEACTIVATE = 0x0021;
     public const int MA_NOACTIVATE = 3;
 

@@ -133,11 +133,7 @@ public sealed class FenceForm : Form
             return;
         }
 
-        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE)
-        {
-            Reanchor();
-        }
-        else if (m.Msg == NativeMethods.WM_MOUSEACTIVATE)
+        if (m.Msg == NativeMethods.WM_MOUSEACTIVATE)
         {
             // Clicking/dragging a fence must never steal foreground focus from whatever
             // app the user is using.
@@ -146,6 +142,15 @@ public sealed class FenceForm : Form
         }
 
         base.WndProc(ref m);
+
+        // Both a monitor being added/removed/resized and a fence being dragged onto a monitor
+        // with different DPI can invalidate the SetParent/z-order anchor or leave the region
+        // sized for the old DPI; OnResize already reapplies the rounded region, so this only
+        // needs to redo the desktop anchor once the base class has finished its own rescaling.
+        if (m.Msg == NativeMethods.WM_DISPLAYCHANGE || m.Msg == NativeMethods.WM_DPICHANGED)
+        {
+            Reanchor();
+        }
     }
 
     private int HitTest(Point pt)
