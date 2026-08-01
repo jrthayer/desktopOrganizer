@@ -18,6 +18,29 @@ dotnet run --project src/FenceTool/FenceTool.csproj
 The app runs as a system tray icon only (no main window). Right-click the
 tray icon for the menu.
 
+## Features
+
+### Fences
+
+A fence is a draggable, resizable, translucent region that groups desktop
+shortcuts under a name you choose. It owns a plain list of file paths
+(`FenceModel.Files`) and draws its own icon+label grid for them rather than
+moving the real desktop icons around. Dropping a file onto a fence adds a
+reference to it; dragging an item within a fence reorders it; dragging an
+item onto a *different* fence's window moves it there; dragging an item off
+any fence entirely removes it from that fence (see Desktop icon hiding
+below for what happens to its real desktop icon when that happens).
+
+### Desktop icon hiding
+
+When a shortcut is added to a fence, Fence Tool hides its real desktop icon
+so it isn't visible twice — once as the fence's own drawing of it, and once
+underneath on the actual desktop. There's no supported "hidden" state for
+an individual item on the desktop's icon list, so this works by moving the
+real icon far off-screen, remembering its original position (persisted to
+disk, so it survives an app restart or crash) so it can be moved back once
+the shortcut isn't in any fence anymore.
+
 ## Status
 
 Early scaffold — see the implementation plan for the staged build-out
