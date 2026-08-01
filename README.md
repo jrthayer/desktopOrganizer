@@ -31,6 +31,11 @@ item onto a *different* fence's window moves it there; dragging an item off
 any fence entirely removes it from that fence (see Desktop icon hiding
 below for what happens to its real desktop icon when that happens).
 
+**Limitations:** a fence only remembers a file's path, not a live watch on
+it - if the underlying file is later moved or deleted outside Fence Tool,
+its entry stays in the fence but its icon/label may go stale (see
+`FenceForm.GetIcon`'s fallback handling) until removed by hand.
+
 ### Desktop icon hiding
 
 When a shortcut is added to a fence, Fence Tool hides its real desktop icon
@@ -40,6 +45,16 @@ an individual item on the desktop's icon list, so this works by moving the
 real icon far off-screen, remembering its original position (persisted to
 disk, so it survives an app restart or crash) so it can be moved back once
 the shortcut isn't in any fence anymore.
+
+**Limitations:** only applies to files that live directly in your (or the
+Public) Desktop folder - anything dragged in from elsewhere never had a
+real desktop icon to hide. Matching a fenced path to its desktop icon is
+done by display label (filename, since that's all the desktop's icon list
+exposes), so two different real desktop files that happen to share a
+display name (e.g. `Notes.txt` and `Notes.docx` with extensions shown)
+can't be told apart. If Fence Tool is closed uncleanly (crash, Task Manager
+kill) rather than via the tray's Exit, hidden icons stay hidden until it's
+run again.
 
 ## Status
 

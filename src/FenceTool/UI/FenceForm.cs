@@ -157,6 +157,10 @@ public sealed class FenceForm : Form
     // instead of a real child control's mouse events - see ShowMenuItemTooltip/HideMenuItemTooltip.
     private IntPtr _menuTooltip = IntPtr.Zero;
 
+    // Guards RenderAndPresent against a reentrant repaint triggered mid-teardown - see Dispose's
+    // own comment on WM_ACTIVATE firing synchronously from within base.Dispose(disposing).
+    private bool _disposing;
+
     public Guid FenceId => _model.Id;
 
     /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
@@ -291,6 +295,15 @@ public sealed class FenceForm : Form
     {
         if (disposing)
         {
+            // Set before anything below actually runs: base.Dispose(disposing) (below) tears down
+            // the native window via DestroyWindow, which - as part of the OS's normal
+            // deactivate-before-destroy sequence - synchronously delivers WM_ACTIVATE to this same
+            // window while our WndProc override is still hooked up, reaching OnDeactivate ->
+            // RenderAndPresent -> PaintItems before this call even returns. Without this guard that
+            // repaints using _iconCache's Icon objects just disposed a few lines down, which throws
+            // (Icon is an ObjectDisposedException-checked handle, same as Control.Handle).
+            _disposing = true;
+
             _renameBox?.Dispose();
             _itemRenameBox?.Dispose();
             _dragGhost?.Dispose();
@@ -716,6 +729,9 @@ public sealed class FenceForm : Form
     /// </summary>
     private void RenderAndPresent()
     {
+        if (_disposing)
+            return;
+
         if (!NativeMethods.GetWindowRect(Handle, out var windowRect))
             return;
 

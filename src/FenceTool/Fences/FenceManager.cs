@@ -64,7 +64,13 @@ public sealed class FenceManager : IDisposable
 
         _models.RemoveAll(m => m.Id == id);
         if (_forms.Remove(id, out var form))
-            form.Dispose();
+            // Deferred rather than disposed right here: this runs from deep inside the very form's
+            // own WM_COMMAND handling (Delete Fence, clicked from its cog menu), so disposing it
+            // immediately pulls the handle out from under code further up that same call stack
+            // (TrackPopupMenuEx's owner-draw cleanup, OnMouseDown's post-processing) once it
+            // unwinds - which throws ObjectDisposedException reading Handle. BeginInvoke defers the
+            // actual Dispose to its own turn on the message loop, after all of that has unwound.
+            form.BeginInvoke(new Action(form.Dispose));
 
         // The fence carrying these paths is gone, but they might still be sitting in another one.
         foreach (var path in paths)
