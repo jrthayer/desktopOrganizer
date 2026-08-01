@@ -118,6 +118,45 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    /// <summary>Finds the fence window (other than excludeId) whose window rect contains
+    /// screenPoint - used when an item drag started in one fence is released over another one, to
+    /// tell whether it landed on a fence at all and which.</summary>
+    public FenceForm? FindFenceAt(Point screenPoint, Guid excludeId)
+    {
+        foreach (var (id, form) in _forms)
+        {
+            if (id != excludeId && form.Bounds.Contains(screenPoint))
+                return form;
+        }
+        return null;
+    }
+
+    /// <summary>Moves an item from one fence to another - unlike MoveFile (reorder within a single
+    /// fence's own grid), this removes the item from its source fence's model and inserts it into
+    /// the target fence's model, preserving its DisplayName. Silently dropped if the item can't be
+    /// found in the source, or the target fence already holds this path (mirrors AddFiles' own
+    /// silent-skip-on-duplicate behavior).</summary>
+    public void MoveFileToFence(Guid sourceFenceId, Guid targetFenceId, string path, int targetIndex)
+    {
+        if (sourceFenceId == targetFenceId)
+            return;
+
+        var sourceModel = _models.Find(m => m.Id == sourceFenceId);
+        var targetModel = _models.Find(m => m.Id == targetFenceId);
+        var item = sourceModel?.Files.Find(f => f.Path == path);
+        if (sourceModel is null || targetModel is null || item is null)
+            return;
+
+        sourceModel.Files.Remove(item);
+        if (!targetModel.Files.Any(f => f.Path == path))
+            targetModel.Files.Insert(Math.Clamp(targetIndex, 0, targetModel.Files.Count), item);
+
+        Save();
+
+        if (_forms.TryGetValue(targetFenceId, out var targetForm))
+            targetForm.RefreshAfterExternalChange();
+    }
+
     /// <summary>Sets an item's display name within this fence only - never renames the real file.</summary>
     public void RenameFile(Guid fenceId, string path, string displayName)
     {

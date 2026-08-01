@@ -204,6 +204,17 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>Where an item dropped at screenPoint (dragged in from a different fence, see
+    /// FenceManager.MoveFileToFence) would land in this fence's own grid - appended to the end when
+    /// the point isn't over a specific item (e.g. it's in the margin, or past the last row).</summary>
+    internal int IndexForExternalDrop(Point screenPoint) =>
+        IndexAtGridPosition(ToContent(PointToClient(screenPoint))) ?? _model.Files.Count;
+
+    /// <summary>Repaints after FenceManager mutates this fence's model on behalf of a *different*
+    /// fence's drag operation (see MoveFileToFence) - this fence's own drag/drop paths already
+    /// re-render themselves directly.</summary>
+    internal void RefreshAfterExternalChange() => RenderAndPresent();
+
     public new void Show() => NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
 
     public void SetVisible(bool visible) =>
@@ -466,9 +477,20 @@ public sealed class FenceForm : Form
         var contentPoint = ToContent(e.Location);
         var path = _model.Files[sourceIndex].Path;
         if (new Rectangle(Point.Empty, GetContentSize()).Contains(contentPoint))
+        {
             _manager.MoveFile(FenceId, path, IndexAtGridPosition(contentPoint) ?? _model.Files.Count);
+        }
         else
-            _manager.RemoveFile(FenceId, path);
+        {
+            // Not a drop inside this fence's own content - check whether it landed on a *different*
+            // fence's window instead of empty desktop, and hand the item over rather than discarding
+            // it (the pre-existing behavior for a drop that lands nowhere).
+            var screenPoint = PointToScreen(e.Location);
+            if (_manager.FindFenceAt(screenPoint, FenceId) is { } targetForm)
+                _manager.MoveFileToFence(FenceId, targetForm.FenceId, path, targetForm.IndexForExternalDrop(screenPoint));
+            else
+                _manager.RemoveFile(FenceId, path);
+        }
 
         RenderAndPresent();
     }
