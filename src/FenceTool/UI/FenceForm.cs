@@ -53,11 +53,13 @@ public sealed class FenceForm : Form
     private const int CornerRadius = 22;
     private const float FenceOpacity = 0.85f;
 
-    // Fallback accent (drag-target outline, menu checkmarks, active-fence border) for a fence that
-    // hasn't been given its own color (FenceModel.TintColor is null) - see Accent/ShowFenceOptionsMenu's
-    // "Fence Color" submenu. Every other neutral-gray chrome color below has the same
-    // no-tint/with-tint split via Tint(), keyed off this same DefaultXxx naming.
-    private static readonly Color DefaultAccentColor = Color.FromArgb(120, 170, 255);
+    // Fallback accent (drag-target outline, menu checkmarks, settings button, active-fence border)
+    // for a fence that hasn't been given its own color (FenceModel.TintColor is null) - see
+    // Accent/ShowFenceOptionsMenu's "Fence Color" grid. Plain grayscale rather than the blue this
+    // used to be, matching the rest of the untinted theme's own black/gray palette (DefaultBodyColor
+    // etc. below) instead of standing out as the one accented color in an otherwise colorless
+    // default. Light enough to still read clearly against ThemedBody's near-black fill.
+    private static readonly Color DefaultAccentColor = Color.FromArgb(190, 190, 195);
     private static readonly Color DefaultBodyColor = Color.FromArgb(255, 32, 32, 36);
     private static readonly Color DefaultTitleColor = Color.FromArgb(255, 10, 10, 13);
     private static readonly Color DefaultBorderColor = Color.FromArgb(255, 70, 70, 78);
@@ -101,10 +103,9 @@ public sealed class FenceForm : Form
     // than individually referenced anywhere.
     private const int CmdColorPresetBase = 20;
 
-    // Not real WM_COMMAND ids (clicking a submenu-anchor row just expands it, it never fires a
-    // command) - these only tag an owner-draw row's itemData so DrawMenuItem/MeasureMenuItem know
-    // to render a submenu arrow instead of a checkbox. See ShowFenceOptionsMenu.
-    private const int TagOcdFormattingHeader = 1001;
+    // Not real WM_COMMAND ids - just Row.Id values for the two non-clickable section headers in
+    // ShowFenceOptionsMenu's dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command
+    // either way, so these only need to be distinct from real command ids, never looked up).
     private const int TagFenceDimensionsHeader = 1002;
     private const int TagColorHeader = 1003;
 
@@ -212,10 +213,26 @@ public sealed class FenceForm : Form
     // apart at that point.
     private bool _resizeInProgress;
 
-    // Lazily created native tooltip common control, tracked manually (TTF_TRACK) rather than the
-    // control's own automatic hover detection, since it has to follow WM_MENUSELECT on a raw HMENU
-    // instead of a real child control's mouse events - see ShowMenuItemTooltip/HideMenuItemTooltip.
-    private IntPtr _menuTooltip = IntPtr.Zero;
+    // The currently-open fence-options dropdown (see ShowFenceOptionsMenu/DropdownMenu), or null
+    // when none is open. Tracked so a second click on the settings button while one is already open
+    // can dispose the stale instance first, and so Dispose can tear it down along with everything
+    // else if the fence itself goes away while it's still open (e.g. Delete Fence, clicked from
+    // within this very dropdown).
+    private DropdownMenu? _dropdown;
+
+    /// <summary>Whether the settings button should be visible/clickable/drawn as active right now -
+    /// _isActive alone used to be enough, but DropdownMenu is a real WinForms Form, and showing one
+    /// steals OS activation from this fence exactly like any other window would (a native
+    /// TrackPopupMenuEx menu never did that, which is why this wasn't needed before it). Without
+    /// this OR, the instant the dropdown opened, OnDeactivate would flip _isActive back to false and
+    /// the button/active border would vanish right out from under the menu that's still open. This
+    /// intentionally does NOT touch OnDeactivate itself to compensate (e.g. checking whether the
+    /// newly-active window is our own dropdown there) - an earlier version of this fence tried
+    /// exactly that kind of "inspect who's now active" fixup inside OnDeactivate for a similar
+    /// popup-vs-activation conflict and it was racy across multiple fences during activation
+    /// handoff. This is a plain OR'd flag instead, driven only by our own deterministic
+    /// open/close calls (ShowFenceOptionsMenu sets _dropdown; DropdownMenu.FormClosed clears it).</summary>
+    private bool ShowsSettingsButton => _isActive || _dropdown is not null;
 
     // Guards RenderAndPresent against a reentrant repaint triggered mid-teardown - see Dispose's
     // own comment on WM_ACTIVATE firing synchronously from within base.Dispose(disposing).
@@ -396,11 +413,10 @@ public sealed class FenceForm : Form
             _renameBox?.Dispose();
             _itemRenameBox?.Dispose();
             _dragGhost?.Dispose();
+            _dropdown?.Dispose();
             _font.Dispose();
             if (_themeBrush != IntPtr.Zero)
                 NativeMethods.DeleteObject(_themeBrush);
-            if (_menuTooltip != IntPtr.Zero)
-                NativeMethods.DestroyWindow(_menuTooltip);
             foreach (var icon in _iconCache.Values)
                 icon?.Dispose();
         }
@@ -449,12 +465,13 @@ public sealed class FenceForm : Form
     {
         base.OnMouseDoubleClick(e);
 
+        // Rename is only reachable via the title text itself (double-click or right-click, see
+        // WM_NCLBUTTONDBLCLK/WM_NCRBUTTONDOWN - both gated on IsPointOverTitleText) - no fallback
+        // here when FenceModel.HideTitle leaves no title bar to click at all; renaming just isn't
+        // reachable that way then, rather than an empty double-click anywhere substituting for it.
         var path = FileAtGridPosition(ToContent(e.Location));
         if (path is not null)
             OpenItem(path);
-        else if (_model.HideTitle)
-            // No title bar to double-click when it's hidden - empty background stands in for it.
-            BeginRename();
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -466,7 +483,7 @@ public sealed class FenceForm : Form
         var contentPoint = ToContent(e.Location);
         var contentSize = GetContentSize();
 
-        if (_isActive && GetSettingsButtonRect(contentSize.Width).Contains(contentPoint))
+        if (ShowsSettingsButton && GetSettingsButtonRect(contentSize.Width).Contains(contentPoint))
         {
             _settingsButtonArmed = true;
             return;
@@ -563,7 +580,7 @@ public sealed class FenceForm : Form
         if (_settingsButtonArmed)
         {
             _settingsButtonArmed = false;
-            if (_isActive && GetSettingsButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+            if (ShowsSettingsButton && GetSettingsButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
                 ShowFenceOptionsMenu();
             return;
         }
@@ -641,11 +658,15 @@ public sealed class FenceForm : Form
                 return;
 
             case WM_NCLBUTTONDBLCLK:
-                // HitTest reports HTCAPTION for the title bar, so a double-click there arrives as
-                // this non-client message. Letting the default proc handle it would maximize the
-                // window (the OS's standard double-click-caption behavior) - rename here instead.
+                // HitTest reports HTCAPTION for the whole title bar/margin area, not just the
+                // rendered title text - but renaming should only trigger for a double-click on the
+                // text itself (see IsPointOverTitleText), same scoping WM_NCRBUTTONDOWN already
+                // applies for the right-click case below. Anywhere else in this non-client area, do
+                // nothing rather than letting the default proc maximize the window (its usual caption
+                // double-click behavior).
                 ActivateFence();
-                BeginRename();
+                if (IsPointOverTitleText(m.LParam))
+                    BeginRename();
                 return;
 
             case NativeMethods.WM_NCLBUTTONDOWN:
@@ -699,10 +720,6 @@ public sealed class FenceForm : Form
 
             case WM_COMMAND:
                 HandleCommand(m.WParam.ToInt32() & 0xFFFF);
-                return;
-
-            case NativeMethods.WM_MENUSELECT:
-                HandleMenuSelect(m.WParam, m.LParam);
                 return;
 
             case NativeMethods.WM_CTLCOLOREDIT:
@@ -781,7 +798,7 @@ public sealed class FenceForm : Form
 
         // The settings button lives above the fence, in the taller TopMargin band - check it first
         // so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
-        if (_isActive && GetSettingsButtonRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
+        if (ShowsSettingsButton && GetSettingsButtonRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
             return HTCLIENT;
 
         int band = OuterMargin + ResizeMargin;
@@ -888,10 +905,11 @@ public sealed class FenceForm : Form
                 g.FillPath(titleFill, titlePath);
             }
 
-            // A brighter, thicker border signals the fence is active - the margin band around it is
-            // now a move handle (see HitTest), and this highlight hugs the fence's actual edge
-            // directly rather than a separate frame floating out in the margin.
-            using var borderPen = new Pen(_isActive ? ThemedActiveBorder : ThemedBorder, _isActive ? ActiveBorderWidth : 1f);
+            // A brighter, thicker border signals the fence is active (or its settings dropdown is
+            // still open, see ShowsSettingsButton) - the margin band around it is now a move handle
+            // while genuinely _isActive (see HitTest), and this highlight hugs the fence's actual
+            // edge directly rather than a separate frame floating out in the margin.
+            using var borderPen = new Pen(ShowsSettingsButton ? ThemedActiveBorder : ThemedBorder, ShowsSettingsButton ? ActiveBorderWidth : 1f);
             // Pen.LineJoin defaults to Miter, which squares off the outer edge of a thick stroke at
             // the rounded corners instead of following their curve - Round keeps it hugging the arc.
             borderPen.LineJoin = LineJoin.Round;
@@ -903,7 +921,7 @@ public sealed class FenceForm : Form
                     Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             }
 
-            if (_isActive)
+            if (ShowsSettingsButton)
             {
                 // Filled first so the button reads as fully opaque - it lives in the near-transparent
                 // TopMargin band (see MarginFillColor's own comment), and TextRenderer.DrawText below
@@ -1207,62 +1225,71 @@ public sealed class FenceForm : Form
     }
 
     /// <summary>Per-fence settings, opened via the settings button that appears once this fence is
-    /// active (see OnDeactivate and the settings-button hit-test carve-out). Top level: the three
-    /// checkbox toggles, then a separator, then "OCD Formatting" (a submenu whose own "Fence
-    /// Dimensions" header - a plain disabled label, not a further nested submenu, see AppendHeader -
-    /// sits above its three resize actions), then another separator, then "Delete Fence".
-    /// AppendPopup stays available as general infrastructure for a real third level if a future
-    /// subcategory needs one. "Delete Fence" lives here rather than any right-click menu now, same
-    /// as "Rename" moved to the header's own context menu - see ShowContextMenu/
+    /// active (see OnDeactivate and the settings-button hit-test carve-out). A DropdownMenu (see its
+    /// own class comment for why this isn't a native popup menu) rather than nested flyout submenus -
+    /// "OCD Formatting" and "Fence Color" used to be separate cascading levels, but a DropdownMenu is
+    /// a single flat list, and their own headers ("Fence Dimensions", "Fence Color") already say
+    /// what each group is without an outer flyout-anchor row to name it too, so they're inlined
+    /// directly here instead. "Delete Fence" lives here rather than any right-click menu, same as
+    /// "Rename" moved to the header's own context menu - see ShowContextMenu/
     /// ShowHeaderContextMenu.</summary>
     private void ShowFenceOptionsMenu()
     {
+        _dropdown?.Dispose();
+
         var contentSize = GetContentSize();
         var buttonRect = GetSettingsButtonRect(contentSize.Width);
         var menuPoint = PointToScreen(ToWindow(new Point(buttonRect.Right + 2, buttonRect.Y)));
 
-        var hOcdMenu = NativeMethods.CreatePopupMenu();
-        var hColorMenu = NativeMethods.CreatePopupMenu();
-        var hMenu = NativeMethods.CreatePopupMenu();
-        try
+        var rows = new List<DropdownMenu.Row>
         {
-            // MF_OWNERDRAW rather than MF_STRING so the menu can be painted dark (matching the
-            // fence) instead of the native Windows menu chrome - see MeasureMenuItem/DrawMenuItem,
-            // wired up via WM_MEASUREITEM/WM_DRAWITEM in WndProc. Every owner-draw row's label and
-            // style is looked up from a tag carried in itemData (see AppendItem/GetMenuRowStyle)
-            // rather than the item's id - a submenu-anchor row (MF_POPUP) has no command id of its
-            // own to key off (its uIDNewItem slot holds the submenu handle instead), so itemData is
-            // the only thing that works for every row uniformly.
-            AppendHeader(hOcdMenu, TagFenceDimensionsHeader);
-            AppendItem(hOcdMenu, CmdResizeBoth, false);
-            AppendItem(hOcdMenu, CmdResizeLeftRight, false);
-            AppendItem(hOcdMenu, CmdResizeTopDown, false);
-
-            AppendItem(hColorMenu, CmdColorDefault, _model.TintColor is null);
-            for (var i = 0; i < ColorPresets.Length; i++)
-                AppendItem(hColorMenu, CmdColorPresetBase + i, _model.TintColor == ColorPresets[i].ToArgb());
-            NativeMethods.AppendMenu(hColorMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-            AppendItem(hColorMenu, CmdColorCustom, false);
-
-            AppendItem(hMenu, CmdToggleHideLabels, _model.HideLabels);
-            AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
-            AppendItem(hMenu, CmdToggleOcdSizing, _model.OcdFenceSizing);
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-            AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
-            AppendPopup(hMenu, hColorMenu, TagColorHeader);
-            NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
-            AppendItem(hMenu, CmdDelete, false);
-
-            ApplyDarkMenuTheme(hMenu);
-
-            NativeMethods.SetForegroundWindow(Handle);
-            NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_LEFTBUTTON, menuPoint.X, menuPoint.Y, Handle, IntPtr.Zero);
-        }
-        finally
+            new(CmdToggleHideLabels, "Hide Shortcut Names", HasCheckbox: true, IsChecked: () => _model.HideLabels),
+            new(CmdToggleHideTitle, "Hide Title", HasCheckbox: true, IsChecked: () => _model.HideTitle),
+            new(CmdToggleOcdSizing, "OCD Fence Sizing", HasCheckbox: true, IsChecked: () => _model.OcdFenceSizing,
+                Tooltip: GetMenuTooltipText(CmdToggleOcdSizing)),
+            new(0, string.Empty, IsSeparator: true),
+            new(TagColorHeader, "Fence Color", IsHeader: true),
+            new(CmdColorDefault, string.Empty, IsGridItem: true, Swatch: DefaultBodyColor,
+                IsChecked: () => _model.TintColor is null, Tooltip: "Black"),
+        };
+        for (var i = 0; i < ColorPresets.Length; i++)
         {
-            NativeMethods.DestroyMenu(hMenu); // recursively destroys the attached submenu too
-            HideMenuItemTooltip(); // WM_MENUSELECT's own close notification already does this normally - just a backstop
+            var presetArgb = ColorPresets[i].ToArgb();
+            rows.Add(new DropdownMenu.Row(CmdColorPresetBase + i, string.Empty, IsGridItem: true, Swatch: ColorPresets[i],
+                IsChecked: () => _model.TintColor == presetArgb, Tooltip: GetColorPresetName(i)));
         }
+        // Swatch left null - an empty (outline-only) circle, distinct from every real color, rather
+        // than a text row - see DropdownMenu.DrawGridItem.
+        rows.Add(new DropdownMenu.Row(CmdColorCustom, string.Empty, IsGridItem: true, Tooltip: "Custom..."));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
+        rows.Add(new DropdownMenu.Row(TagFenceDimensionsHeader, "Fence Dimensions", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(CmdResizeBoth, "Both"));
+        rows.Add(new DropdownMenu.Row(CmdResizeLeftRight, "Left/Right"));
+        rows.Add(new DropdownMenu.Row(CmdResizeTopDown, "Top/Down"));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
+        rows.Add(new DropdownMenu.Row(CmdDelete, "Delete Fence"));
+
+        // Tooltip background blends from black rather than DefaultBodyColor (unlike every other
+        // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
+        // fence's own color at the same blend amount than starting from dark gray would, since
+        // there's more contrast for Tint() to work with between black and a bright pick.
+        _dropdown = new DropdownMenu(rows, menuPoint, _font, () => ThemedBody, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
+            () => Tint(Color.Black, CurrentTint));
+        _dropdown.ItemClicked += id =>
+        {
+            HandleCommand(id);
+            _dropdown?.RefreshChecks();
+        };
+        _dropdown.FormClosed += (_, _) =>
+        {
+            _dropdown = null;
+            // ShowsSettingsButton depends on _dropdown - now that it's gone, the button/active
+            // border need to actually disappear if _isActive had already gone false while it was
+            // still open, instead of staying stuck looking active until some other render trigger.
+            // RenderAndPresent already no-ops via _disposing if the fence itself is going away too.
+            RenderAndPresent();
+        };
+        _dropdown.Show(this);
     }
 
     /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
@@ -1286,42 +1313,16 @@ public sealed class FenceForm : Form
         NativeMethods.AppendMenu(hMenu, flags, (IntPtr)commandId, (IntPtr)commandId);
     }
 
-    /// <summary>A non-interactive section label within a submenu (e.g. "Fence Dimensions" above the
-    /// resize actions) - MF_DISABLED|MF_GRAYED so it can't be clicked, hovered, or keyboard-selected;
-    /// DrawMenuItem dims its text instead of relying on the native grayed-out rendering, since we're
-    /// owner-drawing everything else in this menu anyway.</summary>
-    private static void AppendHeader(IntPtr hMenu, int headerTag) =>
-        NativeMethods.AppendMenu(hMenu, NativeMethods.MF_OWNERDRAW | NativeMethods.MF_DISABLED | NativeMethods.MF_GRAYED, (IntPtr)headerTag, (IntPtr)headerTag);
-
-    /// <summary>General infrastructure for a nested submenu-anchor row (e.g. "OCD Formatting") -
-    /// kept generic/reusable for a future third level, even though only one level currently uses it.</summary>
-    private static void AppendPopup(IntPtr hParentMenu, IntPtr hSubMenu, int headerTag) =>
-        NativeMethods.AppendMenu(hParentMenu, NativeMethods.MF_POPUP | NativeMethods.MF_OWNERDRAW, hSubMenu, (IntPtr)headerTag);
-
     private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader, Color? Swatch = null);
 
-    /// <summary>Every owner-draw row's label and decoration, keyed by the tag carried in its
-    /// itemData (see AppendItem/AppendHeader/AppendPopup) rather than its item id. Submenu-anchor
-    /// rows (e.g. "OCD Formatting") need no flag here - Windows draws their arrow indicator itself,
-    /// in a margin outside our own owner-draw rect (see DrawMenuItem).</summary>
+    /// <summary>Every owner-draw row's label, keyed by the item id carried in its itemData (see
+    /// AppendItem) - only "Rename" for the two single-item native menus this still serves
+    /// (ShowContextMenu/ShowHeaderContextMenu) now that ShowFenceOptionsMenu's own dropdown draws
+    /// itself directly from its Row list instead of going through this lookup.</summary>
     private static MenuRowStyle GetMenuRowStyle(int tag) => tag switch
     {
-        CmdToggleHideLabels => new MenuRowStyle("Hide Shortcut Names", true, false),
-        CmdToggleHideTitle => new MenuRowStyle("Hide Title", true, false),
-        TagOcdFormattingHeader => new MenuRowStyle("OCD Formatting", false, false),
-        TagFenceDimensionsHeader => new MenuRowStyle("Fence Dimensions", false, true),
-        CmdResizeBoth => new MenuRowStyle("Both", false, false),
-        CmdResizeLeftRight => new MenuRowStyle("Left/Right", false, false),
-        CmdResizeTopDown => new MenuRowStyle("Top/Down", false, false),
-        CmdToggleOcdSizing => new MenuRowStyle("OCD Fence Sizing", true, false),
-        TagColorHeader => new MenuRowStyle("Fence Color", false, false),
-        CmdColorDefault => new MenuRowStyle("Default", false, false, DefaultBodyColor),
-        CmdColorCustom => new MenuRowStyle("Custom...", false, false),
-        >= CmdColorPresetBase and < CmdColorPresetBase + 100 =>
-            new MenuRowStyle(GetColorPresetName(tag - CmdColorPresetBase), false, false, GetColorPreset(tag - CmdColorPresetBase)),
         CmdRenameItem => new MenuRowStyle("Rename", false, false),
         CmdRename => new MenuRowStyle("Rename", false, false),
-        CmdDelete => new MenuRowStyle("Delete Fence", false, false),
         _ => new MenuRowStyle(string.Empty, false, false),
     };
 
@@ -1355,110 +1356,9 @@ public sealed class FenceForm : Form
         _ => null,
     };
 
-    /// <summary>WM_MENUSELECT fires as the highlighted item changes in any menu owned by this
-    /// window, including nested submenus - used to track a hover tooltip since a raw HMENU has no
-    /// hover events of its own the way a real control would.</summary>
-    private void HandleMenuSelect(IntPtr wParam, IntPtr lParam)
-    {
-        var packed = wParam.ToInt64();
-        var itemIdOrPosition = (int)(packed & 0xFFFF);
-        var flags = (uint)((packed >> 16) & 0xFFFF);
-
-        // itemIdOrPosition is a real command id only for a plain (non-popup) item - for a
-        // submenu-anchor row (MF_POPUP set in flags, see AppendPopup) it's that submenu's position
-        // within its parent instead, which would collide with unrelated command ids by coincidence.
-        // The 0xFFFF/null-lParam pair is Windows' own sentinel for "the menu just closed".
-        if (lParam == IntPtr.Zero || itemIdOrPosition == 0xFFFF || (flags & NativeMethods.MF_POPUP_FLAG) != 0)
-        {
-            HideMenuItemTooltip();
-            return;
-        }
-
-        var tooltipText = GetMenuTooltipText(itemIdOrPosition);
-        if (tooltipText is null)
-            HideMenuItemTooltip();
-        else
-            ShowMenuItemTooltip(tooltipText);
-    }
-
-    private void EnsureMenuTooltip()
-    {
-        if (_menuTooltip != IntPtr.Zero)
-            return;
-
-        // WS_EX_TOPMOST here (and reasserted via SetWindowPos in ShowMenuItemTooltip) so the tooltip
-        // renders above the currently-tracked popup menu instead of behind it - a plain owned popup
-        // isn't guaranteed to stay above a native menu's own (topmost-ish) tracking window.
-        _menuTooltip = NativeMethods.CreateWindowEx(NativeMethods.WS_EX_TOPMOST, "tooltips_class32", string.Empty,
-            NativeMethods.WS_POPUP | (int)NativeMethods.TTS_ALWAYSTIP | (int)NativeMethods.TTS_NOPREFIX,
-            0, 0, 0, 0, Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-
-        // A themed tooltip draws itself via UxTheme and ignores TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR
-        // entirely - opting out of theming here is what makes those two calls actually take effect.
-        NativeMethods.SetWindowTheme(_menuTooltip, string.Empty, string.Empty);
-
-        var toolInfo = new TOOLINFO
-        {
-            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
-            uFlags = NativeMethods.TTF_TRACK | NativeMethods.TTF_ABSOLUTE,
-            hwnd = Handle,
-            uId = (IntPtr)1,
-            lpszText = string.Empty,
-        };
-        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_ADDTOOLW, IntPtr.Zero, ref toolInfo);
-    }
-
-    private void ShowMenuItemTooltip(string text)
-    {
-        EnsureMenuTooltip();
-
-        // Set on every show rather than once at creation (EnsureMenuTooltip only runs the first
-        // time) - the fence's own color, and so ThemedBody, can change at runtime via the "Fence
-        // Color" submenu this same tooltip is used from.
-        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPBKCOLOR, (IntPtr)ColorRef(ThemedBody), IntPtr.Zero);
-        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPTEXTCOLOR, (IntPtr)ColorRef(Color.WhiteSmoke), IntPtr.Zero);
-
-        var toolInfo = new TOOLINFO
-        {
-            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
-            uFlags = NativeMethods.TTF_TRACK | NativeMethods.TTF_ABSOLUTE,
-            hwnd = Handle,
-            uId = (IntPtr)1,
-            lpszText = text,
-        };
-        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_UPDATETIPTEXTW, IntPtr.Zero, ref toolInfo);
-
-        NativeMethods.GetCursorPos(out var pt);
-        // Offset from the cursor so the tooltip doesn't sit directly under it - short casts pack
-        // this as signed 16-bit components the same way WM_NCHITTEST's own lParam is unpacked
-        // elsewhere, since screen coordinates can be negative on a multi-monitor desktop.
-        var x = (short)(pt.X + 18);
-        var y = (short)(pt.Y + 22);
-        var position = (IntPtr)((int)(ushort)x | ((int)(ushort)y << 16));
-        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKPOSITION, IntPtr.Zero, position);
-        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKACTIVATE, (IntPtr)1, ref toolInfo);
-
-        // The popup menu currently being tracked can still end up above an already-topmost tooltip
-        // depending on creation order - reasserting topmost (without stealing activation/focus from
-        // the menu) each time keeps the tooltip visibly on top of it instead of hidden behind.
-        NativeMethods.SetWindowPos(_menuTooltip, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-    }
-
-    private void HideMenuItemTooltip()
-    {
-        if (_menuTooltip == IntPtr.Zero)
-            return;
-
-        var toolInfo = new TOOLINFO
-        {
-            cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
-            hwnd = Handle,
-            uId = (IntPtr)1,
-        };
-        NativeMethods.SendMessage(_menuTooltip, NativeMethods.TTM_TRACKACTIVATE, IntPtr.Zero, ref toolInfo);
-    }
-
+    /// <summary>WM_MEASUREITEM handler for the two remaining native single-item menus (Rename, see
+    /// ShowContextMenu/ShowHeaderContextMenu) - ShowFenceOptionsMenu's own dropdown measures its rows
+    /// directly (see DropdownMenu.MeasureLayout) instead of going through this.</summary>
     private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
     {
         var style = GetMenuRowStyle((int)mis.itemData);
@@ -1471,12 +1371,9 @@ public sealed class FenceForm : Form
         mis.itemHeight = (uint)Math.Max(size.Height + 8, 22);
     }
 
-    /// <summary>Paints one row of the fence-options dropdown to match the fence's own dark theme,
-    /// instead of the native Windows menu look - background, a hand-drawn checkbox (no checkmark
-    /// glyph font, since an icon font's glyphs aren't guaranteed to be installed/rendering on every
-    /// machine - a missing one draws as nothing at all rather than some visible fallback), and the
-    /// row's label text. A submenu row's arrow indicator is left to Windows to draw natively (see
-    /// MeasureMenuItem) - drawing our own there duplicated it.
+    /// <summary>WM_DRAWITEM handler for the two remaining native single-item menus (see
+    /// MeasureMenuItem's own comment) - paints a row to match the fence's own dark theme instead of
+    /// the native Windows menu look.</summary>
     private void DrawMenuItem(DRAWITEMSTRUCT dis)
     {
         using var g = Graphics.FromHdc(dis.hDC);
