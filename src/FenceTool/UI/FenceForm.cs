@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using FenceTool.Fences;
 using FenceTool.Native;
@@ -41,13 +42,14 @@ public sealed class FenceForm : Form
     // alpha (see MarginFillColor) since alpha 0 would be click-through too, defeating the point.
     private const int OuterMargin = 13;
 
-    // The settings cog (16px, see CogSize) doesn't fit inside the plain OuterMargin band (13px)
-    // with any breathing room, so the window is widened *only on the right* by this much extra -
-    // every other edge (left/top/bottom, and their resize-grab bands) stays exactly OuterMargin.
-    // See GetCogRect, CreateParams, GetContentSize, and every other OuterMargin-on-the-right site
-    // below, all of which use RightMargin instead of OuterMargin for that one edge.
-    private const int CogOverhang = 11;
-    private const int RightMargin = OuterMargin + CogOverhang;
+    // The settings button (see SettingsButtonWidth/Height) sits above the fence, flush with its
+    // top-right corner, and doesn't fit inside the plain OuterMargin band (13px) with any breathing
+    // room, so the window is extended *only on top* by this much extra - every other edge
+    // (left/right/bottom, and their resize-grab bands) stays exactly OuterMargin. See
+    // GetSettingsButtonRect, CreateParams, GetContentSize, and every other OuterMargin-on-top site
+    // below, all of which use TopMargin instead of OuterMargin for that one edge.
+    private const int SettingsButtonOverhang = 17;
+    private const int TopMargin = OuterMargin + SettingsButtonOverhang;
     private const int CornerRadius = 22;
     private const float FenceOpacity = 0.85f;
 
@@ -128,8 +130,11 @@ public sealed class FenceForm : Form
     private const int CellHeight = 94;
     private const int ScrollbarWidth = 6;
     private const int ScrollbarMargin = 3;
-    private const int CogSize = 16;
-    private const int CogTopOffset = 6;
+    private const int SettingsButtonWidth = 64;
+    private const int SettingsButtonHeight = 22;
+    // Vertical gap between the button's bottom edge and the fence's own top edge (TopMargin above
+    // reserves enough extra room for this plus a little more breathing space above the button).
+    private const int SettingsButtonGap = 4;
     private const int MenuCheckboxSize = 12;
     private const int MenuTextPadding = 8;
 
@@ -161,10 +166,19 @@ public sealed class FenceForm : Form
     private int _scrollbarDragStartY;
     private int _scrollbarDragStartOffset;
 
-    // The settings cog only shows once the fence has been clicked (i.e. is the active window) -
+    // The settings button only shows once the fence has been clicked (i.e. is the active window) -
     // keeps the title bar quiet until you're actually interacting with that particular fence.
     private bool _isActive;
-    private readonly Font _cogFont = new("Segoe MDL2 Assets", 9f);
+
+    // A real child Button control was tried here first, but a window painted via UpdateLayeredWindow
+    // (see RenderAndPresent/LayeredWindowPresenter) doesn't compose child windows on top of itself -
+    // it just never appeared, clickable or not. So this is drawn like everything else on the fence
+    // (see RenderAndPresent) and hit-tested by hand instead: armed on OnMouseDown, fired on the
+    // matching OnMouseUp only if the cursor is still over it, mirroring the arm-then-fire pattern
+    // used for drag-vs-click elsewhere in this file. Firing on down instead of up was tried too,
+    // early in this button's history - opening the dropdown while the mouse button is still
+    // physically down raced with TrackPopupMenuEx's own capture and made it flash open and closed.
+    private bool _settingsButtonArmed;
 
     // Backs both the rename EditBox (via WM_CTLCOLOREDIT, see WndProc) and every owner-draw popup
     // menu (fence-options dropdown and right-click context menus) - one shared themed fill, matching
@@ -210,13 +224,15 @@ public sealed class FenceForm : Form
     public Guid FenceId => _model.Id;
 
     /// <summary>The fence's own color (FenceModel.TintColor), or null for the plain default dark
-    /// theme - the single source every themed color below (body/title fill, margin, borders, cog
-    /// menu chrome) derives from. See Tint and ShowFenceOptionsMenu's "Fence Color" submenu.</summary>
+    /// theme - the single source every themed color below (body/title fill, margin, borders,
+    /// settings button, settings menu chrome) derives from. See Tint and ShowFenceOptionsMenu's
+    /// "Fence Color" submenu.</summary>
     private Color? CurrentTint => _model.TintColor is { } argb ? Color.FromArgb(argb) : null;
 
     /// <summary>Full-strength version of the fence's tint (falling back to a fixed blue) for
     /// elements that need to read clearly rather than just hint at the theme - the active-fence
-    /// border, drag-target outline, and cog menu checkmarks/selection ring.</summary>
+    /// border, drag-target outline, settings button, and settings menu checkmarks/selection
+    /// ring.</summary>
     private Color Accent => CurrentTint ?? DefaultAccentColor;
 
     private Color ThemedBody => Tint(DefaultBodyColor, CurrentTint);
@@ -257,9 +273,9 @@ public sealed class FenceForm : Form
             cp.Style = NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPCHILDREN;
             cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
             cp.X = _model.Bounds.X - OuterMargin;
-            cp.Y = _model.Bounds.Y - OuterMargin;
-            cp.Width = _model.Bounds.Width + OuterMargin + RightMargin;
-            cp.Height = _model.Bounds.Height + OuterMargin * 2;
+            cp.Y = _model.Bounds.Y - TopMargin;
+            cp.Width = _model.Bounds.Width + OuterMargin * 2;
+            cp.Height = _model.Bounds.Height + TopMargin + OuterMargin;
             return cp;
         }
     }
@@ -302,20 +318,20 @@ public sealed class FenceForm : Form
     public void Reanchor() => _anchorStrategy.Apply(Handle, _model.Bounds);
 
     /// <summary>The visible fence's size, i.e. the actual (padded) window size minus OuterMargin on
-    /// the left/top/bottom and RightMargin on the right - all grid/hit-test math below is in this
+    /// the left/right/bottom and TopMargin on top - all grid/hit-test math below is in this
     /// "content" space.</summary>
     private Size GetContentSize()
     {
         NativeMethods.GetClientRect(Handle, out var clientRect);
-        return new Size(Math.Max(0, clientRect.Right - OuterMargin - RightMargin), Math.Max(0, clientRect.Bottom - OuterMargin * 2));
+        return new Size(Math.Max(0, clientRect.Right - OuterMargin * 2), Math.Max(0, clientRect.Bottom - TopMargin - OuterMargin));
     }
 
-    private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - OuterMargin);
+    private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - TopMargin);
 
-    private static Point ToWindow(Point contentPoint) => new(contentPoint.X + OuterMargin, contentPoint.Y + OuterMargin);
+    private static Point ToWindow(Point contentPoint) => new(contentPoint.X + OuterMargin, contentPoint.Y + TopMargin);
 
     private static Rectangle ToWindow(Rectangle contentRect) =>
-        new(contentRect.X + OuterMargin, contentRect.Y + OuterMargin, contentRect.Width, contentRect.Height);
+        new(contentRect.X + OuterMargin, contentRect.Y + TopMargin, contentRect.Width, contentRect.Height);
 
     /// <summary>Window-relative (e.g. already run through ToWindow) to screen coordinates - needed
     /// for EditBox, which (unlike everything else drawn here) is a real top-level window rather than
@@ -336,12 +352,13 @@ public sealed class FenceForm : Form
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Content-relative, positioned just outside the visible fence (to the right of its
-    /// top-right corner, centered in the wider RightMargin band rather than inside the title bar) -
-    /// works the same whether or not FenceModel.HideTitle leaves a title bar to put it in. Only
-    /// meaningful while _isActive (the cog isn't shown otherwise).</summary>
-    private static Rectangle GetCogRect(int contentWidth) =>
-        new(contentWidth + (RightMargin - CogSize) / 2, CogTopOffset, CogSize, CogSize);
+    /// <summary>Content-relative, positioned just outside the visible fence (directly above it,
+    /// flush with its top-right corner, in the taller TopMargin band) - works the same whether or
+    /// not FenceModel.HideTitle leaves a title bar underneath it. Only meaningful while _isActive
+    /// (the button isn't shown otherwise). Y is negative - above content-space y=0 - which is fine
+    /// everywhere this is used (hit-testing, painting via ToWindow, menu positioning).</summary>
+    private static Rectangle GetSettingsButtonRect(int contentWidth) =>
+        new(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap), SettingsButtonWidth, SettingsButtonHeight);
 
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
@@ -380,7 +397,6 @@ public sealed class FenceForm : Form
             _itemRenameBox?.Dispose();
             _dragGhost?.Dispose();
             _font.Dispose();
-            _cogFont.Dispose();
             if (_themeBrush != IntPtr.Zero)
                 NativeMethods.DeleteObject(_themeBrush);
             if (_menuTooltip != IntPtr.Zero)
@@ -391,7 +407,7 @@ public sealed class FenceForm : Form
         base.Dispose(disposing);
     }
 
-    // _isActive (cog + drag-margin visibility) is intentionally NOT driven by OnActivated - that
+    // _isActive (settings button + drag-margin visibility) is intentionally NOT driven by OnActivated - that
     // fires for any click that gives the window OS focus, including a plain click on a shortcut
     // just to use it. It's set explicitly instead, only for right-click (anywhere) or a title-bar
     // click (either button) - see WndProc's WM_NCLBUTTONDOWN/WM_NCRBUTTONDOWN handling and
@@ -450,9 +466,9 @@ public sealed class FenceForm : Form
         var contentPoint = ToContent(e.Location);
         var contentSize = GetContentSize();
 
-        if (_isActive && GetCogRect(contentSize.Width).Contains(contentPoint))
+        if (_isActive && GetSettingsButtonRect(contentSize.Width).Contains(contentPoint))
         {
-            ShowFenceOptionsMenu();
+            _settingsButtonArmed = true;
             return;
         }
 
@@ -543,6 +559,14 @@ public sealed class FenceForm : Form
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left)
             return;
+
+        if (_settingsButtonArmed)
+        {
+            _settingsButtonArmed = false;
+            if (_isActive && GetSettingsButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+                ShowFenceOptionsMenu();
+            return;
+        }
 
         if (_scrollbarDragging)
         {
@@ -722,7 +746,7 @@ public sealed class FenceForm : Form
             case WM_EXITSIZEMOVE:
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
-                        rect.Left + OuterMargin, rect.Top + OuterMargin, rect.Right - RightMargin, rect.Bottom - OuterMargin));
+                        rect.Left + OuterMargin, rect.Top + TopMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
 
                 // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
                 // whatever size was just dragged to - not after a move, see _resizeInProgress.
@@ -755,12 +779,15 @@ public sealed class FenceForm : Form
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
 
-        // The cog sits near the top of the title bar, which overlaps the top resize band below -
-        // check it first so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
-        if (_isActive && GetCogRect(width - OuterMargin - RightMargin).Contains(ToContent(new Point(x, y))))
+        // The settings button lives above the fence, in the taller TopMargin band - check it first
+        // so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
+        if (_isActive && GetSettingsButtonRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
             return HTCLIENT;
 
         int band = OuterMargin + ResizeMargin;
+        // The top band is taller than the other three (see TopMargin) to make room for the settings
+        // button, so it gets its own resize-grab threshold instead of sharing the plain one above.
+        int topBand = TopMargin + ResizeMargin;
 
         if (_isActive)
         {
@@ -769,14 +796,14 @@ public sealed class FenceForm : Form
             // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
             // ThemedActiveBorder highlight) without an ambiguous strip where both would apply.
             // Resizing an active fence isn't available until it's deactivated again.
-            if (x <= band || x >= width - band || y <= band || y >= height - band)
+            if (x <= band || x >= width - band || y <= topBand || y >= height - band)
                 return HTCAPTION;
         }
         else
         {
             bool left = x <= band;
             bool right = x >= width - band;
-            bool top = y <= band;
+            bool top = y <= topBand;
             bool bottom = y >= height - band;
 
             if (top && left) return HTTOPLEFT;
@@ -791,7 +818,7 @@ public sealed class FenceForm : Form
 
         // Empty space within the title bar itself (content-relative, not the margin above) works
         // the same way for a fence that still has one.
-        if (!_model.HideTitle && y - OuterMargin <= TitleBarHeight)
+        if (!_model.HideTitle && y - TopMargin <= TitleBarHeight)
             return HTCAPTION;
 
         return HTCLIENT;
@@ -813,8 +840,8 @@ public sealed class FenceForm : Form
 
         int width = windowRect.Right - windowRect.Left;
         int height = windowRect.Bottom - windowRect.Top;
-        int contentWidth = width - OuterMargin - RightMargin;
-        int contentHeight = height - OuterMargin * 2;
+        int contentWidth = width - OuterMargin * 2;
+        int contentHeight = height - TopMargin - OuterMargin;
         if (contentWidth <= 0 || contentHeight <= 0)
             return;
 
@@ -878,19 +905,28 @@ public sealed class FenceForm : Form
 
             if (_isActive)
             {
-                var cogRect = ToWindow(GetCogRect(contentWidth));
+                // Filled first so the button reads as fully opaque - it lives in the near-transparent
+                // TopMargin band (see MarginFillColor's own comment), and TextRenderer.DrawText below
+                // only ever writes RGB, never alpha, so without an opaque backing shape under it the
+                // label would inherit the margin's near-zero alpha and vanish once
+                // WritePremultipliedPixels scales it down.
+                var buttonRect = ToWindow(GetSettingsButtonRect(contentWidth));
+                using var buttonPath = RoundedRect(buttonRect, 6);
+                using var buttonFill = new SolidBrush(Accent);
+                g.FillPath(buttonFill, buttonPath);
+                using var buttonBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
+                g.DrawPath(buttonBorderPen, buttonPath);
 
-                // The cog lives in the near-transparent OuterMargin band (see that constant's
-                // comment) rather than on the opaque title bar it used to sit on. GDI's
-                // TextRenderer.DrawText only ever writes RGB, never alpha, so drawn there directly it
-                // would inherit the margin's near-zero alpha and vanish once WritePremultipliedPixels
-                // scales it down - the same class of bug as the old scrolled-item-over-transparent-
-                // background issue, just for text instead of images. GDI+'s DrawString doesn't have
-                // that problem (it writes real alpha), so it's used here instead of adding a solid
-                // backing plate behind the glyph just to work around GDI's limitation.
-                using var cogBrush = new SolidBrush(Color.Silver);
-                using var cogFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                g.DrawString("\uE713", _cogFont, cogBrush, cogRect, cogFormat);
+                // GDI+'s DrawString instead of the GDI TextRenderer.DrawText used everywhere else in
+                // this method - GDI's own ClearType antialiasing assumes a neutral/opaque background
+                // and fringes with visible red/blue "shadow" pixels along each glyph's edge against a
+                // saturated color like Accent; GDI+'s AntiAlias hint is plain grayscale, so it doesn't.
+                var previousTextHint = g.TextRenderingHint;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                using (var textBrush = new SolidBrush(Color.WhiteSmoke))
+                using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    g.DrawString("Settings", _font, textBrush, buttonRect, textFormat);
+                g.TextRenderingHint = previousTextHint;
             }
 
             PaintItems(g, contentWidth, contentHeight);
@@ -1094,7 +1130,7 @@ public sealed class FenceForm : Form
 
     /// <summary>Right-click on an item's label text specifically (see FileAtLabelPosition) - not
     /// its icon, not empty grid space. Fence-level actions live elsewhere now: Rename only on the
-    /// header (see ShowHeaderContextMenu) and Delete Fence only in the cog dropdown (see
+    /// header (see ShowHeaderContextMenu) and Delete Fence only in the settings dropdown (see
     /// ShowFenceOptionsMenu) - a right-click anywhere else has nothing of its own to offer, so it
     /// just activates the fence (see ActivateFence) without popping up a menu. Open and Remove From
     /// Fence used to live here too; both stayed reachable another way (double-click, drag off the
@@ -1170,19 +1206,20 @@ public sealed class FenceForm : Form
         }
     }
 
-    /// <summary>Per-fence settings, opened via the cog that appears once this fence is active (see
-    /// OnDeactivate and the cog hit-test carve-out). Top level: the three checkbox toggles, then a
-    /// separator, then "OCD Formatting" (a submenu whose own "Fence Dimensions" header - a plain
-    /// disabled label, not a further nested submenu, see AppendHeader - sits above its three resize
-    /// actions), then another separator, then "Delete Fence". AppendPopup stays available as general
-    /// infrastructure for a real third level if a future subcategory needs one. "Delete Fence" lives
-    /// here rather than any right-click menu now, same as "Rename" moved to the header's own context
-    /// menu - see ShowContextMenu/ShowHeaderContextMenu.</summary>
+    /// <summary>Per-fence settings, opened via the settings button that appears once this fence is
+    /// active (see OnDeactivate and the settings-button hit-test carve-out). Top level: the three
+    /// checkbox toggles, then a separator, then "OCD Formatting" (a submenu whose own "Fence
+    /// Dimensions" header - a plain disabled label, not a further nested submenu, see AppendHeader -
+    /// sits above its three resize actions), then another separator, then "Delete Fence".
+    /// AppendPopup stays available as general infrastructure for a real third level if a future
+    /// subcategory needs one. "Delete Fence" lives here rather than any right-click menu now, same
+    /// as "Rename" moved to the header's own context menu - see ShowContextMenu/
+    /// ShowHeaderContextMenu.</summary>
     private void ShowFenceOptionsMenu()
     {
         var contentSize = GetContentSize();
-        var cogRect = GetCogRect(contentSize.Width);
-        var menuPoint = PointToScreen(ToWindow(new Point(cogRect.X, cogRect.Bottom + 2)));
+        var buttonRect = GetSettingsButtonRect(contentSize.Width);
+        var menuPoint = PointToScreen(ToWindow(new Point(buttonRect.Right + 2, buttonRect.Y)));
 
         var hOcdMenu = NativeMethods.CreatePopupMenu();
         var hColorMenu = NativeMethods.CreatePopupMenu();
@@ -1436,8 +1473,9 @@ public sealed class FenceForm : Form
 
     /// <summary>Paints one row of the fence-options dropdown to match the fence's own dark theme,
     /// instead of the native Windows menu look - background, a hand-drawn checkbox (no checkmark
-    /// glyph font, to sidestep the encoding issues that bit the cog glyph earlier), and the row's
-    /// label text. A submenu row's arrow indicator is left to Windows to draw natively (see
+    /// glyph font, since an icon font's glyphs aren't guaranteed to be installed/rendering on every
+    /// machine - a missing one draws as nothing at all rather than some visible fallback), and the
+    /// row's label text. A submenu row's arrow indicator is left to Windows to draw natively (see
     /// MeasureMenuItem) - drawing our own there duplicated it.
     private void DrawMenuItem(DRAWITEMSTRUCT dis)
     {
@@ -1512,7 +1550,7 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
-    /// <summary>"Fence Color > Custom..." - the cog menu has already closed by the time this runs
+    /// <summary>"Fence Color > Custom..." - the settings menu has already closed by the time this runs
     /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
     /// here doesn't fight it for the message loop.</summary>
     private void PickCustomColor()
@@ -1608,7 +1646,7 @@ public sealed class FenceForm : Form
         // NotifyBoundsChanged just needs to persist it, the same way WM_EXITSIZEMOVE does after an
         // interactive drag-resize.
         NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
-            newBounds.Width + OuterMargin + RightMargin, newBounds.Height + OuterMargin * 2,
+            newBounds.Width + OuterMargin * 2, newBounds.Height + TopMargin + OuterMargin,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
         _manager.NotifyBoundsChanged(FenceId, newBounds);
     }
