@@ -56,6 +56,33 @@ can't be told apart. If Fence Tool is closed uncleanly (crash, Task Manager
 kill) rather than via the tray's Exit, hidden icons stay hidden until it's
 run again.
 
+### Fence settings
+
+Click a fence to activate it, then click the cog that appears near the top
+of its title bar to open its settings menu.
+
+- **Hide Shortcut Names** — hides the label under each icon, showing icons
+  only. Toggle it again to bring labels back.
+- **Hide Title** — hides the fence's title bar entirely, reclaiming that
+  space for the icon grid. The fence can still be moved via its outer
+  margin.
+- **OCD Fence Sizing** — after you resize the fence by hand, automatically
+  snaps it to the tightest size that fits its icons (equivalent to running
+  OCD Formatting → Both after every manual resize).
+- **OCD Formatting** — a submenu with three one-off resize actions: **Both**
+  (trims width and height), **Left/Right** (width only), and **Top/Down**
+  (height only). Each shrinks or grows the fence to fit its current icons
+  without changing its top-left corner.
+- **Fence Color** — a submenu to tint the fence's body and title bar.
+  Choose one of the eight preset swatches, pick **Custom...** to open the
+  full Windows color picker, or pick **Default** to reset to the plain dark
+  gray. The picked color is blended into the existing dark theme rather
+  than replacing it outright, so the fence stays readable no matter how
+  bright the chosen color is.
+- **Delete Fence** — deletes the fence (with a confirmation prompt). Its
+  shortcuts aren't deleted; their real desktop icons are restored (see
+  Desktop icon hiding above).
+
 ## Status
 
 Early scaffold — see the implementation plan for the staged build-out

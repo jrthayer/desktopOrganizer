@@ -38,22 +38,29 @@ public sealed class FenceForm : Form
     // grab - only possible now that per-pixel alpha (not SetWindowRgn) defines the window's shape,
     // since Windows treats fully-transparent pixels as click-through; a hard region couldn't do
     // this at all (you can't hit-test past a window's own rectangle). Painted at a barely-non-zero
-    // alpha (see RenderAndPresent) since alpha 0 would be click-through too, defeating the point.
-    // Also doubles as where the settings cog now lives (always outside the visible fence, to the
-    // right of its top-right corner) - sized to comfortably fit it, not just resize-grabbing.
-    private const int OuterMargin = 26;
+    // alpha (see MarginFillColor) since alpha 0 would be click-through too, defeating the point.
+    private const int OuterMargin = 13;
+
+    // The settings cog (16px, see CogSize) doesn't fit inside the plain OuterMargin band (13px)
+    // with any breathing room, so the window is widened *only on the right* by this much extra -
+    // every other edge (left/top/bottom, and their resize-grab bands) stays exactly OuterMargin.
+    // See GetCogRect, CreateParams, GetContentSize, and every other OuterMargin-on-the-right site
+    // below, all of which use RightMargin instead of OuterMargin for that one edge.
+    private const int CogOverhang = 11;
+    private const int RightMargin = OuterMargin + CogOverhang;
     private const int CornerRadius = 22;
     private const float FenceOpacity = 0.85f;
 
-    // Accent used for selection-style indicators unrelated to fence activation - the item
-    // drag-target outline and the menu checkmark.
-    private static readonly Color AccentColor = Color.FromArgb(120, 170, 255);
-
-    // A fence being active highlights its own border instead - a brighter neutral gray (matching
-    // existing UI grays elsewhere, e.g. the menu checkbox outline) rather than the accent color, so
-    // it reads as "this fence" rather than "a selection", and a thicker pen so the highlight hugs
-    // the fence's actual edge directly instead of a separate frame floating out in the margin.
-    private static readonly Color ActiveBorderColor = Color.FromArgb(200, 150, 150, 158);
+    // Fallback accent (drag-target outline, menu checkmarks, active-fence border) for a fence that
+    // hasn't been given its own color (FenceModel.TintColor is null) - see Accent/ShowFenceOptionsMenu's
+    // "Fence Color" submenu. Every other neutral-gray chrome color below has the same
+    // no-tint/with-tint split via Tint(), keyed off this same DefaultXxx naming.
+    private static readonly Color DefaultAccentColor = Color.FromArgb(120, 170, 255);
+    private static readonly Color DefaultBodyColor = Color.FromArgb(255, 32, 32, 36);
+    private static readonly Color DefaultTitleColor = Color.FromArgb(255, 10, 10, 13);
+    private static readonly Color DefaultBorderColor = Color.FromArgb(255, 70, 70, 78);
+    private static readonly Color DefaultMenuSelectedColor = Color.FromArgb(255, 55, 55, 62);
+    private static readonly Color DefaultCheckboxBorderColor = Color.FromArgb(255, 150, 150, 158);
     private const float ActiveBorderWidth = 8f;
 
     private const int WM_NCHITTEST = 0x0084;
@@ -78,8 +85,6 @@ public sealed class FenceForm : Form
 
     private const int CmdRename = 1;
     private const int CmdDelete = 3;
-    private const int CmdOpenItem = 4;
-    private const int CmdRemoveItem = 5;
     private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
     private const int CmdToggleHideTitle = 8;
@@ -87,12 +92,34 @@ public sealed class FenceForm : Form
     private const int CmdResizeLeftRight = 10;
     private const int CmdResizeTopDown = 11;
     private const int CmdToggleOcdSizing = 12;
+    private const int CmdColorDefault = 13;
+    private const int CmdColorCustom = 14;
+    // A contiguous block reserved for the preset swatches (see ColorPresets) - avoids one named
+    // const per swatch the way the other commands have, since these are looked up by index rather
+    // than individually referenced anywhere.
+    private const int CmdColorPresetBase = 20;
 
     // Not real WM_COMMAND ids (clicking a submenu-anchor row just expands it, it never fires a
     // command) - these only tag an owner-draw row's itemData so DrawMenuItem/MeasureMenuItem know
     // to render a submenu arrow instead of a checkbox. See ShowFenceOptionsMenu.
     private const int TagOcdFormattingHeader = 1001;
     private const int TagFenceDimensionsHeader = 1002;
+    private const int TagColorHeader = 1003;
+
+    /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
+    /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
+    /// fully saturated so the tinted body/title still read as a dark theme - see Tint.</summary>
+    private static readonly Color[] ColorPresets =
+    {
+        Color.FromArgb(200, 80, 80),   // Red
+        Color.FromArgb(210, 140, 70),  // Orange
+        Color.FromArgb(200, 180, 70),  // Yellow
+        Color.FromArgb(90, 170, 100),  // Green
+        Color.FromArgb(70, 170, 170),  // Teal
+        Color.FromArgb(90, 140, 210),  // Blue
+        Color.FromArgb(150, 110, 210), // Purple
+        Color.FromArgb(210, 110, 160), // Pink
+    };
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -140,10 +167,29 @@ public sealed class FenceForm : Form
     private readonly Font _cogFont = new("Segoe MDL2 Assets", 9f);
 
     // Backs both the rename EditBox (via WM_CTLCOLOREDIT, see WndProc) and every owner-draw popup
-    // menu (fence-options dropdown and right-click context menus) - one shared dark fill, matching
-    // the fence body color, for everything that would otherwise default to a native white/light
-    // control background. Lives for the form's whole lifetime rather than being recreated per menu.
-    private readonly IntPtr _darkBrush = NativeMethods.CreateSolidBrush(ColorRef(Color.FromArgb(32, 32, 36)));
+    // menu (fence-options dropdown and right-click context menus) - one shared themed fill, matching
+    // ThemedBody, for everything that would otherwise default to a native white/light control
+    // background. Recreated on demand (see GetThemeBrush) rather than fixed for the form's whole
+    // lifetime, since ThemedBody now depends on the fence's own color and can change at runtime.
+    private IntPtr _themeBrush = IntPtr.Zero;
+    private Color _themeBrushColor;
+
+    /// <summary>Lazily (re)creates the shared theme brush only when ThemedBody has actually changed
+    /// since the last call - both call sites (WM_CTLCOLOREDIT, ApplyDarkMenuTheme) can fire often
+    /// enough (every rename-box redraw, every menu open) that recreating a native GDI brush on every
+    /// single call would be wasteful.</summary>
+    private IntPtr GetThemeBrush()
+    {
+        var color = ThemedBody;
+        if (_themeBrush == IntPtr.Zero || _themeBrushColor != color)
+        {
+            if (_themeBrush != IntPtr.Zero)
+                NativeMethods.DeleteObject(_themeBrush);
+            _themeBrush = NativeMethods.CreateSolidBrush(ColorRef(color));
+            _themeBrushColor = color;
+        }
+        return _themeBrush;
+    }
 
     // Whether the drag that's about to start on WM_NCLBUTTONDOWN is a resize (as opposed to a
     // move) - set from that message's own hit-test code, read back on WM_EXITSIZEMOVE to decide
@@ -162,6 +208,31 @@ public sealed class FenceForm : Form
     private bool _disposing;
 
     public Guid FenceId => _model.Id;
+
+    /// <summary>The fence's own color (FenceModel.TintColor), or null for the plain default dark
+    /// theme - the single source every themed color below (body/title fill, margin, borders, cog
+    /// menu chrome) derives from. See Tint and ShowFenceOptionsMenu's "Fence Color" submenu.</summary>
+    private Color? CurrentTint => _model.TintColor is { } argb ? Color.FromArgb(argb) : null;
+
+    /// <summary>Full-strength version of the fence's tint (falling back to a fixed blue) for
+    /// elements that need to read clearly rather than just hint at the theme - the active-fence
+    /// border, drag-target outline, and cog menu checkmarks/selection ring.</summary>
+    private Color Accent => CurrentTint ?? DefaultAccentColor;
+
+    private Color ThemedBody => Tint(DefaultBodyColor, CurrentTint);
+    private Color ThemedTitle => Tint(DefaultTitleColor, CurrentTint);
+    private Color ThemedBorder => Tint(DefaultBorderColor, CurrentTint);
+    private Color ThemedMenuSelected => Tint(DefaultMenuSelectedColor, CurrentTint);
+    private Color ThemedCheckboxBorder => Tint(DefaultCheckboxBorderColor, CurrentTint, 0.4);
+
+    // Deliberately never tinted, unlike every other Themed* color - this fill exists purely so
+    // Windows doesn't treat the margin as click-through (see RenderAndPresent), not to be seen.
+    // Alpha 1 is the practical minimum that still counts as "not fully transparent" to Windows.
+    private static readonly Color MarginFillColor = Color.FromArgb(1, 0, 0, 0);
+
+    // Translucent rather than opaque, same as the old fixed silver active-border color it replaces -
+    // a fully opaque accent border read as too heavy/saturated against the tinted body beneath it.
+    private Color ThemedActiveBorder => Color.FromArgb(220, Accent);
 
     /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
     /// plus a little breathing room, since there's no label text to make room for underneath.</summary>
@@ -187,7 +258,7 @@ public sealed class FenceForm : Form
             cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
             cp.X = _model.Bounds.X - OuterMargin;
             cp.Y = _model.Bounds.Y - OuterMargin;
-            cp.Width = _model.Bounds.Width + OuterMargin * 2;
+            cp.Width = _model.Bounds.Width + OuterMargin + RightMargin;
             cp.Height = _model.Bounds.Height + OuterMargin * 2;
             return cp;
         }
@@ -230,12 +301,13 @@ public sealed class FenceForm : Form
     /// convention the current native parent implies.</summary>
     public void Reanchor() => _anchorStrategy.Apply(Handle, _model.Bounds);
 
-    /// <summary>The visible fence's size, i.e. the actual (padded) window size minus OuterMargin
-    /// on all sides - all grid/hit-test math below is in this "content" space.</summary>
+    /// <summary>The visible fence's size, i.e. the actual (padded) window size minus OuterMargin on
+    /// the left/top/bottom and RightMargin on the right - all grid/hit-test math below is in this
+    /// "content" space.</summary>
     private Size GetContentSize()
     {
         NativeMethods.GetClientRect(Handle, out var clientRect);
-        return new Size(Math.Max(0, clientRect.Right - OuterMargin * 2), Math.Max(0, clientRect.Bottom - OuterMargin * 2));
+        return new Size(Math.Max(0, clientRect.Right - OuterMargin - RightMargin), Math.Max(0, clientRect.Bottom - OuterMargin * 2));
     }
 
     private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - OuterMargin);
@@ -265,11 +337,11 @@ public sealed class FenceForm : Form
     }
 
     /// <summary>Content-relative, positioned just outside the visible fence (to the right of its
-    /// top-right corner, in the OuterMargin band) rather than inside the title bar - works the same
-    /// whether or not FenceModel.HideTitle leaves a title bar to put it in. Only meaningful while
-    /// _isActive (the cog isn't shown otherwise).</summary>
+    /// top-right corner, centered in the wider RightMargin band rather than inside the title bar) -
+    /// works the same whether or not FenceModel.HideTitle leaves a title bar to put it in. Only
+    /// meaningful while _isActive (the cog isn't shown otherwise).</summary>
     private static Rectangle GetCogRect(int contentWidth) =>
-        new(contentWidth + (OuterMargin - CogSize) / 2, CogTopOffset, CogSize, CogSize);
+        new(contentWidth + (RightMargin - CogSize) / 2, CogTopOffset, CogSize, CogSize);
 
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
@@ -309,7 +381,8 @@ public sealed class FenceForm : Form
             _dragGhost?.Dispose();
             _font.Dispose();
             _cogFont.Dispose();
-            NativeMethods.DeleteObject(_darkBrush);
+            if (_themeBrush != IntPtr.Zero)
+                NativeMethods.DeleteObject(_themeBrush);
             if (_menuTooltip != IntPtr.Zero)
                 NativeMethods.DestroyWindow(_menuTooltip);
             foreach (var icon in _iconCache.Values)
@@ -569,9 +642,12 @@ public sealed class FenceForm : Form
                 {
                     // A real caption's right-click shows the system menu (Restore/Move/Close etc.)
                     // via the default proc - there's no such menu for this custom-drawn title bar,
-                    // so show the header's own menu here instead of letting DefWindowProc pop one up.
+                    // so this swallows the message either way. The header's own menu (rename) only
+                    // pops up when the click landed on the rendered title text itself (see
+                    // IsPointOverTitleText), not just anywhere in the caption/move-margin area.
                     ActivateFence();
-                    ShowHeaderContextMenu();
+                    if (IsPointOverTitleText(m.LParam))
+                        ShowHeaderContextMenu();
                     return;
                 }
                 // Right-clicking a resize edge/corner activates too - this only ever fires while
@@ -612,8 +688,8 @@ public sealed class FenceForm : Form
                 // EditBox itself, is the standard way to restyle a plain Edit control - it has no
                 // owner-draw hook of its own the way buttons/menus do.
                 NativeMethods.SetTextColor(m.WParam, ColorRef(Color.WhiteSmoke));
-                NativeMethods.SetBkColor(m.WParam, ColorRef(Color.FromArgb(32, 32, 36)));
-                m.Result = _darkBrush;
+                NativeMethods.SetBkColor(m.WParam, ColorRef(ThemedBody));
+                m.Result = GetThemeBrush();
                 return;
 
             case NativeMethods.WM_MEASUREITEM:
@@ -646,7 +722,7 @@ public sealed class FenceForm : Form
             case WM_EXITSIZEMOVE:
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
-                        rect.Left + OuterMargin, rect.Top + OuterMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
+                        rect.Left + OuterMargin, rect.Top + OuterMargin, rect.Right - RightMargin, rect.Bottom - OuterMargin));
 
                 // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
                 // whatever size was just dragged to - not after a move, see _resizeInProgress.
@@ -681,7 +757,7 @@ public sealed class FenceForm : Form
 
         // The cog sits near the top of the title bar, which overlaps the top resize band below -
         // check it first so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
-        if (_isActive && GetCogRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
+        if (_isActive && GetCogRect(width - OuterMargin - RightMargin).Contains(ToContent(new Point(x, y))))
             return HTCLIENT;
 
         int band = OuterMargin + ResizeMargin;
@@ -691,7 +767,7 @@ public sealed class FenceForm : Form
             // The margin band is a move handle instead of a resize band while active - the same
             // footprint resize used to claim, just reassigned rather than split into two adjacent
             // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
-            // ActiveBorderColor highlight) without an ambiguous strip where both would apply.
+            // ThemedActiveBorder highlight) without an ambiguous strip where both would apply.
             // Resizing an active fence isn't available until it's deactivated again.
             if (x <= band || x >= width - band || y <= band || y >= height - band)
                 return HTCAPTION;
@@ -737,7 +813,7 @@ public sealed class FenceForm : Form
 
         int width = windowRect.Right - windowRect.Left;
         int height = windowRect.Bottom - windowRect.Top;
-        int contentWidth = width - OuterMargin * 2;
+        int contentWidth = width - OuterMargin - RightMargin;
         int contentHeight = height - OuterMargin * 2;
         if (contentWidth <= 0 || contentHeight <= 0)
             return;
@@ -753,7 +829,7 @@ public sealed class FenceForm : Form
             // (alpha 0) pixels of a layered window as click-through, so a truly invisible margin
             // couldn't receive the resize/move hit-testing it exists for. This gets drawn first and
             // the opaque fence body then covers all of it except that outer band.
-            using (var marginFill = new SolidBrush(Color.FromArgb(8, 0, 0, 0)))
+            using (var marginFill = new SolidBrush(MarginFillColor))
                 g.FillRectangle(marginFill, 0, 0, width, height);
 
             // Not clipped to the content rect here - PaintItems applies its own tighter clip via
@@ -775,12 +851,12 @@ public sealed class FenceForm : Form
             // respect a GDI+ world transform, which left title/item text rendered OuterMargin
             // pixels too high while shapes and images (which do respect it) looked fine.
             using var body = RoundedRect(ToWindow(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1)), CornerRadius);
-            using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
+            using var bodyFill = new SolidBrush(ThemedBody);
             g.FillPath(bodyFill, body);
 
             if (!_model.HideTitle)
             {
-                using var titleFill = new SolidBrush(Color.FromArgb(255, 20, 20, 24));
+                using var titleFill = new SolidBrush(ThemedTitle);
                 using var titlePath = RoundedRectTop(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight)), CornerRadius);
                 g.FillPath(titleFill, titlePath);
             }
@@ -788,7 +864,7 @@ public sealed class FenceForm : Form
             // A brighter, thicker border signals the fence is active - the margin band around it is
             // now a move handle (see HitTest), and this highlight hugs the fence's actual edge
             // directly rather than a separate frame floating out in the margin.
-            using var borderPen = new Pen(_isActive ? ActiveBorderColor : Color.FromArgb(255, 70, 70, 78), _isActive ? ActiveBorderWidth : 1f);
+            using var borderPen = new Pen(_isActive ? ThemedActiveBorder : ThemedBorder, _isActive ? ActiveBorderWidth : 1f);
             // Pen.LineJoin defaults to Miter, which squares off the outer edge of a thick stroke at
             // the rounded corners instead of following their curve - Round keeps it hugging the arc.
             borderPen.LineJoin = LineJoin.Round;
@@ -931,7 +1007,7 @@ public sealed class FenceForm : Form
         var cellX = GridPadding + targetIndex % columns * CellWidth;
         var cellY = GridTop + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
 
-        using var targetPen = new Pen(Color.FromArgb(200, AccentColor), 2);
+        using var targetPen = new Pen(Color.FromArgb(200, Accent), 2);
         using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, EffectiveCellHeight - 2)), 4);
         g.DrawPath(targetPen, targetRect);
     }
@@ -980,6 +1056,26 @@ public sealed class FenceForm : Form
         return index is int i ? _model.Files[i].Path : null;
     }
 
+    /// <summary>Like FileAtGridPosition, but only matches within the item's own label text - not
+    /// its icon or the rest of the cell - and never matches at all when FenceModel.HideLabels has
+    /// hidden every label. Used to gate right-click-to-rename (see ShowContextMenu) to specifically
+    /// the shortcut name, matching the label rect PaintItems actually draws text into.</summary>
+    private string? FileAtLabelPosition(Point contentLocation)
+    {
+        if (_model.HideLabels)
+            return null;
+
+        var index = IndexAtGridPosition(contentLocation);
+        if (index is not int i)
+            return null;
+
+        var columns = GetColumns(GetContentSize().Width);
+        var row = i / columns;
+        var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollOffset;
+        var labelTop = cellY + IconTopPadding + IconSize + 2;
+        return contentLocation.Y >= labelTop ? _model.Files[i].Path : null;
+    }
+
     private int? IndexAtGridPosition(Point contentLocation)
     {
         if (_model.Files.Count == 0 || contentLocation.Y < GridTop)
@@ -996,14 +1092,18 @@ public sealed class FenceForm : Form
         return index >= 0 && index < _model.Files.Count ? index : null;
     }
 
-    /// <summary>Right-click on an item. Fence-level actions live elsewhere now: Rename only on the
+    /// <summary>Right-click on an item's label text specifically (see FileAtLabelPosition) - not
+    /// its icon, not empty grid space. Fence-level actions live elsewhere now: Rename only on the
     /// header (see ShowHeaderContextMenu) and Delete Fence only in the cog dropdown (see
-    /// ShowFenceOptionsMenu) - a plain background right-click has nothing of its own to offer, so it
-    /// just activates the fence (see ActivateFence) without popping up an empty menu.</summary>
+    /// ShowFenceOptionsMenu) - a right-click anywhere else has nothing of its own to offer, so it
+    /// just activates the fence (see ActivateFence) without popping up a menu. Open and Remove From
+    /// Fence used to live here too; both stayed reachable another way (double-click, drag off the
+    /// fence) so removing them from this menu didn't remove the functionality, just this shortcut
+    /// to it.</summary>
     private void ShowContextMenu(Point clientPoint)
     {
         ActivateFence();
-        _contextItem = FileAtGridPosition(clientPoint);
+        _contextItem = FileAtLabelPosition(clientPoint);
         if (_contextItem is null)
             return;
 
@@ -1012,9 +1112,7 @@ public sealed class FenceForm : Form
         var hMenu = NativeMethods.CreatePopupMenu();
         try
         {
-            AppendItem(hMenu, CmdOpenItem, false);
             AppendItem(hMenu, CmdRenameItem, false);
-            AppendItem(hMenu, CmdRemoveItem, false);
 
             ApplyDarkMenuTheme(hMenu);
 
@@ -1027,10 +1125,31 @@ public sealed class FenceForm : Form
         }
     }
 
-    /// <summary>Right-click on the header - the title bar, or (while active) the move margin
-    /// standing in for it on a headless fence, since both report HTCAPTION - see WndProc's
-    /// WM_NCRBUTTONDOWN handling. The only fence-level action tied to this specific spot rather than
-    /// the fence generally.</summary>
+    /// <summary>Whether an NC-message screen point (see WM_NCRBUTTONDOWN) lands specifically on the
+    /// fence's own rendered title text - not just anywhere in the caption/move-margin area that
+    /// reports HTCAPTION - gating right-click-to-rename to the text itself (see
+    /// ShowHeaderContextMenu). Always false with FenceModel.HideTitle set, since there's no title
+    /// text drawn anywhere in that case (see RenderAndPresent). Mirrors the actual
+    /// TextRenderer.DrawText call there - same rect origin/font - but measured to the text's real
+    /// width rather than its full reserved rect, so a click past the end of a short name doesn't
+    /// count as "on" it.</summary>
+    private bool IsPointOverTitleText(IntPtr lParam)
+    {
+        if (_model.HideTitle || !NativeMethods.GetWindowRect(Handle, out var rect))
+            return false;
+
+        long l = lParam.ToInt64();
+        short screenX = (short)(l & 0xFFFF);
+        short screenY = (short)((l >> 16) & 0xFFFF);
+        var content = ToContent(new Point(screenX - rect.Left, screenY - rect.Top));
+
+        var maxWidth = Math.Max(0, GetContentSize().Width - 22);
+        var textWidth = Math.Min(maxWidth, TextRenderer.MeasureText(_model.Name, _font).Width);
+        return new Rectangle(14, 0, textWidth, TitleBarHeight).Contains(content);
+    }
+
+    /// <summary>Right-click on the title text specifically (see IsPointOverTitleText) - the only
+    /// fence-level action tied to this specific spot rather than the fence generally.</summary>
     private void ShowHeaderContextMenu()
     {
         NativeMethods.GetCursorPos(out var pt);
@@ -1066,6 +1185,7 @@ public sealed class FenceForm : Form
         var menuPoint = PointToScreen(ToWindow(new Point(cogRect.X, cogRect.Bottom + 2)));
 
         var hOcdMenu = NativeMethods.CreatePopupMenu();
+        var hColorMenu = NativeMethods.CreatePopupMenu();
         var hMenu = NativeMethods.CreatePopupMenu();
         try
         {
@@ -1081,11 +1201,18 @@ public sealed class FenceForm : Form
             AppendItem(hOcdMenu, CmdResizeLeftRight, false);
             AppendItem(hOcdMenu, CmdResizeTopDown, false);
 
+            AppendItem(hColorMenu, CmdColorDefault, _model.TintColor is null);
+            for (var i = 0; i < ColorPresets.Length; i++)
+                AppendItem(hColorMenu, CmdColorPresetBase + i, _model.TintColor == ColorPresets[i].ToArgb());
+            NativeMethods.AppendMenu(hColorMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
+            AppendItem(hColorMenu, CmdColorCustom, false);
+
             AppendItem(hMenu, CmdToggleHideLabels, _model.HideLabels);
             AppendItem(hMenu, CmdToggleHideTitle, _model.HideTitle);
             AppendItem(hMenu, CmdToggleOcdSizing, _model.OcdFenceSizing);
             NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
             AppendPopup(hMenu, hOcdMenu, TagOcdFormattingHeader);
+            AppendPopup(hMenu, hColorMenu, TagColorHeader);
             NativeMethods.AppendMenu(hMenu, NativeMethods.MF_SEPARATOR, IntPtr.Zero, string.Empty);
             AppendItem(hMenu, CmdDelete, false);
 
@@ -1104,15 +1231,14 @@ public sealed class FenceForm : Form
     /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
     /// separately filled by the menu's own background brush, which defaults to the system's (light)
     /// COLOR_MENU and shows through as a stray light border around the dark rows unless replaced
-    /// here to match. MIM_APPLYTOSUBMENUS cascades this to any attached submenus too. Reuses
-    /// _darkBrush rather than creating/deleting a brush per menu invocation.</summary>
+    /// here to match. MIM_APPLYTOSUBMENUS cascades this to any attached submenus too.</summary>
     private void ApplyDarkMenuTheme(IntPtr hMenu)
     {
         var menuInfo = new MENUINFO
         {
             cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
             fMask = NativeMethods.MIM_BACKGROUND | NativeMethods.MIM_APPLYTOSUBMENUS,
-            hbrBack = _darkBrush,
+            hbrBack = GetThemeBrush(),
         };
         NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
     }
@@ -1135,7 +1261,7 @@ public sealed class FenceForm : Form
     private static void AppendPopup(IntPtr hParentMenu, IntPtr hSubMenu, int headerTag) =>
         NativeMethods.AppendMenu(hParentMenu, NativeMethods.MF_POPUP | NativeMethods.MF_OWNERDRAW, hSubMenu, (IntPtr)headerTag);
 
-    private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader);
+    private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader, Color? Swatch = null);
 
     /// <summary>Every owner-draw row's label and decoration, keyed by the tag carried in its
     /// itemData (see AppendItem/AppendHeader/AppendPopup) rather than its item id. Submenu-anchor
@@ -1151,15 +1277,37 @@ public sealed class FenceForm : Form
         CmdResizeLeftRight => new MenuRowStyle("Left/Right", false, false),
         CmdResizeTopDown => new MenuRowStyle("Top/Down", false, false),
         CmdToggleOcdSizing => new MenuRowStyle("OCD Fence Sizing", true, false),
-        CmdOpenItem => new MenuRowStyle("Open", false, false),
+        TagColorHeader => new MenuRowStyle("Fence Color", false, false),
+        CmdColorDefault => new MenuRowStyle("Default", false, false, DefaultBodyColor),
+        CmdColorCustom => new MenuRowStyle("Custom...", false, false),
+        >= CmdColorPresetBase and < CmdColorPresetBase + 100 =>
+            new MenuRowStyle(GetColorPresetName(tag - CmdColorPresetBase), false, false, GetColorPreset(tag - CmdColorPresetBase)),
         CmdRenameItem => new MenuRowStyle("Rename", false, false),
-        CmdRemoveItem => new MenuRowStyle("Remove From Fence", false, false),
         CmdRename => new MenuRowStyle("Rename", false, false),
         CmdDelete => new MenuRowStyle("Delete Fence", false, false),
         _ => new MenuRowStyle(string.Empty, false, false),
     };
 
+    /// <summary>Preset name shown next to its swatch (e.g. "Red") - index must line up with
+    /// ColorPresets, see ShowFenceOptionsMenu/CmdColorPresetBase.</summary>
+    private static readonly string[] ColorPresetNames = { "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink" };
+
+    private static Color GetColorPreset(int index) => index >= 0 && index < ColorPresets.Length ? ColorPresets[index] : Color.Empty;
+    private static string GetColorPresetName(int index) => index >= 0 && index < ColorPresetNames.Length ? ColorPresetNames[index] : string.Empty;
+
     private static uint ColorRef(Color c) => (uint)(c.R | (c.G << 8) | (c.B << 16));
+
+    /// <summary>Blends a user-picked fence color into one of the fixed dark-theme fill colors
+    /// (body/title) rather than replacing it outright - keeps the tint recognizable while the fence
+    /// still reads as part of the same dark theme even when the picked color is fully saturated
+    /// (e.g. a pure ColorDialog pick), since only part of it makes it into the final fill.</summary>
+    private static Color Tint(Color baseColor, Color? tint, double amount = 0.55) =>
+        tint is not { } t
+            ? baseColor
+            : Color.FromArgb(255,
+                (int)Math.Round(baseColor.R + (t.R - baseColor.R) * amount),
+                (int)Math.Round(baseColor.G + (t.G - baseColor.G) * amount),
+                (int)Math.Round(baseColor.B + (t.B - baseColor.B) * amount));
 
     /// <summary>Only rows worth explaining get one - most menu items are self-explanatory from
     /// their label alone.</summary>
@@ -1212,10 +1360,6 @@ public sealed class FenceForm : Form
         // entirely - opting out of theming here is what makes those two calls actually take effect.
         NativeMethods.SetWindowTheme(_menuTooltip, string.Empty, string.Empty);
 
-        // Matches the fence's own dark theme instead of the system tooltip's default light/yellow.
-        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPBKCOLOR, (IntPtr)ColorRef(Color.FromArgb(32, 32, 36)), IntPtr.Zero);
-        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPTEXTCOLOR, (IntPtr)ColorRef(Color.WhiteSmoke), IntPtr.Zero);
-
         var toolInfo = new TOOLINFO
         {
             cbSize = (uint)Marshal.SizeOf<TOOLINFO>(),
@@ -1230,6 +1374,12 @@ public sealed class FenceForm : Form
     private void ShowMenuItemTooltip(string text)
     {
         EnsureMenuTooltip();
+
+        // Set on every show rather than once at creation (EnsureMenuTooltip only runs the first
+        // time) - the fence's own color, and so ThemedBody, can change at runtime via the "Fence
+        // Color" submenu this same tooltip is used from.
+        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPBKCOLOR, (IntPtr)ColorRef(ThemedBody), IntPtr.Zero);
+        NativeMethods.SendMessage(_menuTooltip, (uint)NativeMethods.TTM_SETTIPTEXTCOLOR, (IntPtr)ColorRef(Color.WhiteSmoke), IntPtr.Zero);
 
         var toolInfo = new TOOLINFO
         {
@@ -1276,7 +1426,7 @@ public sealed class FenceForm : Form
     {
         var style = GetMenuRowStyle((int)mis.itemData);
         var size = TextRenderer.MeasureText(style.Text, _font);
-        var leftReserve = style.HasCheckbox ? MenuCheckboxSize + MenuTextPadding : 0;
+        var leftReserve = style.HasCheckbox || style.Swatch is not null ? MenuCheckboxSize + MenuTextPadding : 0;
         // No right-side reserve for a submenu arrow - Windows always adds its own fixed arrow
         // margin outside whatever width we report for an MF_POPUP row, so reserving space for one
         // here too just doubled up as a second, hand-drawn arrow next to the native one.
@@ -1298,24 +1448,35 @@ public sealed class FenceForm : Form
         var selected = !style.IsHeader && (dis.itemState & NativeMethods.ODS_SELECTED) != 0;
         var isChecked = (dis.itemState & NativeMethods.ODS_CHECKED) != 0;
 
-        using (var background = new SolidBrush(selected ? Color.FromArgb(255, 55, 55, 62) : Color.FromArgb(255, 32, 32, 36)))
+        using (var background = new SolidBrush(selected ? ThemedMenuSelected : ThemedBody))
             g.FillRectangle(background, rect);
 
         if (style.HasCheckbox)
         {
             var checkRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
-            using (var checkPen = new Pen(Color.FromArgb(255, 150, 150, 158)))
+            using (var checkPen = new Pen(ThemedCheckboxBorder))
                 g.DrawRectangle(checkPen, checkRect);
 
             if (isChecked)
             {
-                using var checkMarkPen = new Pen(AccentColor, 2);
+                using var checkMarkPen = new Pen(Accent, 2);
                 g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
                 g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
             }
         }
+        else if (style.Swatch is { } swatchColor)
+        {
+            var swatchRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
+            using (var swatchBrush = new SolidBrush(swatchColor))
+                g.FillEllipse(swatchBrush, swatchRect);
 
-        var textLeft = rect.X + MenuTextPadding + (style.HasCheckbox ? MenuCheckboxSize + MenuTextPadding : 0);
+            // The currently-active color gets a bright ring around its swatch instead of a
+            // checkbox's checkmark - there's no empty "unchecked" state to draw here either way.
+            using var swatchPen = new Pen(isChecked ? Accent : ThemedCheckboxBorder, isChecked ? 2 : 1);
+            g.DrawEllipse(swatchPen, swatchRect);
+        }
+
+        var textLeft = rect.X + MenuTextPadding + (style.HasCheckbox || style.Swatch is not null ? MenuCheckboxSize + MenuTextPadding : 0);
         var textRect = new Rectangle(textLeft, rect.Y, Math.Max(0, rect.Right - MenuTextPadding - textLeft), rect.Height);
         var textColor = style.IsHeader ? Color.FromArgb(255, 140, 140, 148) : Color.WhiteSmoke;
         TextRenderer.DrawText(g, style.Text, _font, textRect, textColor,
@@ -1328,8 +1489,6 @@ public sealed class FenceForm : Form
         {
             case CmdRename: BeginRename(); break;
             case CmdDelete: ConfirmDelete(); break;
-            case CmdOpenItem: OpenItem(_contextItem); break;
-            case CmdRemoveItem: RemoveItem(_contextItem); break;
             case CmdRenameItem: BeginRenameItem(_contextItem); break;
             case CmdToggleHideLabels: ToggleHideLabels(); break;
             case CmdToggleHideTitle: ToggleHideTitle(); break;
@@ -1337,7 +1496,34 @@ public sealed class FenceForm : Form
             case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
             case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
             case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
+            case CmdColorDefault: SetTintColor(null); break;
+            case CmdColorCustom: PickCustomColor(); break;
+            case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
+                var presetColor = GetColorPreset(id - CmdColorPresetBase);
+                if (presetColor != Color.Empty)
+                    SetTintColor(presetColor);
+                break;
         }
+    }
+
+    private void SetTintColor(Color? color)
+    {
+        _manager.SetTintColor(FenceId, color);
+        RenderAndPresent();
+    }
+
+    /// <summary>"Fence Color > Custom..." - the cog menu has already closed by the time this runs
+    /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
+    /// here doesn't fight it for the message loop.</summary>
+    private void PickCustomColor()
+    {
+        using var dialog = new ColorDialog
+        {
+            Color = CurrentTint ?? DefaultBodyColor,
+            FullOpen = true,
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            SetTintColor(dialog.Color);
     }
 
     private void OpenItem(string? path)
@@ -1353,15 +1539,6 @@ public sealed class FenceForm : Form
         {
             // The file may have been moved/deleted since it was dropped here - nothing to do.
         }
-    }
-
-    private void RemoveItem(string? path)
-    {
-        if (path is null)
-            return;
-
-        _manager.RemoveFile(FenceId, path);
-        RenderAndPresent();
     }
 
     private void ToggleHideLabels()
@@ -1431,7 +1608,7 @@ public sealed class FenceForm : Form
         // NotifyBoundsChanged just needs to persist it, the same way WM_EXITSIZEMOVE does after an
         // interactive drag-resize.
         NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
-            newBounds.Width + OuterMargin * 2, newBounds.Height + OuterMargin * 2,
+            newBounds.Width + OuterMargin + RightMargin, newBounds.Height + OuterMargin * 2,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
         _manager.NotifyBoundsChanged(FenceId, newBounds);
     }

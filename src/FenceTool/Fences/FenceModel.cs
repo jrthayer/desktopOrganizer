@@ -55,6 +55,11 @@ public sealed class FenceModel
     public bool HideTitle { get; set; }
     public bool OcdFenceSizing { get; set; }
 
+    /// <summary>ARGB int (Color.ToArgb()), not System.Drawing.Color directly - Color doesn't
+    /// round-trip through System.Text.Json without a custom converter. Null means the default dark
+    /// gray theme (see FenceForm.RenderAndPresent's Tint helper).</summary>
+    public int? TintColor { get; set; }
+
     [JsonIgnore]
     public Rectangle Bounds
     {

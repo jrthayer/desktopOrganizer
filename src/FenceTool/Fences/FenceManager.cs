@@ -237,6 +237,18 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    public void SetTintColor(Guid id, Color? color)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null)
+            return;
+        var argb = color?.ToArgb();
+        if (model.TintColor == argb)
+            return;
+        model.TintColor = argb;
+        Save();
+    }
+
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)
