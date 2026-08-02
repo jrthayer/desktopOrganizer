@@ -1582,12 +1582,20 @@ public sealed class FenceForm : Form
     private void ToggleHideLabels()
     {
         _manager.SetHideLabels(FenceId, !_model.HideLabels);
+        // Changes EffectiveCellHeight (see its own comment), which OCD Fence Sizing's fit is based
+        // on - only height can possibly need to change here, never the columns/width.
+        if (_model.OcdFenceSizing)
+            FormatDimensions(adjustWidth: false, adjustHeight: true);
         RenderAndPresent();
     }
 
     private void ToggleHideTitle()
     {
         _manager.SetHideTitle(FenceId, !_model.HideTitle);
+        // Changes GridTop (see its own comment), which OCD Fence Sizing's fit is based on - only
+        // height can possibly need to change here, never the columns/width.
+        if (_model.OcdFenceSizing)
+            FormatDimensions(adjustWidth: false, adjustHeight: true);
         RenderAndPresent();
     }
 
