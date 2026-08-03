@@ -369,13 +369,35 @@ public sealed class FenceForm : Form
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Content-relative, positioned just outside the visible fence (directly above it,
-    /// flush with its top-right corner, in the taller TopMargin band) - works the same whether or
-    /// not FenceModel.HideTitle leaves a title bar underneath it. Only meaningful while _isActive
-    /// (the button isn't shown otherwise). Y is negative - above content-space y=0 - which is fine
-    /// everywhere this is used (hit-testing, painting via ToWindow, menu positioning).</summary>
-    private static Rectangle GetSettingsButtonRect(int contentWidth) =>
-        new(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap), SettingsButtonWidth, SettingsButtonHeight);
+    /// <summary>Content-relative, positioned just outside the visible fence (directly above it, in
+    /// the taller TopMargin band) - works the same whether or not FenceModel.HideTitle leaves a title
+    /// bar underneath it. Only meaningful while _isActive (the button isn't shown otherwise). Y is
+    /// negative - above content-space y=0 - which is fine everywhere this is used (hit-testing,
+    /// painting via ToWindow, menu positioning). Flush with the top-right corner by default; flipped
+    /// to the top-left corner instead when ShouldSettingsButtonOpenLeft says the options menu
+    /// wouldn't fit opening rightward from the right corner - see ShowFenceOptionsMenu, which reuses
+    /// this same rect's X to decide which side the menu itself opens on, so the two always agree.</summary>
+    private Rectangle GetSettingsButtonRect(int contentWidth)
+    {
+        var x = ShouldSettingsButtonOpenLeft(contentWidth) ? 0 : contentWidth - SettingsButtonWidth;
+        return new Rectangle(x, -(SettingsButtonHeight + SettingsButtonGap), SettingsButtonWidth, SettingsButtonHeight);
+    }
+
+    /// <summary>Measures the actual options menu (see BuildOptionsMenuRows/DropdownMenu.Measure)
+    /// against the screen the fence is currently on, using the button's default top-right placement
+    /// as the anchor - i.e. "would the menu fit opening to the right of a right-corner button". Only
+    /// true near the right edge of a monitor, same trigger as the menu's own fallback flip inside
+    /// DropdownMenu; this just decides it earlier so the button can already be on the correct corner
+    /// before the menu exists.</summary>
+    private bool ShouldSettingsButtonOpenLeft(int contentWidth)
+    {
+        var rightAligned = new Rectangle(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap),
+            SettingsButtonWidth, SettingsButtonHeight);
+        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(rightAligned.Location)), rightAligned.Size);
+        var workingArea = Screen.FromRectangle(buttonScreenRect).WorkingArea;
+        var menuSize = DropdownMenu.Measure(BuildOptionsMenuRows(), _font);
+        return buttonScreenRect.Right + DropdownMenu.AnchorGap + menuSize.Width > workingArea.Right;
+    }
 
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
@@ -770,6 +792,17 @@ public sealed class FenceForm : Form
                 if (_resizeInProgress && _model.OcdFenceSizing)
                     FormatDimensions(adjustWidth: true, adjustHeight: true);
                 _resizeInProgress = false;
+
+                // A pure move (no resize) never otherwise triggers a re-render - WM_SIZE already
+                // covers the resize case - but GetSettingsButtonRect now depends on the fence's
+                // absolute screen position (see ShouldSettingsButtonOpenLeft), so dragging a fence
+                // across the point where the button should flip corners left the old render on
+                // screen with the button drawn on its old side, while hit-testing (recomputed fresh
+                // on the next click) already expected the new side - a click on the visibly-drawn
+                // button landed nowhere. Re-rendering here keeps what's drawn and what's hit-tested
+                // in sync again once the move settles.
+                if (ShowsSettingsButton)
+                    RenderAndPresent();
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -1239,8 +1272,42 @@ public sealed class FenceForm : Form
 
         var contentSize = GetContentSize();
         var buttonRect = GetSettingsButtonRect(contentSize.Width);
-        var menuPoint = PointToScreen(ToWindow(new Point(buttonRect.Right + 2, buttonRect.Y)));
+        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(buttonRect.Location)), buttonRect.Size);
+        // GetSettingsButtonRect already picked whichever corner has room for the menu (see
+        // ShouldSettingsButtonOpenLeft) - reuse that same decision here instead of re-deriving it, so
+        // the button and the menu it opens always agree on which side they're on.
+        var preferLeft = buttonRect.X == 0;
 
+        var rows = BuildOptionsMenuRows();
+
+        // Tooltip background blends from black rather than DefaultBodyColor (unlike every other
+        // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
+        // fence's own color at the same blend amount than starting from dark gray would, since
+        // there's more contrast for Tint() to work with between black and a bright pick.
+        _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ThemedBody, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
+            () => Tint(Color.Black, CurrentTint));
+        _dropdown.ItemClicked += id =>
+        {
+            HandleCommand(id);
+            _dropdown?.RefreshChecks();
+        };
+        _dropdown.FormClosed += (_, _) =>
+        {
+            _dropdown = null;
+            // ShowsSettingsButton depends on _dropdown - now that it's gone, the button/active
+            // border need to actually disappear if _isActive had already gone false while it was
+            // still open, instead of staying stuck looking active until some other render trigger.
+            // RenderAndPresent already no-ops via _disposing if the fence itself is going away too.
+            RenderAndPresent();
+        };
+        _dropdown.Show(this);
+    }
+
+    /// <summary>The settings dropdown's row list, factored out of ShowFenceOptionsMenu so
+    /// ShouldSettingsButtonOpenLeft can measure it (via DropdownMenu.Measure) to decide which corner
+    /// the button itself belongs in before the menu exists to measure.</summary>
+    private List<DropdownMenu.Row> BuildOptionsMenuRows()
+    {
         var rows = new List<DropdownMenu.Row>
         {
             new(CmdToggleHideLabels, "Hide Shortcut Names", HasCheckbox: true, IsChecked: () => _model.HideLabels),
@@ -1268,28 +1335,7 @@ public sealed class FenceForm : Form
         rows.Add(new DropdownMenu.Row(CmdResizeTopDown, "Top/Down"));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         rows.Add(new DropdownMenu.Row(CmdDelete, "Delete Fence"));
-
-        // Tooltip background blends from black rather than DefaultBodyColor (unlike every other
-        // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
-        // fence's own color at the same blend amount than starting from dark gray would, since
-        // there's more contrast for Tint() to work with between black and a bright pick.
-        _dropdown = new DropdownMenu(rows, menuPoint, _font, () => ThemedBody, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
-            () => Tint(Color.Black, CurrentTint));
-        _dropdown.ItemClicked += id =>
-        {
-            HandleCommand(id);
-            _dropdown?.RefreshChecks();
-        };
-        _dropdown.FormClosed += (_, _) =>
-        {
-            _dropdown = null;
-            // ShowsSettingsButton depends on _dropdown - now that it's gone, the button/active
-            // border need to actually disappear if _isActive had already gone false while it was
-            // still open, instead of staying stuck looking active until some other render trigger.
-            // RenderAndPresent already no-ops via _disposing if the fence itself is going away too.
-            RenderAndPresent();
-        };
-        _dropdown.Show(this);
+        return rows;
     }
 
     /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is

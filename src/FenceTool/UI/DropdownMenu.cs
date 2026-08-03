@@ -63,12 +63,23 @@ internal sealed class DropdownMenu : Form
     /// RefreshChecks() afterward if anything the menu displays (a checkbox, a color ring) changed.</summary>
     public event Action<int>? ItemClicked;
 
-    /// <summary>screenLocation is where the menu's top-left corner should appear, in screen
-    /// coordinates - same convention as the PointToScreen(...) call the old TrackPopupMenuEx-based
-    /// version used. The five Func&lt;Color&gt; callbacks are re-invoked on every repaint rather than
-    /// snapshotted once, since the fence's own tint (and so its accent/body/tooltip colors) can
-    /// change while this is open - picking a color no longer closes the menu first.</summary>
-    public DropdownMenu(IEnumerable<Row> rows, Point screenLocation, Font font,
+    // Internal rather than private - FenceForm.ShouldSettingsButtonOpenLeft needs the same gap value
+    // to decide the button's corner ahead of time, and it must match the constructor's own fit-check
+    // exactly or the two could disagree about which side actually has room.
+    internal const int AnchorGap = 2;
+
+    /// <summary>anchorScreenRect is the settings button's bounds in screen coordinates - same
+    /// convention as the PointToScreen(...) call the old TrackPopupMenuEx-based version used, just a
+    /// rect instead of a single point so this can decide which side of the button to open on (see
+    /// below) instead of the caller baking that choice in. preferLeft is only true for callers that
+    /// want the menu to open leftward whenever it fits, rather than as a last resort - the settings
+    /// menu (see FenceForm.ShowFenceOptionsMenu) passes false, since the button sits flush with the
+    /// fence's top-right corner and opening right is what keeps the menu off the fence by default;
+    /// left only kicks in there once right would run off the screen. The five Func&lt;Color&gt;
+    /// callbacks are re-invoked on every repaint rather than snapshotted once, since the fence's own
+    /// tint (and so its accent/body/tooltip colors) can change while this is open - picking a color
+    /// no longer closes the menu first.</summary>
+    public DropdownMenu(IEnumerable<Row> rows, Rectangle anchorScreenRect, bool preferLeft, Font font,
         Func<Color> getBody, Func<Color> getSelected, Func<Color> getAccent, Func<Color> getCheckboxBorder, Func<Color> getTooltipColor)
     {
         _rows = rows.ToList();
@@ -86,7 +97,25 @@ internal sealed class DropdownMenu : Form
         DoubleBuffered = true;
 
         var size = MeasureLayout();
-        Bounds = new Rectangle(screenLocation, size);
+        var workingArea = Screen.FromRectangle(anchorScreenRect).WorkingArea;
+
+        // Try the preferred side first, falling back to the opposite side if it doesn't have room -
+        // e.g. a fence near the left edge of the screen still needs the menu to flip back to the
+        // right even though left is normally preferred. If neither side fully fits (a very narrow
+        // screen), fall back to clamping within the working area same as the vertical axis.
+        bool LeftFits() => anchorScreenRect.Left - AnchorGap - size.Width >= workingArea.Left;
+        bool RightFits() => anchorScreenRect.Right + AnchorGap + size.Width <= workingArea.Right;
+        int LeftX() => anchorScreenRect.Left - AnchorGap - size.Width;
+        int RightX() => anchorScreenRect.Right + AnchorGap;
+
+        int x;
+        if (preferLeft)
+            x = LeftFits() ? LeftX() : RightFits() ? RightX() : Math.Max(workingArea.Left, workingArea.Right - size.Width);
+        else
+            x = RightFits() ? RightX() : LeftFits() ? LeftX() : Math.Max(workingArea.Left, workingArea.Right - size.Width);
+
+        var y = Math.Max(workingArea.Top, Math.Min(anchorScreenRect.Y, workingArea.Bottom - size.Height));
+        Bounds = new Rectangle(x, y, size.Width, size.Height);
     }
 
     protected override CreateParams CreateParams
@@ -117,7 +146,20 @@ internal sealed class DropdownMenu : Form
     /// changed - the menu doesn't know what a given id means, so it can't tell on its own.</summary>
     public void RefreshChecks() => Invalidate();
 
+    /// <summary>Measures what a menu built from these rows would be sized, without actually
+    /// constructing one - used by FenceForm.ShouldSettingsButtonOpenLeft to decide which corner the
+    /// settings button belongs in before the real DropdownMenu exists to measure.</summary>
+    public static Size Measure(IEnumerable<Row> rows, Font font) => LayoutRows(rows.ToList(), font).Size;
+
     private Size MeasureLayout()
+    {
+        var (size, rowRects) = LayoutRows(_rows, _font);
+        _rowRects.Clear();
+        _rowRects.AddRange(rowRects);
+        return size;
+    }
+
+    private static (Size Size, List<Rectangle> RowRects) LayoutRows(List<Row> rows, Font font)
     {
         // Grid items don't factor into the width pass below (their own cells just divide up
         // whatever width the regular rows end up needing) - only a floor to keep GridColumns
@@ -125,26 +167,26 @@ internal sealed class DropdownMenu : Form
         // happened to be short.
         var maxWidth = GridColumns * (GridCircleSize + RowPadding);
 
-        foreach (var row in _rows)
+        foreach (var row in rows)
         {
             if (row.IsGridItem || row.IsSeparator)
                 continue;
-            var textSize = TextRenderer.MeasureText(row.Text, _font);
+            var textSize = TextRenderer.MeasureText(row.Text, font);
             var leftReserve = row.HasCheckbox || row.Swatch is not null ? CheckboxSize + RowPadding : 0;
             maxWidth = Math.Max(maxWidth, RowPadding + leftReserve + textSize.Width + RowPadding);
         }
 
         var width = Math.Max(MinWidth, maxWidth) + 2; // + left/right 1px borders
 
-        _rowRects.Clear();
+        var rowRects = new List<Rectangle>();
         int y = 1; // 1px top border
         int i = 0;
-        while (i < _rows.Count)
+        while (i < rows.Count)
         {
-            if (_rows[i].IsGridItem)
+            if (rows[i].IsGridItem)
             {
                 var start = i;
-                while (i < _rows.Count && _rows[i].IsGridItem)
+                while (i < rows.Count && rows[i].IsGridItem)
                     i++;
                 var count = i - start;
                 var cellWidth = (width - 2) / GridColumns;
@@ -152,20 +194,20 @@ internal sealed class DropdownMenu : Form
                 {
                     var col = j % GridColumns;
                     var gridRow = j / GridColumns;
-                    _rowRects.Add(new Rectangle(1 + col * cellWidth, y + gridRow * GridCellHeight, cellWidth, GridCellHeight));
+                    rowRects.Add(new Rectangle(1 + col * cellWidth, y + gridRow * GridCellHeight, cellWidth, GridCellHeight));
                 }
                 y += ((count + GridColumns - 1) / GridColumns) * GridCellHeight;
                 continue;
             }
 
-            var row = _rows[i];
-            var height = row.IsSeparator ? SeparatorHeight : Math.Max(TextRenderer.MeasureText(row.Text, _font).Height + 8, MinRowHeight);
-            _rowRects.Add(new Rectangle(1, y, width - 2, height));
+            var row = rows[i];
+            var height = row.IsSeparator ? SeparatorHeight : Math.Max(TextRenderer.MeasureText(row.Text, font).Height + 8, MinRowHeight);
+            rowRects.Add(new Rectangle(1, y, width - 2, height));
             y += height;
             i++;
         }
 
-        return new Size(width, y + 1); // + bottom border
+        return (new Size(width, y + 1), rowRects); // + bottom border
     }
 
     protected override void OnPaint(PaintEventArgs e)
