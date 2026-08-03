@@ -74,6 +74,7 @@ public sealed class FenceForm : Form
     private const int WM_SIZE = 0x0005;
     private const int WM_RBUTTONUP = 0x0205;
     private const int WM_COMMAND = 0x0111;
+    private const int WM_ENTERSIZEMOVE = 0x0231;
     private const int WM_EXITSIZEMOVE = 0x0232;
 
     private const int HTCLIENT = 1;
@@ -98,6 +99,7 @@ public sealed class FenceForm : Form
     private const int CmdColorDefault = 13;
     private const int CmdColorCustom = 14;
     private const int CmdColorEyedrop = 15;
+    private const int CmdToggleFullOpacityOnHover = 16;
     // A contiguous block reserved for the preset swatches (see ColorPresets) - avoids one named
     // const per swatch the way the other commands have, since these are looked up by index rather
     // than individually referenced anywhere.
@@ -160,6 +162,26 @@ public sealed class FenceForm : Form
     private string? _itemRenamePath;
     private string? _contextItem;
     private int _hoverIndex = -1;
+    // Together back "Full Opacity When Active" (see IsHovered/TargetOpacity) - split into
+    // client/non-client because they're detected two completely different ways (see
+    // OnMouseEnter/OnMouseLeave for the client half, WM_NCMOUSEMOVE/WM_NCMOUSELEAVE in WndProc for
+    // the margin/resize band).
+    private bool _isClientHovered;
+    private bool _isNonClientHovered;
+    private bool IsHovered => _isClientHovered || _isNonClientHovered;
+    // Set between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE (see WndProc) - covers both an interactive
+    // move and an interactive resize, same as _resizeInProgress's own window.
+    private bool _isMoving;
+
+    // The opacity actually being rendered right now (see EffectiveOpacity) - separate from
+    // TargetOpacity (what it should end up at) so a hover/drag/settings-open-triggered change can
+    // animate smoothly toward the target over several ticks instead of jumping there in one repaint.
+    // A direct settings change (the Opacity slider, toggling Full Opacity When Active) snaps this
+    // straight to the target instead - see SetOpacity/ToggleFullOpacityOnHover - since a slider drag
+    // needs to track the cursor immediately, not lag behind it.
+    private float _displayOpacity;
+    private readonly System.Windows.Forms.Timer _opacityAnimTimer;
+    private const float OpacityAnimStep = 0.06f;
 
     // Internal drag state for reordering/removing items - this is all local mouse tracking, not
     // OLE drag-and-drop (which is only for accepting drops from outside the app, via
@@ -312,11 +334,19 @@ public sealed class FenceForm : Form
     private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint, SafeChromeBlend);
 
     /// <summary>_model.Opacity (0-100%) as the 0.0-1.0 fraction RenderAndPresent's
-    /// LayeredWindowPresenter.Present call needs. Not forced to 100% for TintIsExact - PickEyedropperColor
+    /// LayeredWindowPresenter.Present call needs - fully opaque instead whenever FullOpacityOnHover is
+    /// on and this fence is "in use": hovered (IsHovered), being dragged/resized (_isMoving), or has
+    /// its settings dropdown open (_dropdown is not null) - see the field/BeginOpacityAnimationIfNeeded
+    /// call sites for each of those three. Not forced to 100% for TintIsExact - PickEyedropperColor
     /// sets Opacity to 100 at the moment of picking instead, so a fresh Eyedropper pick still starts
     /// pixel-exact, but the user can deliberately trade that exactness away afterward via the Fence
-    /// Opacity slider (see its own row) the same as any other fence.</summary>
-    private float EffectiveOpacity => _model.Opacity / 100f;
+    /// Opacity slider (see its own row) the same as any other fence. Where _displayOpacity should end
+    /// up, not necessarily what's rendered right now - see EffectiveOpacity.</summary>
+    private float TargetOpacity => _model.FullOpacityOnHover && (IsHovered || _isMoving || _dropdown is not null) ? 1f : _model.Opacity / 100f;
+
+    /// <summary>What Present actually renders with - _displayOpacity, animated toward TargetOpacity
+    /// rather than reading it directly (see _displayOpacity's own field comment).</summary>
+    private float EffectiveOpacity => _displayOpacity;
 
     /// <summary>color blended toward black by amount (0.0-1.0) - shared by HeaderBaseColor (starting
     /// from the fixed default body color) and ThemedTitle's exact-tint case (starting from the
@@ -402,6 +432,9 @@ public sealed class FenceForm : Form
         _model = model;
         _manager = manager;
         _anchorStrategy = anchorStrategy;
+        _displayOpacity = _model.Opacity / 100f;
+        _opacityAnimTimer = new System.Windows.Forms.Timer { Interval = 15 };
+        _opacityAnimTimer.Tick += (_, _) => StepOpacityAnimation();
 
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -563,6 +596,7 @@ public sealed class FenceForm : Form
             _dragGhost?.Dispose();
             _dropdown?.Dispose();
             _toolTip.Dispose();
+            _opacityAnimTimer.Dispose();
             _font.Dispose();
             if (_themeBrush != IntPtr.Zero)
                 NativeMethods.DeleteObject(_themeBrush);
@@ -868,15 +902,54 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>Tracks whether the cursor is over this fence's client area, for "Full Opacity On
+    /// Hover" (see IsHovered/TargetOpacity) - not the same as _hoverIndex (which icon, if any, is
+    /// hovered) or ShowsSettingsButton's _isActive. Client-area only; the margin/resize band is
+    /// covered separately by _isNonClientHovered (see WM_NCMOUSEMOVE/WM_NCMOUSELEAVE in WndProc).</summary>
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        base.OnMouseEnter(e);
+        _isClientHovered = true;
+        BeginOpacityAnimationIfNeeded();
+    }
+
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
+        _isClientHovered = false;
+        BeginOpacityAnimationIfNeeded();
         SetHoverIndex(-1);
         if (_visibleButtonTooltip is not null)
         {
             _visibleButtonTooltip = null;
             _toolTip.Hide(this);
         }
+    }
+
+    /// <summary>Starts (if not already running) the tick loop that eases _displayOpacity toward
+    /// TargetOpacity - a no-op if they already match (Full Opacity When Active off, or already at the
+    /// target) so this can be called unconditionally from every hover/drag/settings-open state change
+    /// without checking FullOpacityOnHover itself first.</summary>
+    private void BeginOpacityAnimationIfNeeded()
+    {
+        if (!_opacityAnimTimer.Enabled && Math.Abs(_displayOpacity - TargetOpacity) > 0.001f)
+            _opacityAnimTimer.Start();
+    }
+
+    private void StepOpacityAnimation()
+    {
+        var target = TargetOpacity;
+        var delta = target - _displayOpacity;
+        if (Math.Abs(delta) <= OpacityAnimStep)
+        {
+            _displayOpacity = target;
+            _opacityAnimTimer.Stop();
+        }
+        else
+        {
+            _displayOpacity += Math.Sign(delta) * OpacityAnimStep;
+        }
+        RenderAndPresent();
     }
 
     private void SetHoverIndex(int index)
@@ -940,6 +1013,32 @@ public sealed class FenceForm : Form
                     ActivateFence();
                 break;
 
+            case NativeMethods.WM_NCMOUSEMOVE:
+                // WinForms' own client-area hover tracking (OnMouseEnter/OnMouseLeave) doesn't cover
+                // this - the margin/resize band reports HTLEFT/HTCAPTION/etc. (see HitTest), so the
+                // OS treats it as non-client and never raises the client mouse events those hook.
+                // TrackMouseEvent needs re-arming on every WM_NCMOUSEMOVE (Windows disarms it after
+                // firing once), not just the first - but only bother once per hover session since
+                // _isNonClientHovered already being true means it's still armed from last time.
+                if (!_isNonClientHovered)
+                {
+                    _isNonClientHovered = true;
+                    BeginOpacityAnimationIfNeeded();
+                }
+                var tme = new TRACKMOUSEEVENT
+                {
+                    cbSize = (uint)Marshal.SizeOf<TRACKMOUSEEVENT>(),
+                    dwFlags = NativeMethods.TME_LEAVE | NativeMethods.TME_NONCLIENT,
+                    hwndTrack = Handle,
+                };
+                NativeMethods.TrackMouseEvent(ref tme);
+                break;
+
+            case NativeMethods.WM_NCMOUSELEAVE:
+                _isNonClientHovered = false;
+                BeginOpacityAnimationIfNeeded();
+                break;
+
             case WM_ERASEBKGND:
                 m.Result = (IntPtr)1;
                 return;
@@ -999,6 +1098,11 @@ public sealed class FenceForm : Form
                 RepositionDropdown();
                 break;
 
+            case WM_ENTERSIZEMOVE:
+                _isMoving = true;
+                BeginOpacityAnimationIfNeeded();
+                break;
+
             case WM_EXITSIZEMOVE:
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
@@ -1009,6 +1113,8 @@ public sealed class FenceForm : Form
                 if (_resizeInProgress && _model.OcdFenceSizing)
                     FormatDimensions(adjustWidth: true, adjustHeight: true);
                 _resizeInProgress = false;
+                _isMoving = false;
+                BeginOpacityAnimationIfNeeded();
 
                 // A pure move (no resize) never otherwise triggers a re-render - WM_SIZE already
                 // covers the resize case - but GetSettingsButtonRect now depends on the fence's
@@ -1573,8 +1679,14 @@ public sealed class FenceForm : Form
             // still open, instead of staying stuck looking active until some other render trigger.
             // RenderAndPresent already no-ops via _disposing if the fence itself is going away too.
             RenderAndPresent();
+            // TargetOpacity depends on _dropdown being non-null - now that it's closing, ease back
+            // down off Full Opacity if nothing else (hover, a drag) is still keeping it up.
+            BeginOpacityAnimationIfNeeded();
         };
         _dropdown.Show(this);
+        // TargetOpacity depends on _dropdown being non-null - opening it may need to start easing
+        // toward Full Opacity right away, not wait for some unrelated repaint to notice.
+        BeginOpacityAnimationIfNeeded();
     }
 
     /// <summary>Keeps an already-open settings dropdown anchored to its button after the fence's own
@@ -1603,6 +1715,9 @@ public sealed class FenceForm : Form
             new(CmdToggleHideTitle, "Hide Title", HasCheckbox: true, IsChecked: () => _model.HideTitle),
             new(CmdToggleOcdSizing, "OCD Fence Sizing", HasCheckbox: true, IsChecked: () => _model.OcdFenceSizing,
                 Tooltip: GetMenuTooltipText(CmdToggleOcdSizing)),
+            new(CmdToggleFullOpacityOnHover, "Full Opacity When Active", HasCheckbox: true,
+                IsChecked: () => _model.FullOpacityOnHover,
+                Tooltip: "Full opacity while hovered, dragged/resized, or this menu is open"),
             new(0, string.Empty, IsSeparator: true),
             new(TagColorHeader, "Fence Color", IsHeader: true),
             new(CmdColorDefault, string.Empty, IsGridItem: true, Swatch: DefaultBodyColor,
@@ -1793,6 +1908,7 @@ public sealed class FenceForm : Form
             case CmdColorDefault: SetTintColor(null); break;
             case CmdColorCustom: PickCustomColor(); break;
             case CmdColorEyedrop: PickEyedropperColor(); break;
+            case CmdToggleFullOpacityOnHover: ToggleFullOpacityOnHover(); break;
             case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
                 var presetColor = GetColorPreset(id - CmdColorPresetBase);
                 if (presetColor != Color.Empty)
@@ -1801,10 +1917,17 @@ public sealed class FenceForm : Form
         }
     }
 
-    /// <summary>exact is only ever true from PickEyedropperColor - see FenceModel.TintIsExact.</summary>
+    /// <summary>exact is only ever true from PickEyedropperColor - see FenceModel.TintIsExact. A
+    /// non-exact pick also resets Opacity back to its default as a side effect (see
+    /// FenceManager.SetTintColor) - _displayOpacity needs to snap to match immediately, the same
+    /// reasoning as SetOpacity's own snap, or the fence would keep rendering at whatever opacity it
+    /// was at right before this pick until something else (hover, the dropdown closing) happened to
+    /// notice the mismatch.</summary>
     private void SetTintColor(Color? color, bool exact = false)
     {
         _manager.SetTintColor(FenceId, color, exact);
+        _opacityAnimTimer.Stop();
+        _displayOpacity = TargetOpacity;
         RenderAndPresent();
     }
 
@@ -1821,10 +1944,14 @@ public sealed class FenceForm : Form
 
     /// <summary>"Fence Opacity" slider - same live-drag pattern as SetHeaderDarkness above.
     /// FenceManager.SetOpacity enforces a safe minimum, so a value dragged below it snaps back on the
-    /// next repaint rather than the fence actually going invisible.</summary>
+    /// next repaint rather than the fence actually going invisible. Snaps _displayOpacity straight to
+    /// the new TargetOpacity instead of animating (see its own field comment) - a slider drag needs
+    /// to track the cursor immediately, an animated lag here would feel unresponsive.</summary>
     private void SetOpacity(int opacity)
     {
         _manager.SetOpacity(FenceId, opacity);
+        _opacityAnimTimer.Stop();
+        _displayOpacity = TargetOpacity;
         RenderAndPresent();
     }
 
@@ -1911,6 +2038,14 @@ public sealed class FenceForm : Form
     private void ToggleOcdFenceSizing()
     {
         _manager.SetOcdFenceSizing(FenceId, !_model.OcdFenceSizing);
+        RenderAndPresent();
+    }
+
+    private void ToggleFullOpacityOnHover()
+    {
+        _manager.SetFullOpacityOnHover(FenceId, !_model.FullOpacityOnHover);
+        _opacityAnimTimer.Stop();
+        _displayOpacity = TargetOpacity;
         RenderAndPresent();
     }
 

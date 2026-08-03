@@ -36,6 +36,15 @@ internal struct BLENDFUNCTION
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct TRACKMOUSEEVENT
+{
+    public uint cbSize;
+    public uint dwFlags;
+    public IntPtr hwndTrack;
+    public uint dwHoverTime;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct BITMAPINFOHEADER
 {
     public uint biSize;
@@ -166,6 +175,15 @@ internal static class NativeMethods
     public const int WM_DPICHANGED = 0x02E0;
     public const int WM_MOUSEACTIVATE = 0x0021;
     public const int MA_NOACTIVATE = 3;
+
+    // WinForms' own OnMouseEnter/OnMouseLeave already track TME_LEAVE for the CLIENT area - these
+    // two plus TrackMouseEvent(TME_LEAVE | TME_NONCLIENT) are what FenceForm needs on top of that to
+    // also notice hover over the margin/resize band, which mostly generates non-client mouse
+    // messages instead (see FenceForm.HitTest returning HTLEFT/HTCAPTION/etc. there).
+    public const int WM_NCMOUSEMOVE = 0x00A0;
+    public const int WM_NCMOUSELEAVE = 0x02A2;
+    public const uint TME_LEAVE = 0x00000002;
+    public const uint TME_NONCLIENT = 0x00000010;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOACTIVATE = 0x0010;
@@ -410,6 +428,10 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT lpEventTrack);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

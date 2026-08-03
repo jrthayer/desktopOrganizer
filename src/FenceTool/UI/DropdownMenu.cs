@@ -240,12 +240,19 @@ internal sealed class DropdownMenu : Form
             Close();
     }
 
-    /// <summary>Repaints to reflect any checkbox/color-ring state a just-handled ItemClicked may have
-    /// changed - the menu doesn't know what a given id means, so it can't tell on its own. Cascades to
-    /// an open submenu too, in case it displays state that changed as well.</summary>
+    /// <summary>Repaints to reflect any checkbox/slider/color-ring state a just-handled ItemClicked
+    /// may have changed - the menu doesn't know what a given id means, so it can't tell on its own.
+    /// Update(), not just Invalidate() - this runs synchronously inside the same OnMouseUp that fired
+    /// ItemClicked (see its caller), and FenceForm's own handler for that event goes on to do real
+    /// work of its own (writing to disk, re-rendering the fence) before returning - forcing the
+    /// repaint through right here keeps this menu's own pixels from visibly lagging behind whatever
+    /// just changed instead of waiting for the message loop to get back around to this window's
+    /// queued WM_PAINT on its own. Cascades to an open submenu too, in case it displays state that
+    /// changed as well.</summary>
     public void RefreshChecks()
     {
         Invalidate();
+        Update();
         _submenu?.RefreshChecks();
     }
 

@@ -261,6 +261,15 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    public void SetFullOpacityOnHover(Guid id, bool enabled)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null || model.FullOpacityOnHover == enabled)
+            return;
+        model.FullOpacityOnHover = enabled;
+        Save();
+    }
+
     /// <summary>exact marks color as an Eyedropper pick (see FenceModel.TintIsExact) rather than a
     /// preset/Custom... dialog result - false for every caller except FenceForm.PickEyedropperColor.
     /// Meaningless (and forced false) alongside a null color, since there's no tint left to apply

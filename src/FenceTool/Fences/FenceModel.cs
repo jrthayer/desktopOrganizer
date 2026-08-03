@@ -85,6 +85,15 @@ public sealed class FenceModel
     /// pick so it starts pixel-exact, but it's freely adjustable from there same as any other fence.</summary>
     public int Opacity { get; set; } = DefaultOpacity;
 
+    /// <summary>Off by default - while on, this fence renders fully opaque (see
+    /// FenceForm.TargetOpacity) whenever it's "in use": hovered, being dragged/resized, or has its
+    /// settings dropdown open, ignoring the Opacity slider until none of those apply anymore.
+    /// Independent of Opacity itself, which stays whatever it was set to and simply resumes once. The
+    /// property name still says "OnHover" from before it covered the other two cases too - the
+    /// display label ("Full Opacity When Active") reflects the current behavior instead; renaming
+    /// this would silently drop the setting for anyone who already has it saved.</summary>
+    public bool FullOpacityOnHover { get; set; }
+
     /// <summary>0-100 - how strongly TintColor blends into the fixed dark theme for every non-exact
     /// source (a preset or Custom...'s dialog - see FenceForm.Tint/TintAmount), independent of
     /// TintIsExact's own full-strength Eyedropper path. 55 matches the fixed blend this used to be
