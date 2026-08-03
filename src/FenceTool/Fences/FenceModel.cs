@@ -41,6 +41,12 @@ internal sealed class FenceItemListConverter : JsonConverter<List<FenceItem>>
 
 public sealed class FenceModel
 {
+    // Shared with FenceManager.SetTintColor's "click the same color again resets these" gesture, so
+    // the reset target and each property's own initial value can never drift apart.
+    public const int DefaultHeaderDarkness = 65;
+    public const int DefaultOpacity = 85;
+    public const int DefaultTintStrength = 55;
+
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "Fence";
     public int X { get; set; }
@@ -70,13 +76,20 @@ public sealed class FenceModel
     /// <summary>0-100 - how much black is blended into the title bar's own base color before tinting
     /// (see FenceForm.HeaderBaseColor/ThemedTitle), independent of TintColor's own blend amount. 65
     /// approximates the fixed near-black title color this used to be before it became adjustable.</summary>
-    public int HeaderDarkness { get; set; } = 65;
+    public int HeaderDarkness { get; set; } = DefaultHeaderDarkness;
 
     /// <summary>0-100 - how translucent the whole fence renders (see FenceForm.EffectiveOpacity),
     /// clamped to a safe minimum by FenceManager.SetOpacity so a fence can never be dragged all the
     /// way to fully invisible/unclickable. 85 matches the fixed opacity this used to be before it
-    /// became adjustable. Ignored (forced to 100) while TintIsExact - see EffectiveOpacity.</summary>
-    public int Opacity { get; set; } = 85;
+    /// became adjustable. FenceForm.PickEyedropperColor sets this to 100 at the moment of an Eyedropper
+    /// pick so it starts pixel-exact, but it's freely adjustable from there same as any other fence.</summary>
+    public int Opacity { get; set; } = DefaultOpacity;
+
+    /// <summary>0-100 - how strongly TintColor blends into the fixed dark theme for every non-exact
+    /// source (a preset or Custom...'s dialog - see FenceForm.Tint/TintAmount), independent of
+    /// TintIsExact's own full-strength Eyedropper path. 55 matches the fixed blend this used to be
+    /// before it became adjustable.</summary>
+    public int TintStrength { get; set; } = DefaultTintStrength;
 
     [JsonIgnore]
     public Rectangle Bounds

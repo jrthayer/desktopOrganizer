@@ -110,6 +110,7 @@ public sealed class FenceForm : Form
     private const int TagFenceDimensionsHeader = 1004;
     private const int TagHeaderDarknessHeader = 1005;
     private const int TagFenceOpacityHeader = 1006;
+    private const int TagTintStrengthHeader = 1007;
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
@@ -273,18 +274,42 @@ public sealed class FenceForm : Form
     /// ring.</summary>
     private Color Accent => CurrentTint ?? DefaultAccentColor;
 
-    /// <summary>An Eyedropper pick (FenceModel.TintIsExact) applies at full strength instead of
-    /// Tint's usual 55% blend - the whole point of sampling an on-screen pixel is to match it exactly,
-    /// which a diluted blend would defeat. Every other source (preset, Custom..., no tint) keeps the
-    /// blended look.</summary>
-    private Color ThemedBody => _model.TintIsExact && CurrentTint is { } exactBodyTint ? exactBodyTint : Tint(DefaultBodyColor, CurrentTint);
+    /// <summary>_model.TintStrength (0-100%) as the 0.0-1.0 fraction Tint's amount parameter needs -
+    /// how strongly a preset/Custom... pick blends into the fence's own body/border/title, adjustable
+    /// via the "Tint Strength" slider (see ShowFenceOptionsMenu). Never used for menu/button chrome -
+    /// see SafeChromeBlend.</summary>
+    private double TintAmount => _model.TintStrength / 100.0;
 
-    /// <summary>Always the diluted 55% blend, even when TintIsExact or the pick is just a light
-    /// preset/Custom... color - unlike ThemedBody/Accent, anything drawing fixed WhiteSmoke text or
-    /// glyphs on top of a fill needs to stay readable no matter how light/bright the fence's own color
-    /// is. Used for the settings dropdown's background (ShowFenceOptionsMenu) and the Settings/"+"/"x"
-    /// button fills (RenderAndPresent) instead of ThemedBody/Accent for this reason.</summary>
-    private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint);
+    /// <summary>A fixed blend amount, deliberately NOT tied to TintAmount - used anywhere fixed
+    /// WhiteSmoke text or glyphs get drawn on top of a tinted fill (the settings dropdown, its
+    /// tooltips, and the Settings/"+"/"x" buttons - see ChromeFill/ThemedMenuSelected and both
+    /// DrawTooltip call sites). If this moved with TintAmount, dragging Tint Strength toward 100%
+    /// with a light color would make that fixed text unreadable, the exact bug ChromeFill was added
+    /// to fix in the first place - this pins it back to that same safe level regardless.</summary>
+    private const double SafeChromeBlend = 0.55;
+
+    /// <summary>Only meaningful when TintIsExact - dilutes an Eyedropper pick back toward
+    /// DefaultBodyColor by TintAmount, the *reverse* direction from the regular Tint(base, tint,
+    /// amount) call (there, amount=0 means "ignore the pick"; here, amount=0 means "keep the pick
+    /// exact"). PickEyedropperColor sets TintStrength to 0 at the moment of picking for exactly that
+    /// reason - a fresh pick starts pixel-exact, and dragging Tint Strength up from there is how you
+    /// deliberately mute it back toward the plain theme instead.</summary>
+    private Color DilutedExactTint(Color exact) => Tint(exact, DefaultBodyColor, TintAmount);
+
+    /// <summary>ThemedBody blends a preset/Custom... pick into DefaultBodyColor at TintAmount same as
+    /// always; an Eyedropper pick (TintIsExact) instead starts from the exact color and dilutes it
+    /// toward DefaultBodyColor by that same TintAmount (see DilutedExactTint) - both directions read
+    /// as "how much of the fence's own picked color survives" even though the blend runs opposite
+    /// ways under the hood.</summary>
+    private Color ThemedBody => _model.TintIsExact && CurrentTint is { } exactBodyTint ? DilutedExactTint(exactBodyTint) : Tint(DefaultBodyColor, CurrentTint, TintAmount);
+
+    /// <summary>Always SafeChromeBlend, even when TintIsExact, the pick is just a light preset/Custom...
+    /// color, or Tint Strength is turned all the way up - unlike ThemedBody/Accent, anything drawing
+    /// fixed WhiteSmoke text or glyphs on top of a fill needs to stay readable no matter how
+    /// light/bright the fence's own color is. Used for the settings dropdown's background
+    /// (ShowFenceOptionsMenu) and the Settings/"+"/"x" button fills (RenderAndPresent) instead of
+    /// ThemedBody/Accent for this reason.</summary>
+    private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint, SafeChromeBlend);
 
     /// <summary>_model.Opacity (0-100%) as the 0.0-1.0 fraction RenderAndPresent's
     /// LayeredWindowPresenter.Present call needs. Not forced to 100% for TintIsExact - PickEyedropperColor
@@ -308,26 +333,29 @@ public sealed class FenceForm : Form
     /// user-adjustable - see ShowFenceOptionsMenu's slider row.</summary>
     private Color HeaderBaseColor => DarkenTowardBlack(DefaultBodyColor, _model.HeaderDarkness / 100.0);
 
-    /// <summary>Tints HeaderBaseColor same as every other Themed* color, but with the tint's own
-    /// blend amount shrinking as HeaderDarkness rises - otherwise a strongly tinted fence could never
-    /// get very dark even at 100% darkness, since Tint's default 0.55 blend would keep pulling the
-    /// result back toward the (likely much brighter) tint color regardless of how dark the base
-    /// started. At 100% darkness the tint's influence drops to 0, reaching true black. An exact
-    /// Eyedropper pick (see ThemedBody) skips that blend entirely and just darkens its own exact color
-    /// by the same HeaderDarkness amount instead, for the same "matches what was actually picked"
-    /// reasoning.</summary>
+    /// <summary>Tints HeaderBaseColor same as every other Themed* color, but with TintAmount's own
+    /// strength shrinking as HeaderDarkness rises - otherwise a strongly tinted fence could never get
+    /// very dark even at 100% darkness, since the tint would keep pulling the result back toward the
+    /// (likely much brighter) tint color regardless of how dark the base started. At 100% darkness
+    /// the tint's influence drops to 0, reaching true black. An exact Eyedropper pick (see ThemedBody)
+    /// darkens its own ThemedBody color (DilutedExactTint's result, not the raw pick) by the same
+    /// HeaderDarkness amount instead, so Tint Strength affects the title the same way it does the
+    /// body.</summary>
     private Color ThemedTitle
     {
         get
         {
             var darkness = _model.HeaderDarkness / 100.0;
             if (_model.TintIsExact && CurrentTint is { } exactTitleTint)
-                return DarkenTowardBlack(exactTitleTint, darkness);
-            return Tint(HeaderBaseColor, CurrentTint, 0.55 * (1 - darkness));
+                return DarkenTowardBlack(DilutedExactTint(exactTitleTint), darkness);
+            return Tint(HeaderBaseColor, CurrentTint, TintAmount * (1 - darkness));
         }
     }
-    private Color ThemedBorder => Tint(DefaultBorderColor, CurrentTint);
-    private Color ThemedMenuSelected => Tint(DefaultMenuSelectedColor, CurrentTint);
+    private Color ThemedBorder => Tint(DefaultBorderColor, CurrentTint, TintAmount);
+    // SafeChromeBlend, not TintAmount - hover-highlighted rows (this fence's own DropdownMenu, and
+    // the native right-click context menus via DrawMenuItem) draw fixed WhiteSmoke text on top, same
+    // readability reasoning as ChromeFill.
+    private Color ThemedMenuSelected => Tint(DefaultMenuSelectedColor, CurrentTint, SafeChromeBlend);
     private Color ThemedCheckboxBorder => Tint(DefaultCheckboxBorderColor, CurrentTint, 0.4);
 
     // Deliberately never tinted, unlike every other Themed* color - this fill exists purely so
@@ -748,10 +776,11 @@ public sealed class FenceForm : Form
 
     /// <summary>OwnerDraw's paint hook (see _toolTip's own field comment for why this is needed at
     /// all) - dark background/border matching the rest of this fence's theme instead of a native
-    /// tooltip's white/light default.</summary>
+    /// tooltip's white/light default. SafeChromeBlend, not TintAmount - same fixed-WhiteSmoke-text
+    /// reasoning as ChromeFill.</summary>
     private void DrawTooltip(object? sender, DrawToolTipEventArgs e)
     {
-        using (var background = new SolidBrush(Tint(Color.Black, CurrentTint)))
+        using (var background = new SolidBrush(Tint(Color.Black, CurrentTint, SafeChromeBlend)))
             e.Graphics.FillRectangle(background, e.Bounds);
         using (var borderPen = new Pen(Color.FromArgb(255, 20, 20, 24)))
             e.Graphics.DrawRectangle(borderPen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
@@ -1528,8 +1557,9 @@ public sealed class FenceForm : Form
         // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
         // fence's own color at the same blend amount than starting from dark gray would, since
         // there's more contrast for Tint() to work with between black and a bright pick.
+        // SafeChromeBlend, not TintAmount - same fixed-WhiteSmoke-text reasoning as ChromeFill.
         _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ChromeFill, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
-            () => Tint(Color.Black, CurrentTint));
+            () => Tint(Color.Black, CurrentTint, SafeChromeBlend));
         _dropdown.ItemClicked += id =>
         {
             HandleCommand(id);
@@ -1600,6 +1630,10 @@ public sealed class FenceForm : Form
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
             SliderValue: () => _model.Opacity / 100.0,
             OnSliderChange: value => SetOpacity((int)Math.Round(value * 100))));
+        rows.Add(new DropdownMenu.Row(TagTintStrengthHeader, "Tint Strength", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
+            SliderValue: () => _model.TintStrength / 100.0,
+            OnSliderChange: value => SetTintStrength((int)Math.Round(value * 100))));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
         // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
@@ -1661,8 +1695,11 @@ public sealed class FenceForm : Form
     /// <summary>Blends a user-picked fence color into one of the fixed dark-theme fill colors
     /// (body/title) rather than replacing it outright - keeps the tint recognizable while the fence
     /// still reads as part of the same dark theme even when the picked color is fully saturated
-    /// (e.g. a pure ColorDialog pick), since only part of it makes it into the final fill.</summary>
-    private static Color Tint(Color baseColor, Color? tint, double amount = 0.55) =>
+    /// (e.g. a pure ColorDialog pick), since only part of it makes it into the final fill. amount has
+    /// no default on purpose - every call site below deliberately picks either TintAmount (the fence's
+    /// own adjustable look) or SafeChromeBlend (menu/tooltip/button chrome, pinned regardless of
+    /// TintStrength so fixed WhiteSmoke text/icons on top always stay readable).</summary>
+    private static Color Tint(Color baseColor, Color? tint, double amount) =>
         tint is not { } t
             ? baseColor
             : Color.FromArgb(255,
@@ -1791,6 +1828,15 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>"Tint Strength" slider - same live-drag pattern as SetHeaderDarkness/SetOpacity above.
+    /// Affects both a preset/Custom... pick (TintAmount) and an Eyedropper's exact pick
+    /// (DilutedExactTint), just in opposite directions - see either one's own doc comment.</summary>
+    private void SetTintStrength(int strength)
+    {
+        _manager.SetTintStrength(FenceId, strength);
+        RenderAndPresent();
+    }
+
     /// <summary>"Fence Color > Custom..." - the settings menu has already closed by the time this runs
     /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
     /// here doesn't fight it for the message loop.</summary>
@@ -1809,10 +1855,11 @@ public sealed class FenceForm : Form
     /// EyedropperOverlay) that lets the user click any pixel anywhere on screen, even outside this
     /// app, to sample its color as this fence's new tint. Not modal like PickCustomColor's
     /// ColorDialog, but showing it still steals activation from the settings dropdown the same way,
-    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would. Also sets Opacity
-    /// to 100 (see EffectiveOpacity) so the pick starts out pixel-exact - not forced to stay there,
-    /// just where a fresh pick starts; the Fence Opacity slider can move it from there same as any
-    /// other fence, trading exactness away deliberately rather than never having the choice.</summary>
+    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would. Also resets Opacity
+    /// to 100 and TintStrength to 0 (see EffectiveOpacity/DilutedExactTint) so the pick starts out
+    /// pixel-exact - neither is forced to stay there, just where a fresh pick starts; both sliders can
+    /// move it from there same as any other fence, trading exactness away deliberately rather than
+    /// never having the choice.</summary>
     private void PickEyedropperColor()
     {
         var overlay = new EyedropperOverlay();
@@ -1820,6 +1867,7 @@ public sealed class FenceForm : Form
         {
             SetTintColor(color, exact: true);
             SetOpacity(100);
+            SetTintStrength(0);
         };
         overlay.FormClosed += (_, _) => overlay.Dispose();
         overlay.Show();

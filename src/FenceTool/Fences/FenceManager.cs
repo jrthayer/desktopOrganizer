@@ -264,7 +264,13 @@ public sealed class FenceManager : IDisposable
     /// <summary>exact marks color as an Eyedropper pick (see FenceModel.TintIsExact) rather than a
     /// preset/Custom... dialog result - false for every caller except FenceForm.PickEyedropperColor.
     /// Meaningless (and forced false) alongside a null color, since there's no tint left to apply
-    /// exactly or otherwise.</summary>
+    /// exactly or otherwise.
+    ///
+    /// Every non-exact pick (Default, a preset, or a Custom... dialog result) resets
+    /// HeaderDarkness/Opacity/TintStrength back to their defaults, even re-clicking the color that's
+    /// already selected - the sliders are meant as a per-pick tweak, not a setting that carries over
+    /// once you've moved on to a different (or the same) swatch. An Eyedropper pick has its own reset
+    /// instead (PickEyedropperColor always sets Opacity to 100 and TintStrength to 0 on every pick).</summary>
     public void SetTintColor(Guid id, Color? color, bool exact = false)
     {
         var model = _models.Find(m => m.Id == id);
@@ -272,6 +278,23 @@ public sealed class FenceManager : IDisposable
             return;
         var argb = color?.ToArgb();
         var effectiveExact = color is not null && exact;
+
+        if (!effectiveExact)
+        {
+            var alreadyDefault = model.TintColor == argb && model.TintIsExact == effectiveExact
+                && model.HeaderDarkness == FenceModel.DefaultHeaderDarkness && model.Opacity == FenceModel.DefaultOpacity
+                && model.TintStrength == FenceModel.DefaultTintStrength;
+            if (alreadyDefault)
+                return;
+            model.TintColor = argb;
+            model.TintIsExact = false;
+            model.HeaderDarkness = FenceModel.DefaultHeaderDarkness;
+            model.Opacity = FenceModel.DefaultOpacity;
+            model.TintStrength = FenceModel.DefaultTintStrength;
+            Save();
+            return;
+        }
+
         if (model.TintColor == argb && model.TintIsExact == effectiveExact)
             return;
         model.TintColor = argb;
@@ -301,6 +324,16 @@ public sealed class FenceManager : IDisposable
         if (model is null || model.Opacity == clamped)
             return;
         model.Opacity = clamped;
+        Save();
+    }
+
+    public void SetTintStrength(Guid id, int strength)
+    {
+        var model = _models.Find(m => m.Id == id);
+        var clamped = Math.Clamp(strength, 0, 100);
+        if (model is null || model.TintStrength == clamped)
+            return;
+        model.TintStrength = clamped;
         Save();
     }
 
