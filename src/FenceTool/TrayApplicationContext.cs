@@ -15,6 +15,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("New Fence", null, OnNewFence);
         menu.Items.Add("Show/Hide All", null, OnShowHideAll);
         menu.Items.Add(new ToolStripSeparator());
+        // Checked reflects the registry Run key's actual current state (see StartupManager) rather
+        // than a separately-persisted flag - read fresh every time the menu opens so an external
+        // change (e.g. a user manually editing the Run key) never leaves this showing stale.
+        var startupItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
+        startupItem.Click += OnToggleStartup;
+        menu.Opening += (_, _) => startupItem.Checked = StartupManager.IsEnabled;
+        menu.Items.Add(startupItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
 
         _trayIcon = new NotifyIcon
@@ -42,6 +50,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
+
+    // CheckOnClick already flipped the item's own Checked before this fires - just persist
+    // whatever it now shows.
+    private void OnToggleStartup(object? sender, EventArgs e) =>
+        StartupManager.SetEnabled(((ToolStripMenuItem)sender!).Checked);
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {
