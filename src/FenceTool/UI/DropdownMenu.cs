@@ -25,7 +25,11 @@ internal sealed class DropdownMenu : Form
         Color? Swatch = null,
         bool IsGridItem = false,
         Func<bool>? IsChecked = null,
-        string? Tooltip = null);
+        string? Tooltip = null,
+        // Non-null turns this row into a flyout opener instead of a command - clicking it toggles a
+        // second DropdownMenu built from these rows open/closed (see OnMouseUp/OpenSubmenu) instead
+        // of firing ItemClicked. Id is unused for these rows.
+        IReadOnlyList<Row>? Submenu = null);
 
     private const int RowPadding = 8;
     private const int CheckboxSize = 12;
@@ -57,6 +61,15 @@ internal sealed class DropdownMenu : Form
     private readonly ToolTip _toolTip = new() { OwnerDraw = true };
     private int _hoverIndex = -1;
     private int _tooltipRowIndex = -1;
+    private bool _preferLeft;
+    // Set only on a submenu instance, pointing back to whichever DropdownMenu opened it (see
+    // OpenSubmenu) - forms the chain OnDeactivate walks (via Root/IsInFamily) to tell "focus moved to
+    // one of my own flyouts" apart from "focus moved somewhere else entirely, close everything".
+    private DropdownMenu? _parent;
+    // At most one open at a time - hovering a different row (see UpdateSubmenu) closes whatever was
+    // open before opening the next one, so this doesn't need to be a collection.
+    private DropdownMenu? _submenu;
+    private int _submenuRowIndex = -1;
 
     /// <summary>Fired on the matching mouse-up for a click on a non-header, non-separator row - the
     /// menu does not close itself in response; the caller decides what the id means and calls
@@ -65,8 +78,16 @@ internal sealed class DropdownMenu : Form
 
     // Internal rather than private - FenceForm.ShouldSettingsButtonOpenLeft needs the same gap value
     // to decide the button's corner ahead of time, and it must match the constructor's own fit-check
-    // exactly or the two could disagree about which side actually has room.
-    internal const int AnchorGap = 2;
+    // exactly or the two could disagree about which side actually has room. A couple pixels more than
+    // the bare minimum, same reasoning as FenceForm.SettingsButtonGap - a visible gap between the
+    // button and the menu instead of them touching.
+    internal const int AnchorGap = 4;
+
+    // How far inset from the working area's own edge a clamped position (see ComputeBounds) stops,
+    // instead of landing flush against it - butted right up against the screen/taskbar edge with zero
+    // gap reads as the menu being cut off rather than deliberately placed, especially clamped to the
+    // bottom with no background visible underneath it at all.
+    private const int EdgeMargin = 4;
 
     /// <summary>anchorScreenRect is the settings button's bounds in screen coordinates - same
     /// convention as the PointToScreen(...) call the old TrackPopupMenuEx-based version used, just a
@@ -89,6 +110,7 @@ internal sealed class DropdownMenu : Form
         _getAccent = getAccent;
         _getCheckboxBorder = getCheckboxBorder;
         _getTooltipColor = getTooltipColor;
+        _preferLeft = preferLeft;
         _toolTip.Draw += DrawTooltip;
 
         FormBorderStyle = FormBorderStyle.None;
@@ -96,7 +118,27 @@ internal sealed class DropdownMenu : Form
         StartPosition = FormStartPosition.Manual;
         DoubleBuffered = true;
 
-        var size = MeasureLayout();
+        Bounds = ComputeBounds(anchorScreenRect, MeasureLayout(), preferLeft);
+    }
+
+    /// <summary>Re-anchors an already-open menu to its button - used when the fence's own window
+    /// moves or resizes out from under it without this menu otherwise knowing (see
+    /// FenceForm.RepositionDropdown - e.g. an OCD flyout resize command changes the fence's bounds,
+    /// which normally has nothing to do with this menu at all). preferLeft is passed fresh each time
+    /// rather than reusing the stored value, since a resize can change which corner the settings
+    /// button itself prefers (see FenceForm.ShouldSettingsButtonOpenLeft) - staying in sync with that
+    /// keeps the button and the menu on the same side the way they started. Cascades to an open
+    /// submenu too, so it stays anchored to its own (also now-moved) opener row.</summary>
+    public void RepositionRelativeTo(Rectangle anchorScreenRect, bool preferLeft)
+    {
+        _preferLeft = preferLeft;
+        Bounds = ComputeBounds(anchorScreenRect, MeasureLayout(), preferLeft);
+        if (_submenu is { IsDisposed: false } submenu)
+            submenu.RepositionRelativeTo(RectangleToScreen(_rowRects[_submenuRowIndex]), preferLeft);
+    }
+
+    private static Rectangle ComputeBounds(Rectangle anchorScreenRect, Size size, bool preferLeft)
+    {
         var workingArea = Screen.FromRectangle(anchorScreenRect).WorkingArea;
 
         // Try the preferred side first, falling back to the opposite side if it doesn't have room -
@@ -110,12 +152,12 @@ internal sealed class DropdownMenu : Form
 
         int x;
         if (preferLeft)
-            x = LeftFits() ? LeftX() : RightFits() ? RightX() : Math.Max(workingArea.Left, workingArea.Right - size.Width);
+            x = LeftFits() ? LeftX() : RightFits() ? RightX() : Math.Max(workingArea.Left + EdgeMargin, workingArea.Right - size.Width - EdgeMargin);
         else
-            x = RightFits() ? RightX() : LeftFits() ? LeftX() : Math.Max(workingArea.Left, workingArea.Right - size.Width);
+            x = RightFits() ? RightX() : LeftFits() ? LeftX() : Math.Max(workingArea.Left + EdgeMargin, workingArea.Right - size.Width - EdgeMargin);
 
-        var y = Math.Max(workingArea.Top, Math.Min(anchorScreenRect.Y, workingArea.Bottom - size.Height));
-        Bounds = new Rectangle(x, y, size.Width, size.Height);
+        var y = Math.Max(workingArea.Top + EdgeMargin, Math.Min(anchorScreenRect.Y, workingArea.Bottom - size.Height - EdgeMargin));
+        return new Rectangle(x, y, size.Width, size.Height);
     }
 
     protected override CreateParams CreateParams
@@ -130,21 +172,58 @@ internal sealed class DropdownMenu : Form
 
     /// <summary>Losing activation means a click (or some other window taking focus) landed outside
     /// this menu - including on the fence itself, since it's a separate top-level window from this
-    /// one. Deferred via BeginInvoke rather than closing inline: a row's own click handler can
-    /// synchronously show a modal dialog (Custom... color picker, the Delete Fence confirmation),
-    /// which deactivates this menu *while that same handler is still running* - closing/disposing
-    /// this Form reentrantly out from under its own still-executing OnMouseUp would be the same
-    /// hazard FenceManager.DeleteFence already works around for FenceForm itself.</summary>
+    /// one - UNLESS that focus moved to one of this menu's own flyout submenus (see Root/IsInFamily),
+    /// which is expected and shouldn't close anything. Deferred via BeginInvoke rather than closing
+    /// inline: a row's own click handler can synchronously show a modal dialog (Custom... color
+    /// picker, the Delete Fence confirmation), which deactivates this menu *while that same handler
+    /// is still running* - closing/disposing this Form reentrantly out from under its own
+    /// still-executing OnMouseUp would be the same hazard FenceManager.DeleteFence already works
+    /// around for FenceForm itself. It also gives whatever just got activated time to actually
+    /// register as ActiveForm before IsInFamily checks it.</summary>
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
+        if (IsDisposed)
+            return;
+        BeginInvoke(new Action(() =>
+        {
+            if (!IsDisposed && !IsInFamily(ActiveForm))
+                Root.CloseFamily();
+        }));
+    }
+
+    /// <summary>Walks up through _parent to the top-level menu FenceForm actually opened - the one
+    /// whose whole flyout chain should live or die together.</summary>
+    private DropdownMenu Root => _parent?.Root ?? this;
+
+    /// <summary>True if form is this menu's root, or anywhere along the root's chain of open
+    /// submenus - i.e. still part of the same cascading menu, even though each level is a separate
+    /// top-level Form with its own activation.</summary>
+    private bool IsInFamily(Form? form)
+    {
+        for (var node = Root; node is not null; node = node._submenu)
+            if (ReferenceEquals(node, form))
+                return true;
+        return false;
+    }
+
+    /// <summary>Closes this menu and, first, whatever submenu it has open - deepest first, so a
+    /// FormClosed handler further up never runs against an already-disposed child.</summary>
+    private void CloseFamily()
+    {
+        _submenu?.CloseFamily();
         if (!IsDisposed)
-            BeginInvoke(new Action(() => { if (!IsDisposed) Close(); }));
+            Close();
     }
 
     /// <summary>Repaints to reflect any checkbox/color-ring state a just-handled ItemClicked may have
-    /// changed - the menu doesn't know what a given id means, so it can't tell on its own.</summary>
-    public void RefreshChecks() => Invalidate();
+    /// changed - the menu doesn't know what a given id means, so it can't tell on its own. Cascades to
+    /// an open submenu too, in case it displays state that changed as well.</summary>
+    public void RefreshChecks()
+    {
+        Invalidate();
+        _submenu?.RefreshChecks();
+    }
 
     /// <summary>Measures what a menu built from these rows would be sized, without actually
     /// constructing one - used by FenceForm.ShouldSettingsButtonOpenLeft to decide which corner the
@@ -173,7 +252,8 @@ internal sealed class DropdownMenu : Form
                 continue;
             var textSize = TextRenderer.MeasureText(row.Text, font);
             var leftReserve = row.HasCheckbox || row.Swatch is not null ? CheckboxSize + RowPadding : 0;
-            maxWidth = Math.Max(maxWidth, RowPadding + leftReserve + textSize.Width + RowPadding);
+            var rightReserve = row.Submenu is not null ? CheckboxSize + RowPadding : 0;
+            maxWidth = Math.Max(maxWidth, RowPadding + leftReserve + textSize.Width + rightReserve + RowPadding);
         }
 
         var width = Math.Max(MinWidth, maxWidth) + 2; // + left/right 1px borders
@@ -273,9 +353,27 @@ internal sealed class DropdownMenu : Form
         }
 
         var textLeft = rect.X + RowPadding + (row.HasCheckbox || row.Swatch is not null ? CheckboxSize + RowPadding : 0);
-        var textRect = new Rectangle(textLeft, rect.Y, Math.Max(0, rect.Right - RowPadding - textLeft), rect.Height);
-        var textColor = row.IsHeader ? Color.FromArgb(255, 140, 140, 148) : Color.WhiteSmoke;
-        TextRenderer.DrawText(g, row.Text, _font, textRect, textColor, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+        var rightReserve = row.Submenu is not null ? CheckboxSize + RowPadding : RowPadding;
+        var textRect = new Rectangle(textLeft, rect.Y, Math.Max(0, rect.Right - rightReserve - textLeft), rect.Height);
+        // Same WhiteSmoke and plain weight as every other row - a header is set apart by a following
+        // separator row (see FenceForm.BuildOptionsMenuRows) rather than its own font styling.
+        TextRenderer.DrawText(g, row.Text, _font, textRect, Color.WhiteSmoke,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+
+        if (row.Submenu is not null)
+        {
+            // A plain right-pointing triangle - same "there's more over here" convention as a native
+            // menu's submenu arrow, just hand-drawn since this row isn't a real MENUITEMINFO.
+            var cx = rect.Right - RowPadding - CheckboxSize / 2;
+            var cy = rect.Y + rect.Height / 2;
+            using var arrowBrush = new SolidBrush(Color.FromArgb(255, 190, 190, 196));
+            g.FillPolygon(arrowBrush, new[]
+            {
+                new Point(cx - 3, cy - 4),
+                new Point(cx - 3, cy + 4),
+                new Point(cx + 3, cy),
+            });
+        }
     }
 
     /// <summary>A single cell in the color grid - a filled, outlined circle for a real color, or (see
@@ -319,15 +417,51 @@ internal sealed class DropdownMenu : Form
         UpdateTooltip(index);
     }
 
+    /// <summary>Mouse-leave fires as soon as the cursor crosses into the submenu popup itself (a
+    /// separate HWND positioned right next to this row) - that's not "moved away from the submenu",
+    /// it's "moved into it", so the opener row's highlight (and the submenu itself) both need to
+    /// survive this, not just get cleared like every other row would.</summary>
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hoverIndex != -1)
+        var newHover = _submenu is { IsDisposed: false } ? _submenuRowIndex : -1;
+        if (_hoverIndex != newHover)
         {
-            _hoverIndex = -1;
+            _hoverIndex = newHover;
             Invalidate();
         }
         UpdateTooltip(-1);
+    }
+
+    private void OpenSubmenu(int rowIndex, IReadOnlyList<Row> submenuRows)
+    {
+        CloseSubmenu();
+
+        var anchorScreenRect = RectangleToScreen(_rowRects[rowIndex]);
+        var submenu = new DropdownMenu(submenuRows, anchorScreenRect, _preferLeft, _font,
+            _getBody, _getSelected, _getAccent, _getCheckboxBorder, _getTooltipColor) { _parent = this };
+        _submenu = submenu;
+        _submenuRowIndex = rowIndex;
+        // Bubbles both up an arbitrary chain (a submenu's own submenu, if this ever nests deeper) and
+        // out to whatever FenceForm attached to the root's ItemClicked.
+        submenu.ItemClicked += id => ItemClicked?.Invoke(id);
+        submenu.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(_submenu, submenu))
+            {
+                _submenu = null;
+                _submenuRowIndex = -1;
+            }
+        };
+        submenu.Show(this);
+    }
+
+    private void CloseSubmenu()
+    {
+        if (_submenu is { IsDisposed: false } submenu)
+            submenu.Close();
+        _submenu = null;
+        _submenuRowIndex = -1;
     }
 
     private void UpdateTooltip(int index)
@@ -366,14 +500,31 @@ internal sealed class DropdownMenu : Form
             return;
 
         var index = RowAt(e.Location);
-        if (index >= 0)
-            ItemClicked?.Invoke(_rows[index].Id);
+        if (index < 0)
+            return;
+
+        if (_rows[index].Submenu is { } submenuRows)
+        {
+            // A click toggles the flyout instead of dispatching a command (Row.Id is unused for these
+            // rows) - clicking an already-open opener again closes it, rather than needing a click
+            // elsewhere first.
+            if (_submenuRowIndex == index && _submenu is { IsDisposed: false })
+                CloseSubmenu();
+            else
+                OpenSubmenu(index, submenuRows);
+            return;
+        }
+
+        ItemClicked?.Invoke(_rows[index].Id);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             _toolTip.Dispose();
+            _submenu?.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

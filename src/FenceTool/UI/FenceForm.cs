@@ -47,8 +47,10 @@ public sealed class FenceForm : Form
     // room, so the window is extended *only on top* by this much extra - every other edge
     // (left/right/bottom, and their resize-grab bands) stays exactly OuterMargin. See
     // GetSettingsButtonRect, CreateParams, GetContentSize, and every other OuterMargin-on-top site
-    // below, all of which use TopMargin instead of OuterMargin for that one edge.
-    private const int SettingsButtonOverhang = 17;
+    // below, all of which use TopMargin instead of OuterMargin for that one edge. Grown by the same
+    // +2 as SettingsButtonGap below, so the breathing room above the button row (between it and this
+    // window's own top edge) stays what it was before that gap grew.
+    private const int SettingsButtonOverhang = 19;
     private const int TopMargin = OuterMargin + SettingsButtonOverhang;
     private const int CornerRadius = 22;
     private const float FenceOpacity = 0.85f;
@@ -88,7 +90,6 @@ public sealed class FenceForm : Form
     private const int HTBOTTOMRIGHT = 17;
 
     private const int CmdRename = 1;
-    private const int CmdDelete = 3;
     private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
     private const int CmdToggleHideTitle = 8;
@@ -103,11 +104,11 @@ public sealed class FenceForm : Form
     // than individually referenced anywhere.
     private const int CmdColorPresetBase = 20;
 
-    // Not real WM_COMMAND ids - just Row.Id values for the two non-clickable section headers in
-    // ShowFenceOptionsMenu's dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command
-    // either way, so these only need to be distinct from real command ids, never looked up).
-    private const int TagFenceDimensionsHeader = 1002;
+    // Not real WM_COMMAND ids - just Row.Id values for the non-clickable section headers in
+    // ShowFenceOptionsMenu's dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command either
+    // way, so these only need to be distinct from real command ids, never looked up).
     private const int TagColorHeader = 1003;
+    private const int TagFenceDimensionsHeader = 1004;
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
@@ -133,9 +134,17 @@ public sealed class FenceForm : Form
     private const int ScrollbarMargin = 3;
     private const int SettingsButtonWidth = 64;
     private const int SettingsButtonHeight = 22;
-    // Vertical gap between the button's bottom edge and the fence's own top edge (TopMargin above
-    // reserves enough extra room for this plus a little more breathing space above the button).
-    private const int SettingsButtonGap = 4;
+    // Vertical gap between the button row's bottom edge and the fence's own top edge (TopMargin
+    // above reserves enough extra room for this plus a little more breathing space above the
+    // buttons) - a couple pixels more than the bare minimum so there's clearly separate room to grab
+    // for a drag right at the fence's edge, instead of that margin butting straight up against the
+    // buttons themselves.
+    private const int SettingsButtonGap = 6;
+    // Shared size for the "+" (copy-this-fence's-settings) and "x" (delete-fence) buttons - both
+    // square, same height as Settings, and chained immediately adjacent to it and each other (see
+    // GetNewFenceButtonRect/GetDeleteButtonRect) rather than anchored to their own corners.
+    private const int SmallButtonSize = 22;
+    private const int ButtonSpacing = 4;
     private const int MenuCheckboxSize = 12;
     private const int MenuTextPadding = 8;
 
@@ -180,6 +189,17 @@ public sealed class FenceForm : Form
     // early in this button's history - opening the dropdown while the mouse button is still
     // physically down raced with TrackPopupMenuEx's own capture and made it flash open and closed.
     private bool _settingsButtonArmed;
+    // Same arm-then-fire pattern as _settingsButtonArmed above, for the "+"/"x" buttons next to it.
+    private bool _newFenceButtonArmed;
+    private bool _deleteButtonArmed;
+    // OwnerDraw, not just BackColor/ForeColor - same reasoning as DropdownMenu's own _toolTip field
+    // comment: a themed (UxTheme) system draws a plain ToolTip natively and ignores those properties
+    // entirely.
+    private readonly ToolTip _toolTip = new() { OwnerDraw = true };
+    // Whichever of the "+"/"x" buttons' tooltip text is currently shown, or null - compared against
+    // on every mouse-move (see UpdateButtonTooltips) so ToolTip.Show isn't re-issued (and
+    // re-timed/re-flickered) for every pixel of movement while already hovering the same button.
+    private string? _visibleButtonTooltip;
 
     // Backs both the rename EditBox (via WM_CTLCOLOREDIT, see WndProc) and every owner-draw popup
     // menu (fence-options dropdown and right-click context menus) - one shared themed fill, matching
@@ -307,6 +327,7 @@ public sealed class FenceForm : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         AllowDrop = true;
+        _toolTip.Draw += DrawTooltip;
 
         Reanchor();
         RenderAndPresent();
@@ -399,6 +420,31 @@ public sealed class FenceForm : Form
         return buttonScreenRect.Right + DropdownMenu.AnchorGap + menuSize.Width > workingArea.Right;
     }
 
+    /// <summary>Immediately inside the settings button (i.e. between it and the fence body) rather
+    /// than anchored to its own corner - moves and flips sides together with GetSettingsButtonRect as
+    /// a pair, always adjacent to it. Duplicates this fence's settings into a new, empty fence (see
+    /// FenceManager.CreateFenceLike) when clicked.</summary>
+    private Rectangle GetNewFenceButtonRect(int contentWidth)
+    {
+        var settingsRect = GetSettingsButtonRect(contentWidth);
+        var onLeft = settingsRect.X == 0;
+        var x = onLeft ? settingsRect.Right + ButtonSpacing : settingsRect.X - ButtonSpacing - SmallButtonSize;
+        return new Rectangle(x, settingsRect.Y, SmallButtonSize, SettingsButtonHeight);
+    }
+
+    /// <summary>Chained off GetNewFenceButtonRect the same way that one chains off
+    /// GetSettingsButtonRect - the three buttons move/flip together as one group, always in the same
+    /// relative order (Settings outermost, then "+", then this one, innermost/closest to the fence
+    /// body). Deletes the fence (with confirmation - see ConfirmDelete) when clicked; this replaces
+    /// "Delete Fence" as a row inside the settings dropdown, which no longer has one.</summary>
+    private Rectangle GetDeleteButtonRect(int contentWidth)
+    {
+        var newFenceRect = GetNewFenceButtonRect(contentWidth);
+        var onLeft = GetSettingsButtonRect(contentWidth).X == 0;
+        var x = onLeft ? newFenceRect.Right + ButtonSpacing : newFenceRect.X - ButtonSpacing - SmallButtonSize;
+        return new Rectangle(x, newFenceRect.Y, SmallButtonSize, SettingsButtonHeight);
+    }
+
     private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
 
     /// <summary>Null when the fence's content doesn't need to scroll (no scrollbar to draw or hit-test).</summary>
@@ -436,6 +482,7 @@ public sealed class FenceForm : Form
             _itemRenameBox?.Dispose();
             _dragGhost?.Dispose();
             _dropdown?.Dispose();
+            _toolTip.Dispose();
             _font.Dispose();
             if (_themeBrush != IntPtr.Zero)
                 NativeMethods.DeleteObject(_themeBrush);
@@ -508,6 +555,18 @@ public sealed class FenceForm : Form
         if (ShowsSettingsButton && GetSettingsButtonRect(contentSize.Width).Contains(contentPoint))
         {
             _settingsButtonArmed = true;
+            return;
+        }
+
+        if (ShowsSettingsButton && GetNewFenceButtonRect(contentSize.Width).Contains(contentPoint))
+        {
+            _newFenceButtonArmed = true;
+            return;
+        }
+
+        if (ShowsSettingsButton && GetDeleteButtonRect(contentSize.Width).Contains(contentPoint))
+        {
+            _deleteButtonArmed = true;
             return;
         }
 
@@ -591,6 +650,61 @@ public sealed class FenceForm : Form
         }
 
         SetHoverIndex(IndexAtGridPosition(ToContent(e.Location)) ?? -1);
+        UpdateButtonTooltips(e.Location);
+    }
+
+    /// <summary>Shows/hides the "Copy Fence"/"Delete Fence" tooltip over the "+"/"x" buttons - only
+    /// meaningful while they're actually visible (ShowsSettingsButton), and only re-issued on an
+    /// actual change of which button (if any) is hovered, rather than on every mouse-move, so
+    /// ToolTip.Show isn't re-triggered (and re-timed/re-flickered) for every pixel of movement while
+    /// already hovering the same one.</summary>
+    private void UpdateButtonTooltips(Point windowLocation)
+    {
+        var contentSize = GetContentSize();
+        var contentPoint = ToContent(windowLocation);
+
+        string? text = null;
+        Rectangle buttonRect = default;
+        if (ShowsSettingsButton)
+        {
+            if (GetNewFenceButtonRect(contentSize.Width) is var newFenceRect && newFenceRect.Contains(contentPoint))
+            {
+                text = "Copy Fence";
+                buttonRect = newFenceRect;
+            }
+            else if (GetDeleteButtonRect(contentSize.Width) is var deleteRect && deleteRect.Contains(contentPoint))
+            {
+                text = "Delete Fence";
+                buttonRect = deleteRect;
+            }
+        }
+
+        if (text == _visibleButtonTooltip)
+            return;
+        _visibleButtonTooltip = text;
+
+        if (text is not null)
+        {
+            var screenRect = ToWindow(buttonRect);
+            _toolTip.Show(text, this, screenRect.X, screenRect.Bottom + 4);
+        }
+        else
+        {
+            _toolTip.Hide(this);
+        }
+    }
+
+    /// <summary>OwnerDraw's paint hook (see _toolTip's own field comment for why this is needed at
+    /// all) - dark background/border matching the rest of this fence's theme instead of a native
+    /// tooltip's white/light default.</summary>
+    private void DrawTooltip(object? sender, DrawToolTipEventArgs e)
+    {
+        using (var background = new SolidBrush(Tint(Color.Black, CurrentTint)))
+            e.Graphics.FillRectangle(background, e.Bounds);
+        using (var borderPen = new Pen(Color.FromArgb(255, 20, 20, 24)))
+            e.Graphics.DrawRectangle(borderPen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
+        TextRenderer.DrawText(e.Graphics, e.ToolTipText, _font, e.Bounds, Color.WhiteSmoke,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -604,6 +718,22 @@ public sealed class FenceForm : Form
             _settingsButtonArmed = false;
             if (ShowsSettingsButton && GetSettingsButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
                 ShowFenceOptionsMenu();
+            return;
+        }
+
+        if (_newFenceButtonArmed)
+        {
+            _newFenceButtonArmed = false;
+            if (ShowsSettingsButton && GetNewFenceButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+                _manager.CreateFenceLike(FenceId);
+            return;
+        }
+
+        if (_deleteButtonArmed)
+        {
+            _deleteButtonArmed = false;
+            if (ShowsSettingsButton && GetDeleteButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+                ConfirmDelete();
             return;
         }
 
@@ -661,6 +791,11 @@ public sealed class FenceForm : Form
     {
         base.OnMouseLeave(e);
         SetHoverIndex(-1);
+        if (_visibleButtonTooltip is not null)
+        {
+            _visibleButtonTooltip = null;
+            _toolTip.Hide(this);
+        }
     }
 
     private void SetHoverIndex(int index)
@@ -780,6 +915,7 @@ public sealed class FenceForm : Form
             case WM_SIZE:
                 _renameBox?.Resize(Math.Max(GetContentSize().Width - 12, 0));
                 RenderAndPresent();
+                RepositionDropdown();
                 break;
 
             case WM_EXITSIZEMOVE:
@@ -829,9 +965,14 @@ public sealed class FenceForm : Form
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
 
-        // The settings button lives above the fence, in the taller TopMargin band - check it first
-        // so it isn't shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT resize result.
-        if (ShowsSettingsButton && GetSettingsButtonRect(width - OuterMargin * 2).Contains(ToContent(new Point(x, y))))
+        // The settings button (and the "+"/"x" buttons beside it) live above the fence, in the taller
+        // TopMargin band - check them first so none is shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT
+        // resize result.
+        var contentWidth = width - OuterMargin * 2;
+        var contentPoint = ToContent(new Point(x, y));
+        if (ShowsSettingsButton && (GetSettingsButtonRect(contentWidth).Contains(contentPoint)
+            || GetNewFenceButtonRect(contentWidth).Contains(contentPoint)
+            || GetDeleteButtonRect(contentWidth).Contains(contentPoint)))
             return HTCLIENT;
 
         int band = OuterMargin + ResizeMargin;
@@ -839,8 +980,15 @@ public sealed class FenceForm : Form
         // button, so it gets its own resize-grab threshold instead of sharing the plain one above.
         int topBand = TopMargin + ResizeMargin;
 
-        if (_isActive)
+        if (ShowsSettingsButton)
         {
+            // ShowsSettingsButton, not just _isActive - opening the settings dropdown steals OS
+            // activation from the fence (it's a separate top-level Form), which flips _isActive false
+            // via OnDeactivate even though the button/active border deliberately stay showing (see
+            // ShowsSettingsButton's own comment). Gating on _isActive alone let the resize hit-test
+            // codes below fire while the dropdown was still open, so dragging an edge resized the
+            // fence out from under its own still-open menu.
+            //
             // The margin band is a move handle instead of a resize band while active - the same
             // footprint resize used to claim, just reassigned rather than split into two adjacent
             // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
@@ -978,6 +1126,48 @@ public sealed class FenceForm : Form
                 using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     g.DrawString("Settings", _font, textBrush, buttonRect, textFormat);
                 g.TextRenderingHint = previousTextHint;
+
+                // Same opaque-backing reasoning as the Settings button above - filled before the copy
+                // glyph is stroked on top.
+                var newFenceRect = ToWindow(GetNewFenceButtonRect(contentWidth));
+                using var newFencePath = RoundedRect(newFenceRect, 6);
+                using var newFenceFill = new SolidBrush(Accent);
+                g.FillPath(newFenceFill, newFencePath);
+                using var newFenceBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
+                g.DrawPath(newFenceBorderPen, newFencePath);
+
+                // The classic two-overlapping-squares "duplicate" glyph, hand-drawn like everything
+                // else here rather than pulled from an icon font - this app has no icon asset library
+                // (see FenceForm's own class comment on hand-painting UI). The front square's corner
+                // is punched out of the back square first (filled with the button's own Accent color)
+                // so it reads as sitting on top instead of two crossing outlines.
+                var cx = newFenceRect.X + newFenceRect.Width / 2f;
+                var cy = newFenceRect.Y + newFenceRect.Height / 2f;
+                const float iconSize = 9f;
+                const float iconOffset = 3f;
+                var backRect = new RectangleF(cx - iconSize / 2f + iconOffset / 2f, cy - iconSize / 2f - iconOffset / 2f, iconSize, iconSize);
+                var frontRect = new RectangleF(cx - iconSize / 2f - iconOffset / 2f, cy - iconSize / 2f + iconOffset / 2f, iconSize, iconSize);
+
+                using var copyPen = new Pen(Color.WhiteSmoke, 1.3f);
+                g.DrawRectangle(copyPen, backRect.X, backRect.Y, backRect.Width, backRect.Height);
+                g.FillRectangle(newFenceFill, frontRect);
+                g.DrawRectangle(copyPen, frontRect.X, frontRect.Y, frontRect.Width, frontRect.Height);
+
+                // Accent, same as Settings/"+" - matches this fence's own color theme instead of a
+                // fixed color; the "x" glyph itself already reads as destructive without needing a
+                // separate warning color too.
+                var deleteRect = ToWindow(GetDeleteButtonRect(contentWidth));
+                using var deletePath = RoundedRect(deleteRect, 6);
+                g.FillPath(newFenceFill, deletePath);
+                using var deleteBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
+                g.DrawPath(deleteBorderPen, deletePath);
+
+                using var xPen = new Pen(Color.WhiteSmoke, 1.6f);
+                var xCenterX = deleteRect.X + deleteRect.Width / 2f;
+                var xCenterY = deleteRect.Y + deleteRect.Height / 2f;
+                const float xHalfSize = 4.5f;
+                g.DrawLine(xPen, xCenterX - xHalfSize, xCenterY - xHalfSize, xCenterX + xHalfSize, xCenterY + xHalfSize);
+                g.DrawLine(xPen, xCenterX - xHalfSize, xCenterY + xHalfSize, xCenterX + xHalfSize, xCenterY - xHalfSize);
             }
 
             PaintItems(g, contentWidth, contentHeight);
@@ -1181,12 +1371,12 @@ public sealed class FenceForm : Form
 
     /// <summary>Right-click on an item's label text specifically (see FileAtLabelPosition) - not
     /// its icon, not empty grid space. Fence-level actions live elsewhere now: Rename only on the
-    /// header (see ShowHeaderContextMenu) and Delete Fence only in the settings dropdown (see
-    /// ShowFenceOptionsMenu) - a right-click anywhere else has nothing of its own to offer, so it
-    /// just activates the fence (see ActivateFence) without popping up a menu. Open and Remove From
-    /// Fence used to live here too; both stayed reachable another way (double-click, drag off the
-    /// fence) so removing them from this menu didn't remove the functionality, just this shortcut
-    /// to it.</summary>
+    /// header (see ShowHeaderContextMenu) and Delete Fence only as the "x" button next to Settings
+    /// (see GetDeleteButtonRect/ConfirmDelete) - a right-click anywhere else has nothing of its own to
+    /// offer, so it just activates the fence (see ActivateFence) without popping up a menu. Open and
+    /// Remove From Fence used to live here too; both stayed reachable another way (double-click, drag
+    /// off the fence) so removing them from this menu didn't remove the functionality, just this
+    /// shortcut to it.</summary>
     private void ShowContextMenu(Point clientPoint)
     {
         ActivateFence();
@@ -1259,13 +1449,12 @@ public sealed class FenceForm : Form
 
     /// <summary>Per-fence settings, opened via the settings button that appears once this fence is
     /// active (see OnDeactivate and the settings-button hit-test carve-out). A DropdownMenu (see its
-    /// own class comment for why this isn't a native popup menu) rather than nested flyout submenus -
-    /// "OCD Formatting" and "Fence Color" used to be separate cascading levels, but a DropdownMenu is
-    /// a single flat list, and their own headers ("Fence Dimensions", "Fence Color") already say
-    /// what each group is without an outer flyout-anchor row to name it too, so they're inlined
-    /// directly here instead. "Delete Fence" lives here rather than any right-click menu, same as
-    /// "Rename" moved to the header's own context menu - see ShowContextMenu/
-    /// ShowHeaderContextMenu.</summary>
+    /// own class comment for why this isn't a native popup menu) - "Fence Color" is inlined directly
+    /// as a flat group (its own header already says what it is, without needing an outer flyout-
+    /// anchor row to name it too), while "Fence Dimensions" is nested behind an "OCD" flyout (see
+    /// DropdownMenu.Row.Submenu) instead. "Delete Fence" isn't a row here - it's the "x" button next
+    /// to Settings (see GetDeleteButtonRect/ConfirmDelete), same as "Rename" lives in the header's own
+    /// context menu rather than here - see ShowContextMenu/ShowHeaderContextMenu.</summary>
     private void ShowFenceOptionsMenu()
     {
         _dropdown?.Dispose();
@@ -1303,6 +1492,21 @@ public sealed class FenceForm : Form
         _dropdown.Show(this);
     }
 
+    /// <summary>Keeps an already-open settings dropdown anchored to its button after the fence's own
+    /// window moves or resizes out from under it (see WM_SIZE) - most obviously the OCD flyout's own
+    /// resize commands (FormatDimensions), which change this fence's bounds via SetWindowPos without
+    /// otherwise touching the dropdown at all. Without this the menu was left floating wherever the
+    /// button used to be instead of following it.</summary>
+    private void RepositionDropdown()
+    {
+        if (_dropdown is null)
+            return;
+        var contentSize = GetContentSize();
+        var buttonRect = GetSettingsButtonRect(contentSize.Width);
+        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(buttonRect.Location)), buttonRect.Size);
+        _dropdown.RepositionRelativeTo(buttonScreenRect, preferLeft: buttonRect.X == 0);
+    }
+
     /// <summary>The settings dropdown's row list, factored out of ShowFenceOptionsMenu so
     /// ShouldSettingsButtonOpenLeft can measure it (via DropdownMenu.Measure) to decide which corner
     /// the button itself belongs in before the menu exists to measure.</summary>
@@ -1329,12 +1533,17 @@ public sealed class FenceForm : Form
         // than a text row - see DropdownMenu.DrawGridItem.
         rows.Add(new DropdownMenu.Row(CmdColorCustom, string.Empty, IsGridItem: true, Tooltip: "Custom..."));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
-        rows.Add(new DropdownMenu.Row(TagFenceDimensionsHeader, "Fence Dimensions", IsHeader: true));
-        rows.Add(new DropdownMenu.Row(CmdResizeBoth, "Both"));
-        rows.Add(new DropdownMenu.Row(CmdResizeLeftRight, "Left/Right"));
-        rows.Add(new DropdownMenu.Row(CmdResizeTopDown, "Top/Down"));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
-        rows.Add(new DropdownMenu.Row(CmdDelete, "Delete Fence"));
+        // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
+        // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
+        // header now lives inside the flyout itself instead, same as "Fence Color" above.
+        rows.Add(new DropdownMenu.Row(0, "OCD", Submenu: new List<DropdownMenu.Row>
+        {
+            new(TagFenceDimensionsHeader, "Fence Dimensions", IsHeader: true),
+            new(0, string.Empty, IsSeparator: true),
+            new(CmdResizeBoth, "Both"),
+            new(CmdResizeLeftRight, "Left/Right"),
+            new(CmdResizeTopDown, "Top/Down"),
+        }));
         return rows;
     }
 
@@ -1469,7 +1678,6 @@ public sealed class FenceForm : Form
         switch (id)
         {
             case CmdRename: BeginRename(); break;
-            case CmdDelete: ConfirmDelete(); break;
             case CmdRenameItem: BeginRenameItem(_contextItem); break;
             case CmdToggleHideLabels: ToggleHideLabels(); break;
             case CmdToggleHideTitle: ToggleHideTitle(); break;

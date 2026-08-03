@@ -57,6 +57,30 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (color,
+    /// HideTitle/HideLabels, OCD sizing) instead of the defaults - see FenceForm's "+" button next to
+    /// Settings. Deliberately doesn't copy Files: this is "another fence styled the same way", not a
+    /// clone of its contents.</summary>
+    public void CreateFenceLike(Guid sourceId)
+    {
+        var source = _models.Find(m => m.Id == sourceId);
+        if (source is null)
+            return;
+
+        var model = new FenceModel
+        {
+            Name = $"Fence {_models.Count + 1}",
+            Bounds = NextDefaultBounds(),
+            HideLabels = source.HideLabels,
+            HideTitle = source.HideTitle,
+            OcdFenceSizing = source.OcdFenceSizing,
+            TintColor = source.TintColor,
+        };
+        _models.Add(model);
+        ShowFence(model);
+        Save();
+    }
+
     public void DeleteFence(Guid id)
     {
         var model = _models.Find(m => m.Id == id);
