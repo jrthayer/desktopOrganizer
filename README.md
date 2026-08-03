@@ -25,8 +25,8 @@ tray icon for the menu.
 A fence is a draggable, resizable, translucent region that groups desktop
 shortcuts under a name you choose. It owns a plain list of file paths
 (`FenceModel.Files`) and draws its own icon+label grid for them rather than
-moving the real desktop icons around. Dropping a file onto a fence adds a
-reference to it; dragging an item within a fence reorders it; dragging an
+showing the real desktop icons underneath. Dropping a file onto a fence adds
+a reference to it; dragging an item within a fence reorders it; dragging an
 item onto a *different* fence's window moves it there; dragging an item off
 any fence entirely removes it from that fence (see Desktop icon hiding
 below for what happens to its real desktop icon when that happens).
@@ -40,21 +40,60 @@ its entry stays in the fence but its icon/label may go stale (see
 
 When a shortcut is added to a fence, Fence Tool hides its real desktop icon
 so it isn't visible twice — once as the fence's own drawing of it, and once
-underneath on the actual desktop. There's no supported "hidden" state for
-an individual item on the desktop's icon list, so this works by moving the
-real icon far off-screen, remembering its original position (persisted to
-disk, so it survives an app restart or crash) so it can be moved back once
-the shortcut isn't in any fence anymore.
+underneath on the actual desktop. This works by moving the real file into a
+hidden folder (`hiddenDesktop`) living directly on your own desktop -
+Explorer's desktop view only shows items directly inside the merged
+Desktop/Public Desktop root, not a subfolder's contents, so this makes the
+item disappear the same way moving it anywhere else would, while keeping it
+easy to find by hand (un-hide that one folder in Explorer) rather than
+buried in an app-data folder. Two earlier approaches were tried and dropped
+first: moving the icon's on-screen position off-screen (Explorer would
+periodically undo that on its own, e.g. after full-screening another app on
+a multi-monitor setup, for reasons this app has no reliable way to detect),
+and setting the Hidden attribute on the file in place instead of moving it
+(faster when it worked, but silently could never work at all for a file
+whose own ACL blocks attribute access outright - observed on shortcuts
+originally installed onto the Public Desktop by an elevated installer,
+which kept that restrictive ACL even after being moved elsewhere).
 
 **Limitations:** only applies to files that live directly in your (or the
 Public) Desktop folder - anything dragged in from elsewhere never had a
-real desktop icon to hide. Matching a fenced path to its desktop icon is
-done by display label (filename, since that's all the desktop's icon list
-exposes), so two different real desktop files that happen to share a
-display name (e.g. `Notes.txt` and `Notes.docx` with extensions shown)
-can't be told apart. If Fence Tool is closed uncleanly (crash, Task Manager
-kill) rather than via the tray's Exit, hidden icons stay hidden until it's
-run again.
+real desktop icon to hide. If Fence Tool is closed uncleanly (crash, Task
+Manager kill) rather than via the tray's Exit, the file stays in
+`hiddenDesktop` (fully intact and easy to find by hand) until Fence Tool is
+run again. Adding or removing a shortcut also visibly lags Explorer's
+desktop icon view by roughly 1-2 seconds - the move itself, the shell
+notification, and a forced repaint of the icon list were all confirmed
+(via temporary timing instrumentation) to complete in single-digit
+milliseconds, so this is happening inside Explorer's own rendering after
+being told about the change, not anything on Fence Tool's side. Accepted
+as a known limitation rather than something worth chasing further; see
+Tray menu below for the same issue in a different form.
+
+### Tray menu
+
+- **Show Hidden Files** — toggles Windows' own "Show hidden files, folders,
+  and drives" Explorer setting (the same one under Folder Options), exposed
+  here for convenience since fenced items live in the hidden `hiddenDesktop`
+  folder (see Desktop icon hiding above). This is a system-wide setting, not
+  something scoped to Fence Tool - turning it on reveals every hidden file
+  on your machine, not just fenced ones, and the checkbox always reflects
+  its actual current state even if changed from Explorer's own Folder
+  Options instead.
+
+**Limitations:** the setting itself takes effect immediately, but the
+desktop's own icon view doesn't visibly pick it up until manually
+refreshed (F5, or right-click > Refresh) - a real Refresh forces Explorer
+to re-check which items currently match the filter, which nothing else
+tried does. Several alternatives were tried and none worked: the standard
+`SHChangeNotify` broadcast Explorer's own Folder Options dialog sends
+(refreshes ordinary Explorer windows, not the desktop), the same plus a
+forced repaint of the icon list, targeted `SHCNE_UPDATEDIR` notifications
+at both real desktop folders, simulating an actual F5 keypress (requires
+genuine keyboard focus, which proved unreliable to fake from another
+process), and posting `WM_COMMAND`/`FCIDM_SHVIEW_REFRESH` directly (the
+same message the desktop's own right-click Refresh sends). The setting is
+correct immediately either way - only the visual update is delayed.
 
 ### Fence settings
 

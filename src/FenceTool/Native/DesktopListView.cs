@@ -53,6 +53,20 @@ public sealed class DesktopListView : IDisposable
 
     public void Dispose() => _messageWindow.Dispose();
 
+    /// <summary>Forces the desktop's icon list to repaint immediately rather than whenever its own
+    /// next natural paint cycle happens to land - SHChangeNotify alone (see DesktopIconHider) tells
+    /// Explorer that an item's attributes changed, but doesn't guarantee it repaints the affected
+    /// area right away, which is what actually made a hide/restore visibly lag in practice.</summary>
+    public void ForceRepaint()
+    {
+        if (!EnsureDiscovered())
+            return;
+
+        NativeMethods.InvalidateRect(_hListView, IntPtr.Zero, true);
+        NativeMethods.UpdateWindow(_hListView);
+    }
+
+
     private void Invalidate()
     {
         _hAnchor = _hDefView = _hListView = IntPtr.Zero;

@@ -22,15 +22,7 @@ public sealed class FenceManager : IDisposable
         // and interactive.
         _anchorStrategy = new FloatingDesktopAnchorStrategy();
         _iconHider = new DesktopIconHider(_desktopListView);
-        // explorer.exe restarting can reset its icons to their normal (visible) layout, so whatever
-        // is still fenced needs re-hiding on top of the existing Reanchor - not just once at startup.
-        _desktopListView.ExplorerRestarted += (_, _) => { ReanchorAll(); HideAllFencedIcons(); };
-        _desktopListView.AccessDenied += (_, _) => DesktopAccessDenied?.Invoke(this, EventArgs.Empty);
     }
-
-    /// <summary>Fires when explorer.exe is running at a different privilege level than this app,
-    /// so the desktop anchor can't be applied until that's resolved.</summary>
-    public event EventHandler? DesktopAccessDenied;
 
     public void LoadAndShowAll()
     {
@@ -39,10 +31,19 @@ public sealed class FenceManager : IDisposable
         foreach (var model in _models)
             ShowFence(model);
 
-        // Re-establishes hidden-icon state for every already-fenced shortcut - the icons themselves
-        // are only ever restored on a clean exit (see Dispose), so on a normal launch this re-hides
-        // them; after a crash it's a harmless no-op since they're already hidden.
-        HideAllFencedIcons();
+        // Re-establishes hidden state for every already-fenced shortcut - the real files are only
+        // ever restored on a clean exit (see Dispose), so on a normal launch this re-hides them
+        // (and, for anyone upgrading from an older scheme, migrates them to the current one - see
+        // DesktopIconHider.Hide); after a crash it's a harmless no-op since they're already hidden.
+        // Hide can mutate Path/RealDesktopPath during that migration, so this needs its own Save.
+        // Ignores Hide's own result here - a startup pass silently re-trying (and re-warning about)
+        // something that's permanently un-hideable (e.g. a folder containing FenceTool's own
+        // running executable) on every single launch would be far more annoying than useful; see
+        // AddFiles, where the same failure is worth surfacing once, at the moment it's added.
+        foreach (var model in _models)
+            foreach (var file in model.Files)
+                _iconHider.Hide(file);
+        Save();
     }
 
     public void CreateFence()
@@ -84,9 +85,30 @@ public sealed class FenceManager : IDisposable
     public void DeleteFence(Guid id)
     {
         var model = _models.Find(m => m.Id == id);
-        var paths = model?.Files.Select(f => f.Path).ToList() ?? new List<string>();
+        if (model is null)
+            return;
+        var items = model.Files.ToList();
 
-        _models.RemoveAll(m => m.Id == id);
+        // Removed up front so IsReferencedByAnyFence below doesn't just match this same fence: a
+        // file only referenced here should restore, one still held by another fence shouldn't. If
+        // moving any item back to the real desktop fails - and every fallback destination for that
+        // also fails (see DesktopIconHider.Restore) - the model goes right back in rather than
+        // deleting the fence anyway, so this never silently contradicts ConfirmDelete's "the files
+        // inside it won't be deleted".
+        _models.Remove(model);
+
+        var stuck = items.Count(item => !IsReferencedByAnyFence(item.Path) && !_iconHider.Restore(item));
+        if (stuck > 0)
+        {
+            _models.Add(model);
+            MessageBox.Show(
+                $"\"{model.Name}\" wasn't deleted: {stuck} file(s) in it couldn't be restored to " +
+                "the desktop. Nothing was lost - check the hidden \"hiddenDesktop\" folder on your " +
+                "desktop and your Explorer folder permissions, then try again.",
+                "Fence Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         if (_forms.Remove(id, out var form))
             // Deferred rather than disposed right here: this runs from deep inside the very form's
             // own WM_COMMAND handling (Delete Fence, clicked from its cog menu), so disposing it
@@ -95,11 +117,6 @@ public sealed class FenceManager : IDisposable
             // unwinds - which throws ObjectDisposedException reading Handle. BeginInvoke defers the
             // actual Dispose to its own turn on the message loop, after all of that has unwound.
             form.BeginInvoke(new Action(form.Dispose));
-
-        // The fence carrying these paths is gone, but they might still be sitting in another one.
-        foreach (var path in paths)
-            if (!IsReferencedByAnyFence(path))
-                _iconHider.Restore(path);
 
         Save();
     }
@@ -116,17 +133,21 @@ public sealed class FenceManager : IDisposable
     public void Dispose()
     {
         // Quitting Fence Tool should always leave an ordinary, fully-visible desktop behind, whether
-        // or not anything is still fenced - LoadAndShowAll re-hides everything on the next launch.
-        _iconHider.RestoreAll();
+        // or not anything is still fenced - LoadAndShowAll's own Hide pass re-derives and re-hides
+        // whatever's still fenced on the next launch, so this deliberately doesn't Save afterward.
+        foreach (var model in _models)
+            foreach (var file in model.Files)
+                _iconHider.Restore(file);
         _desktopListView.Dispose();
     }
 
     /// <summary>
     /// Adds dropped files to a fence's own contents - these are just paths the fence remembers and
     /// draws its own icon+label for (via FenceForm's paint logic), the same way NoFences and similar
-    /// tools work; the underlying file/shortcut itself is never touched. Its real desktop icon (if
-    /// it has one) is hidden so it doesn't sit doubled-up behind the fence's own drawing of it - see
-    /// DesktopIconHider. Paths that don't exist or are already in this fence are silently skipped.
+    /// tools work. If a file lives directly on the real desktop, it's moved into a hidden folder so
+    /// it doesn't sit doubled-up behind the fence's own drawing of it - see DesktopIconHider;
+    /// anything dragged in from elsewhere is never touched on disk. Paths that don't exist or are
+    /// already in this fence are silently skipped.
     /// </summary>
     public void AddFiles(Guid fenceId, IReadOnlyList<string> filePaths)
     {
@@ -135,14 +156,24 @@ public sealed class FenceManager : IDisposable
             return;
 
         var added = false;
+        var stillVisible = new List<string>();
         foreach (var path in filePaths)
         {
             if (model.Files.Any(f => f.Path == path) || (!File.Exists(path) && !Directory.Exists(path)))
                 continue;
-            model.Files.Add(new FenceItem { Path = path });
-            _iconHider.Hide(path);
+            var item = new FenceItem { Path = path };
+            model.Files.Add(item);
+            if (!_iconHider.Hide(item))
+                stillVisible.Add(Path.GetFileName(path));
             added = true;
         }
+
+        if (stillVisible.Count > 0)
+            MessageBox.Show(
+                $"Added, but couldn't hide the real desktop icon for: {string.Join(", ", stillVisible)}. " +
+                "It'll still show up doubled - once behind the fence's own drawing of it, and once on " +
+                "the desktop - likely because it's in use or locked right now.",
+                "Fence Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
         if (added)
             Save();
@@ -151,12 +182,24 @@ public sealed class FenceManager : IDisposable
     public void RemoveFile(Guid fenceId, string path)
     {
         var model = _models.Find(m => m.Id == fenceId);
-        if (model is null || model.Files.RemoveAll(f => f.Path == path) == 0)
+        var item = model?.Files.Find(f => f.Path == path);
+        if (model is null || item is null || !model.Files.Remove(item))
             return;
 
-        // Only bring the real desktop icon back once no other fence holds this same path anymore.
-        if (!IsReferencedByAnyFence(path))
-            _iconHider.Restore(path);
+        // Only bring the real desktop icon back once no other fence holds this same path anymore -
+        // and if that restore fails, put it right back rather than let this fence's removal
+        // silently discard tracking of it.
+        if (!IsReferencedByAnyFence(path) && !_iconHider.Restore(item))
+        {
+            model.Files.Add(item);
+            var name = !string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : Path.GetFileNameWithoutExtension(item.Path);
+            MessageBox.Show(
+                $"Couldn't restore \"{name}\" to the desktop, so it's staying in this fence " +
+                "instead. Check the hidden \"hiddenDesktop\" folder on your desktop and your " +
+                "Explorer folder permissions if you'd rather place it yourself.",
+                "Fence Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         Save();
     }
@@ -365,19 +408,6 @@ public sealed class FenceManager : IDisposable
         _forms[model.Id] = form;
         form.Show();
         form.Reanchor();
-    }
-
-    private void ReanchorAll()
-    {
-        foreach (var form in _forms.Values)
-            form.Reanchor();
-    }
-
-    private void HideAllFencedIcons()
-    {
-        foreach (var model in _models)
-            foreach (var file in model.Files)
-                _iconHider.Hide(file.Path);
     }
 
     private bool IsReferencedByAnyFence(string path) => _models.Any(m => m.Files.Any(f => f.Path == path));

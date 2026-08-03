@@ -20,9 +20,10 @@ namespace FenceTool.UI;
 /// A fence owns its contents as a plain list of file paths (FenceModel.Files) and draws its own
 /// icon+label for each one (PaintItems) - the same approach used by NoFences
 /// (https://github.com/Twometer/NoFences), an open-source Stardock Fences alternative this app's
-/// drag-and-drop model is based on (see README's Credits section). It never touches the real
-/// desktop's icons/positions; dropping a file here just adds a reference to it, leaving whatever
-/// is on the actual desktop completely alone.
+/// drag-and-drop model is based on (see README's Credits section). Dropping a file here just adds
+/// a reference to it; if that file lives directly on the real desktop, its real icon gets moved
+/// into a hidden folder so it isn't visible twice (see FenceManager.AddFiles and DesktopIconHider) -
+/// anything dragged in from elsewhere is left completely alone.
 ///
 /// Rendering is pushed via UpdateLayeredWindow (see LayeredWindowPresenter) rather than drawn in
 /// response to WM_PAINT with a SetWindowRgn-clipped shape. The region approach was tried first and
@@ -1108,6 +1109,16 @@ public sealed class FenceForm : Form
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
                         rect.Left + OuterMargin, rect.Top + TopMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
 
+                // Dragging a fence via its caption (see HTCAPTION/WM_NCLBUTTONDOWN) goes through the
+                // OS's own window-move loop, which activates it like any normal window drag would -
+                // left alone, it'd then stay stacked on top of whatever window it was just dragged
+                // over, contradicting the whole point of a fence (a desktop-level widget that never
+                // covers what you're actually working in). Dropping it to the bottom of the z-order
+                // here restores that even though it was just OS-activated; SWP_NOACTIVATE keeps this
+                // restack itself from stealing focus back.
+                NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+
                 // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
                 // whatever size was just dragged to - not after a move, see _resizeInProgress.
                 if (_resizeInProgress && _model.OcdFenceSizing)
@@ -1368,8 +1379,8 @@ public sealed class FenceForm : Form
 
     /// <summary>
     /// Draws this fence's own icon+label for each file it holds, in a simple grid below the title
-    /// bar - the fence never touches the real desktop icons (see FenceManager.AddFiles), so this is
-    /// the only place those files are actually represented on screen.
+    /// bar - a real desktop file's own icon is moved into a hidden folder while it's fenced (see
+    /// FenceManager.AddFiles), so this is the only place it's actually represented on screen.
     /// </summary>
     private void PaintItems(Graphics g, int width, int height)
     {

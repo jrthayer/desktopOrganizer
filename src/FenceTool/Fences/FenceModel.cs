@@ -8,8 +8,17 @@ namespace FenceTool.Fences;
 /// label shown in the fence (renaming here never touches the real file on disk).</summary>
 public sealed class FenceItem
 {
+    /// <summary>Wherever the file currently lives on disk - its original location, unless
+    /// RealDesktopPath is set, in which case DesktopIconHider has relocated it into its hidden
+    /// folder (see that class's own doc comment) and this points at its hiding place instead.</summary>
     public string Path { get; set; } = string.Empty;
     public string? DisplayName { get; set; }
+
+    /// <summary>Non-null only while this item is a relocated real desktop file - the original
+    /// Desktop/Public Desktop location to move it back to once it's no longer in any fence, or
+    /// when Fence Tool exits cleanly. Null for anything dragged in from elsewhere, which never had
+    /// a real desktop icon to hide in the first place. See DesktopIconHider.</summary>
+    public string? RealDesktopPath { get; set; }
 }
 
 /// <summary>Reads both the current fences.json format (Files as an array of FenceItem objects)

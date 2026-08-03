@@ -205,6 +205,7 @@ internal static class NativeMethods
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public static readonly IntPtr HWND_BOTTOM = new(1);
 
     public const uint MF_STRING = 0x0000;
     public const uint MF_SEPARATOR = 0x0800;

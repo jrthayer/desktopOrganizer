@@ -7,7 +7,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _trayIcon;
     private readonly FenceManager _fenceManager = new();
     private bool _allVisible = true;
-    private bool _accessDeniedShown;
 
     public TrayApplicationContext()
     {
@@ -22,6 +21,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         startupItem.Click += OnToggleStartup;
         menu.Opening += (_, _) => startupItem.Checked = StartupManager.IsEnabled;
         menu.Items.Add(startupItem);
+        // Same "checked reflects the actual current state, read fresh every open" approach as
+        // Start with Windows above - this is a system-wide Explorer setting, not something Fence
+        // Tool owns, so a user (or another app) changing it outside this menu should never leave
+        // the checkbox showing stale.
+        var hiddenFilesItem = new ToolStripMenuItem("Show Hidden Files") { CheckOnClick = true };
+        hiddenFilesItem.Click += OnToggleHiddenFiles;
+        menu.Opening += (_, _) => hiddenFilesItem.Checked = HiddenFilesManager.IsEnabled;
+        menu.Items.Add(hiddenFilesItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
 
@@ -34,19 +41,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _trayIcon.DoubleClick += OnShowHideAll;
 
-        _fenceManager.DesktopAccessDenied += OnDesktopAccessDenied;
         _fenceManager.LoadAndShowAll();
-    }
-
-    private void OnDesktopAccessDenied(object? sender, EventArgs e)
-    {
-        if (_accessDeniedShown)
-            return;
-        _accessDeniedShown = true;
-
-        _trayIcon.ShowBalloonTip(10000, "Fence Tool",
-            "Explorer is running with different privileges than Fence Tool (e.g. elevated), " +
-            "so desktop icons can't be managed until that's resolved.", ToolTipIcon.Warning);
     }
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
@@ -55,6 +50,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // whatever it now shows.
     private void OnToggleStartup(object? sender, EventArgs e) =>
         StartupManager.SetEnabled(((ToolStripMenuItem)sender!).Checked);
+
+    // Doesn't force the desktop to visually pick this up - see README's Tray menu limitations.
+    private void OnToggleHiddenFiles(object? sender, EventArgs e) =>
+        HiddenFilesManager.SetEnabled(((ToolStripMenuItem)sender!).Checked);
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {
