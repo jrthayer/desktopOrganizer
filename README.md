@@ -58,8 +58,13 @@ run again.
 
 ### Fence settings
 
-Click a fence to activate it, then click the cog that appears near the top
-of its title bar to open its settings menu.
+Click a fence to activate it, then click **Settings** near the top of its
+title bar to open its settings menu. Two more buttons sit next to it: a
+duplicate-icon button that creates a new, empty fence with this one's
+settings (color, Hide Title/Labels, OCD sizing) copied over, and an **x**
+that deletes the fence (with a confirmation prompt) — its shortcuts aren't
+deleted, only removed from the fence; their real desktop icons are
+restored (see Desktop icon hiding above).
 
 - **Hide Shortcut Names** — hides the label under each icon, showing icons
   only. Toggle it again to bring labels back.
@@ -68,20 +73,38 @@ of its title bar to open its settings menu.
   margin.
 - **OCD Fence Sizing** — after you resize the fence by hand, automatically
   snaps it to the tightest size that fits its icons (equivalent to running
-  OCD Formatting → Both after every manual resize).
-- **OCD Formatting** — a submenu with three one-off resize actions: **Both**
-  (trims width and height), **Left/Right** (width only), and **Top/Down**
-  (height only). Each shrinks or grows the fence to fit its current icons
-  without changing its top-left corner.
-- **Fence Color** — a submenu to tint the fence's body and title bar.
-  Choose one of the eight preset swatches, pick **Custom...** to open the
-  full Windows color picker, or pick **Default** to reset to the plain dark
-  gray. The picked color is blended into the existing dark theme rather
-  than replacing it outright, so the fence stays readable no matter how
-  bright the chosen color is.
-- **Delete Fence** — deletes the fence (with a confirmation prompt). Its
-  shortcuts aren't deleted; their real desktop icons are restored (see
-  Desktop icon hiding above).
+  OCD → Both after every manual resize).
+- **Full Opacity When Active** — off by default. When on, the fence
+  renders fully opaque while hovered, while being dragged or resized, or
+  while its own settings menu is open, easing back down to the Fence
+  Opacity slider's value once none of those still apply.
+- **Fence Color** — pick one of the eight preset swatches, **Custom...**
+  for the full Windows color picker, **Eyedropper** to sample a color from
+  anywhere on screen (even outside the app), or **Default** to reset to
+  the plain dark theme.
+  - **Header Darkness** — how much black blends into the title bar,
+    independent of the fence's own color.
+  - **Fence Opacity** — how translucent the fence renders, clamped to a
+    15% floor so it can never be dragged all the way to
+    invisible/unclickable.
+  - **Tint Strength** — how strongly a preset/Custom... color blends into
+    the dark theme rather than replacing it outright. An Eyedropper pick
+    uses this the opposite way: 0% (where every fresh pick starts) keeps
+    the sampled color exact, and dragging it up mutes that color back
+    toward the plain theme instead. Picking any color — even re-picking
+    the one already selected — resets Header Darkness, Fence Opacity, and
+    Tint Strength back to their defaults.
+- **OCD** — a submenu with three one-off resize actions: **Both** (trims
+  width and height), **Left/Right** (width only), and **Top/Down** (height
+  only). Each shrinks or grows the fence to fit its current icons without
+  changing its top-left corner.
+
+**Limitations:** Full Opacity When Active's hover detection covers the
+outer margin (used for dragging/resizing) as well as the visible body, but
+it does so via a separate, lower-level Windows message path than normal
+mouse events use — an edge case in a future Windows version changing that
+behavior could in theory leave the margin's hover detection stale, though
+the visible body would be unaffected either way.
 
 ## Status
 
