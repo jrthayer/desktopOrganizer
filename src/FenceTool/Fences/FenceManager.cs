@@ -289,6 +289,21 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
+    // A fence dragged all the way to 0% opacity would be both invisible and (per
+    // LayeredWindowPresenter's own doc comment) click-through, with no way to get it back short of
+    // editing fences.json by hand - this floor keeps at least a faint, still-clickable trace visible.
+    private const int MinOpacity = 15;
+
+    public void SetOpacity(Guid id, int opacity)
+    {
+        var model = _models.Find(m => m.Id == id);
+        var clamped = Math.Clamp(opacity, MinOpacity, 100);
+        if (model is null || model.Opacity == clamped)
+            return;
+        model.Opacity = clamped;
+        Save();
+    }
+
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)

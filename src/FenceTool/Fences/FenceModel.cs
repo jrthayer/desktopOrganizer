@@ -72,6 +72,12 @@ public sealed class FenceModel
     /// approximates the fixed near-black title color this used to be before it became adjustable.</summary>
     public int HeaderDarkness { get; set; } = 65;
 
+    /// <summary>0-100 - how translucent the whole fence renders (see FenceForm.EffectiveOpacity),
+    /// clamped to a safe minimum by FenceManager.SetOpacity so a fence can never be dragged all the
+    /// way to fully invisible/unclickable. 85 matches the fixed opacity this used to be before it
+    /// became adjustable. Ignored (forced to 100) while TintIsExact - see EffectiveOpacity.</summary>
+    public int Opacity { get; set; } = 85;
+
     [JsonIgnore]
     public Rectangle Bounds
     {

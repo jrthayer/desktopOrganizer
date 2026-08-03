@@ -53,7 +53,6 @@ public sealed class FenceForm : Form
     private const int SettingsButtonOverhang = 19;
     private const int TopMargin = OuterMargin + SettingsButtonOverhang;
     private const int CornerRadius = 22;
-    private const float FenceOpacity = 0.85f;
 
     // Fallback accent (drag-target outline, menu checkmarks, settings button, active-fence border)
     // for a fence that hasn't been given its own color (FenceModel.TintColor is null) - see
@@ -110,6 +109,7 @@ public sealed class FenceForm : Form
     private const int TagColorHeader = 1003;
     private const int TagFenceDimensionsHeader = 1004;
     private const int TagHeaderDarknessHeader = 1005;
+    private const int TagFenceOpacityHeader = 1006;
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
@@ -285,6 +285,13 @@ public sealed class FenceForm : Form
     /// is. Used for the settings dropdown's background (ShowFenceOptionsMenu) and the Settings/"+"/"x"
     /// button fills (RenderAndPresent) instead of ThemedBody/Accent for this reason.</summary>
     private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint);
+
+    /// <summary>_model.Opacity (0-100%) as the 0.0-1.0 fraction RenderAndPresent's
+    /// LayeredWindowPresenter.Present call needs. Not forced to 100% for TintIsExact - PickEyedropperColor
+    /// sets Opacity to 100 at the moment of picking instead, so a fresh Eyedropper pick still starts
+    /// pixel-exact, but the user can deliberately trade that exactness away afterward via the Fence
+    /// Opacity slider (see its own row) the same as any other fence.</summary>
+    private float EffectiveOpacity => _model.Opacity / 100f;
 
     /// <summary>color blended toward black by amount (0.0-1.0) - shared by HeaderBaseColor (starting
     /// from the fixed default body color) and ThemedTitle's exact-tint case (starting from the
@@ -1221,13 +1228,7 @@ public sealed class FenceForm : Form
             PaintItems(g, contentWidth, contentHeight);
         }
 
-        // TintIsExact renders fully opaque instead of the usual FenceOpacity - Present applies opacity
-        // as a blanket extra alpha scale on every pixel (see its own doc comment), which blends even a
-        // fully-opaque-drawn fill against whatever's on the real desktop behind this window. That
-        // defeats the entire point of an Eyedropper pick (matching an exact on-screen color) - at
-        // 0.85 alpha, ~15% of whatever's behind the fence (usually darker) bleeds into it, so the
-        // displayed color visibly drifts from the one actually picked.
-        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), _model.TintIsExact ? 1f : FenceOpacity);
+        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), EffectiveOpacity);
     }
 
     /// <summary>
@@ -1595,6 +1596,10 @@ public sealed class FenceForm : Form
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
             SliderValue: () => _model.HeaderDarkness / 100.0,
             OnSliderChange: value => SetHeaderDarkness((int)Math.Round(value * 100))));
+        rows.Add(new DropdownMenu.Row(TagFenceOpacityHeader, "Fence Opacity", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
+            SliderValue: () => _model.Opacity / 100.0,
+            OnSliderChange: value => SetOpacity((int)Math.Round(value * 100))));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
         // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
@@ -1777,6 +1782,15 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>"Fence Opacity" slider - same live-drag pattern as SetHeaderDarkness above.
+    /// FenceManager.SetOpacity enforces a safe minimum, so a value dragged below it snaps back on the
+    /// next repaint rather than the fence actually going invisible.</summary>
+    private void SetOpacity(int opacity)
+    {
+        _manager.SetOpacity(FenceId, opacity);
+        RenderAndPresent();
+    }
+
     /// <summary>"Fence Color > Custom..." - the settings menu has already closed by the time this runs
     /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
     /// here doesn't fight it for the message loop.</summary>
@@ -1795,11 +1809,18 @@ public sealed class FenceForm : Form
     /// EyedropperOverlay) that lets the user click any pixel anywhere on screen, even outside this
     /// app, to sample its color as this fence's new tint. Not modal like PickCustomColor's
     /// ColorDialog, but showing it still steals activation from the settings dropdown the same way,
-    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would.</summary>
+    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would. Also sets Opacity
+    /// to 100 (see EffectiveOpacity) so the pick starts out pixel-exact - not forced to stay there,
+    /// just where a fresh pick starts; the Fence Opacity slider can move it from there same as any
+    /// other fence, trading exactness away deliberately rather than never having the choice.</summary>
     private void PickEyedropperColor()
     {
         var overlay = new EyedropperOverlay();
-        overlay.ColorPicked += color => SetTintColor(color, exact: true);
+        overlay.ColorPicked += color =>
+        {
+            SetTintColor(color, exact: true);
+            SetOpacity(100);
+        };
         overlay.FormClosed += (_, _) => overlay.Dispose();
         overlay.Show();
     }
