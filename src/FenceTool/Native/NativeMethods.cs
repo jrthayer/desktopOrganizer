@@ -421,6 +421,12 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
+    // COLORREF (0x00bbggrr) at the given device-context coordinates - used by EyedropperOverlay
+    // against the whole-screen DC (GetDC(IntPtr.Zero)) to sample whatever's actually displayed at a
+    // point, since there's no WinForms-level API for reading a live-rendered screen pixel.
+    [DllImport("gdi32.dll")]
+    public static extern uint GetPixel(IntPtr hdc, int x, int y);
+
     [DllImport("gdi32.dll")]
     public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
 

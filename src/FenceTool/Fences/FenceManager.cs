@@ -261,15 +261,31 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
-    public void SetTintColor(Guid id, Color? color)
+    /// <summary>exact marks color as an Eyedropper pick (see FenceModel.TintIsExact) rather than a
+    /// preset/Custom... dialog result - false for every caller except FenceForm.PickEyedropperColor.
+    /// Meaningless (and forced false) alongside a null color, since there's no tint left to apply
+    /// exactly or otherwise.</summary>
+    public void SetTintColor(Guid id, Color? color, bool exact = false)
     {
         var model = _models.Find(m => m.Id == id);
         if (model is null)
             return;
         var argb = color?.ToArgb();
-        if (model.TintColor == argb)
+        var effectiveExact = color is not null && exact;
+        if (model.TintColor == argb && model.TintIsExact == effectiveExact)
             return;
         model.TintColor = argb;
+        model.TintIsExact = effectiveExact;
+        Save();
+    }
+
+    public void SetHeaderDarkness(Guid id, int darkness)
+    {
+        var model = _models.Find(m => m.Id == id);
+        var clamped = Math.Clamp(darkness, 0, 100);
+        if (model is null || model.HeaderDarkness == clamped)
+            return;
+        model.HeaderDarkness = clamped;
         Save();
     }
 

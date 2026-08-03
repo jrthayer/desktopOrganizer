@@ -16,6 +16,11 @@ namespace FenceTool.UI;
 /// </summary>
 internal sealed class DropdownMenu : Form
 {
+    /// <summary>What to draw inside a Swatch-less grid item (see DrawGridItem) - None for a plain
+    /// empty outline, which no current row actually uses (both "pick a new color" cases get their own
+    /// glyph instead of reading as just an empty/unset state).</summary>
+    public enum GridGlyph { None, Plus, Eyedropper }
+
     public sealed record Row(
         int Id,
         string Text,
@@ -26,21 +31,36 @@ internal sealed class DropdownMenu : Form
         bool IsGridItem = false,
         Func<bool>? IsChecked = null,
         string? Tooltip = null,
+        // Only meaningful when IsGridItem and Swatch is null - which glyph marks this cell as "pick a
+        // new color" rather than an existing one (see DrawGridItem).
+        GridGlyph Glyph = GridGlyph.None,
         // Non-null turns this row into a flyout opener instead of a command - clicking it toggles a
         // second DropdownMenu built from these rows open/closed (see OnMouseUp/OpenSubmenu) instead
         // of firing ItemClicked. Id is unused for these rows.
-        IReadOnlyList<Row>? Submenu = null);
+        IReadOnlyList<Row>? Submenu = null,
+        // IsSlider turns this row into a draggable track+thumb instead of a command row - SliderValue
+        // is read fresh on every paint (0.0-1.0, same live-callback pattern as IsChecked) and
+        // OnSliderChange fires directly (not through ItemClicked) on mouse-down and while dragging -
+        // see OnMouseDown/OnMouseMove/UpdateSliderFromMouseX. Id/Text are unused for these rows; the
+        // label lives in a preceding IsHeader row instead (see FenceForm.BuildOptionsMenuRows).
+        bool IsSlider = false,
+        Func<double>? SliderValue = null,
+        Action<double>? OnSliderChange = null);
 
     private const int RowPadding = 8;
     private const int CheckboxSize = 12;
     private const int SeparatorHeight = 9;
     private const int MinRowHeight = 22;
     private const int MinWidth = 120;
+    private const int SliderRowHeight = 28;
+    private const int SliderTrackHeight = 4;
+    private const int SliderThumbSize = 12;
 
     // A run of consecutive IsGridItem rows (see MeasureLayout/FenceForm.ShowFenceOptionsMenu's color
     // rows) lays out as a fixed-column grid of circles instead of one full-width row each - the
-    // fence-color picker is exactly GridColumns * 2 items (Default + 8 presets + Custom), so this
-    // always produces a clean 5x2 block rather than a lopsided last row.
+    // fence-color picker was exactly GridColumns * 2 items (Default + 8 presets + Custom) for a clean
+    // 5x2 block before Eyedropper made it 11; a lopsided last row for one extra item beats forcing a
+    // whole different column count just to stay evenly divisible.
     private const int GridColumns = 5;
     private const int GridCellHeight = 32;
     private const int GridCircleSize = 20;
@@ -70,6 +90,10 @@ internal sealed class DropdownMenu : Form
     // open before opening the next one, so this doesn't need to be a collection.
     private DropdownMenu? _submenu;
     private int _submenuRowIndex = -1;
+    // -1 when nothing's being dragged - set on mouse-down over a slider's track/thumb (see
+    // OnMouseDown), cleared on the matching mouse-up. While set, OnMouseMove updates the slider
+    // instead of hover/tooltip/submenu state.
+    private int _sliderDragRowIndex = -1;
 
     /// <summary>Fired on the matching mouse-up for a click on a non-header, non-separator row - the
     /// menu does not close itself in response; the caller decides what the id means and calls
@@ -281,7 +305,9 @@ internal sealed class DropdownMenu : Form
             }
 
             var row = rows[i];
-            var height = row.IsSeparator ? SeparatorHeight : Math.Max(TextRenderer.MeasureText(row.Text, font).Height + 8, MinRowHeight);
+            var height = row.IsSeparator ? SeparatorHeight
+                : row.IsSlider ? SliderRowHeight
+                : Math.Max(TextRenderer.MeasureText(row.Text, font).Height + 8, MinRowHeight);
             rowRects.Add(new Rectangle(1, y, width - 2, height));
             y += height;
             i++;
@@ -320,6 +346,12 @@ internal sealed class DropdownMenu : Form
             using var pen = new Pen(Color.FromArgb(60, 255, 255, 255));
             var midY = rect.Y + rect.Height / 2;
             g.DrawLine(pen, rect.X + RowPadding, midY, rect.Right - RowPadding, midY);
+            return;
+        }
+
+        if (row.IsSlider)
+        {
+            DrawSlider(g, row, rect);
             return;
         }
 
@@ -377,8 +409,9 @@ internal sealed class DropdownMenu : Form
     }
 
     /// <summary>A single cell in the color grid - a filled, outlined circle for a real color, or (see
-    /// Row.Swatch being null, e.g. "Custom...") just the outline with nothing filled in, same as
-    /// "empty" reads for the checkbox rows above it having nothing checked inside them.</summary>
+    /// Row.Swatch being null, e.g. "Custom..."/"Eyedropper") just the outline with Row.Glyph drawn
+    /// inside instead of a fill, marking it as "pick a new one" rather than reading as just another
+    /// empty/unset state the way the checkbox rows above it do.</summary>
     private void DrawGridItem(Graphics g, Row row, Rectangle rect, bool hovered)
     {
         if (hovered)
@@ -389,13 +422,68 @@ internal sealed class DropdownMenu : Form
             GridCircleSize, GridCircleSize);
 
         if (row.Swatch is { } swatchColor)
-            using (var swatchBrush = new SolidBrush(swatchColor))
-                g.FillEllipse(swatchBrush, circleRect);
+        {
+            using var swatchBrush = new SolidBrush(swatchColor);
+            g.FillEllipse(swatchBrush, circleRect);
+        }
+        else if (row.Glyph == GridGlyph.Plus)
+        {
+            var cx = circleRect.X + circleRect.Width / 2f;
+            var cy = circleRect.Y + circleRect.Height / 2f;
+            const float halfLength = 4.5f;
+            using var plusPen = new Pen(_getCheckboxBorder(), 1.5f);
+            g.DrawLine(plusPen, cx - halfLength, cy, cx + halfLength, cy);
+            g.DrawLine(plusPen, cx, cy - halfLength, cx, cy + halfLength);
+        }
+        else if (row.Glyph == GridGlyph.Eyedropper)
+        {
+            // A simplified pipette: a diagonal shaft from the circle's upper-right down to a filled
+            // tip at the lower-left, the same "drop" a real eyedropper leaves.
+            using var dropperPen = new Pen(_getCheckboxBorder(), 1.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            var x1 = circleRect.Right - 5f;
+            var y1 = circleRect.Y + 5f;
+            var x2 = circleRect.X + 6f;
+            var y2 = circleRect.Bottom - 6f;
+            g.DrawLine(dropperPen, x1, y1, x2, y2);
+            using var tipBrush = new SolidBrush(_getCheckboxBorder());
+            g.FillEllipse(tipBrush, x2 - 1.5f, y2 - 1.5f, 3f, 3f);
+        }
 
         var isChecked = row.IsChecked?.Invoke() ?? false;
         using var pen = new Pen(isChecked ? _getAccent() : _getCheckboxBorder(), isChecked ? 2 : 1);
         g.DrawEllipse(pen, circleRect);
     }
+
+    /// <summary>A horizontal track (see SliderTrack) with an Accent-filled portion up to the current
+    /// value and a thumb circle at that position - same shape/weight as a swatch circle (DrawGridItem)
+    /// for a consistent look. SliderValue is read fresh here every repaint, same live-callback pattern
+    /// as IsChecked, so it reflects a change made via a different control instantly.</summary>
+    private void DrawSlider(Graphics g, Row row, Rectangle rect)
+    {
+        var value = Math.Clamp(row.SliderValue?.Invoke() ?? 0.0, 0.0, 1.0);
+        var track = SliderTrack(rect);
+
+        using (var trackBrush = new SolidBrush(_getCheckboxBorder()))
+            g.FillRectangle(trackBrush, track);
+
+        var fillWidth = (int)Math.Round(track.Width * value);
+        if (fillWidth > 0)
+            using (var fillBrush = new SolidBrush(_getAccent()))
+                g.FillRectangle(fillBrush, new Rectangle(track.X, track.Y, fillWidth, track.Height));
+
+        var thumbRect = new Rectangle(track.X + fillWidth - SliderThumbSize / 2, rect.Y + (rect.Height - SliderThumbSize) / 2,
+            SliderThumbSize, SliderThumbSize);
+        using (var thumbBrush = new SolidBrush(_getAccent()))
+            g.FillEllipse(thumbBrush, thumbRect);
+        using var thumbPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
+        g.DrawEllipse(thumbPen, thumbRect);
+    }
+
+    /// <summary>The draggable horizontal extent of a slider row, shared between DrawSlider and
+    /// UpdateSliderFromMouseX so the visual track and the hit-tested/drag-mapped one are always the
+    /// exact same rectangle.</summary>
+    private static Rectangle SliderTrack(Rectangle rowRect) =>
+        new(rowRect.X + RowPadding, rowRect.Y + (rowRect.Height - SliderTrackHeight) / 2, rowRect.Width - RowPadding * 2, SliderTrackHeight);
 
     private int RowAt(Point clientPoint)
     {
@@ -405,9 +493,34 @@ internal sealed class DropdownMenu : Form
         return -1;
     }
 
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left)
+            return;
+
+        var index = RowAt(e.Location);
+        if (index >= 0 && _rows[index].IsSlider)
+        {
+            _sliderDragRowIndex = index;
+            // Keeps receiving MouseMove even once the cursor drags outside this row (or this whole
+            // popup's bounds) - UpdateSliderFromMouseX already clamps, so there's no bound past which
+            // dragging further has no effect, same feel as a native slider/scrollbar drag.
+            Capture = true;
+            UpdateSliderFromMouseX(index, e.X);
+        }
+    }
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+
+        if (_sliderDragRowIndex >= 0)
+        {
+            UpdateSliderFromMouseX(_sliderDragRowIndex, e.X);
+            return;
+        }
+
         var index = RowAt(e.Location);
         if (index != _hoverIndex)
         {
@@ -415,6 +528,18 @@ internal sealed class DropdownMenu : Form
             Invalidate();
         }
         UpdateTooltip(index);
+    }
+
+    /// <summary>Maps a mouse x-coordinate to a 0.0-1.0 slider value against SliderTrack's own extent,
+    /// and fires the row's OnSliderChange with it - shared by the initial mouse-down (which also
+    /// jumps straight to wherever was clicked, standard slider behavior) and every subsequent
+    /// mouse-move while dragging.</summary>
+    private void UpdateSliderFromMouseX(int index, int mouseX)
+    {
+        var track = SliderTrack(_rowRects[index]);
+        var value = track.Width <= 0 ? 0.0 : Math.Clamp((mouseX - track.X) / (double)track.Width, 0.0, 1.0);
+        _rows[index].OnSliderChange?.Invoke(value);
+        Invalidate();
     }
 
     /// <summary>Mouse-leave fires as soon as the cursor crosses into the submenu popup itself (a
@@ -499,8 +624,18 @@ internal sealed class DropdownMenu : Form
         if (e.Button != MouseButtons.Left)
             return;
 
+        if (_sliderDragRowIndex >= 0)
+        {
+            _sliderDragRowIndex = -1;
+            Capture = false;
+            return;
+        }
+
         var index = RowAt(e.Location);
         if (index < 0)
+            return;
+
+        if (_rows[index].IsSlider)
             return;
 
         if (_rows[index].Submenu is { } submenuRows)

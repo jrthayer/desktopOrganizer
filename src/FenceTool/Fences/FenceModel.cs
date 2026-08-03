@@ -60,6 +60,18 @@ public sealed class FenceModel
     /// gray theme (see FenceForm.RenderAndPresent's Tint helper).</summary>
     public int? TintColor { get; set; }
 
+    /// <summary>True only for a color picked via the Eyedropper (see FenceForm.PickEyedropperColor) -
+    /// every other source (a preset, Custom...'s dialog, or no tint at all) leaves this false. Presets
+    /// and Custom... are still blended toward the fixed dark theme (see FenceForm.Tint) so a fully
+    /// saturated pick still reads as part of the same theme; an eyedropped color is meant to match an
+    /// exact on-screen pixel, so it applies at full strength instead - see ThemedBody/ThemedTitle.</summary>
+    public bool TintIsExact { get; set; }
+
+    /// <summary>0-100 - how much black is blended into the title bar's own base color before tinting
+    /// (see FenceForm.HeaderBaseColor/ThemedTitle), independent of TintColor's own blend amount. 65
+    /// approximates the fixed near-black title color this used to be before it became adjustable.</summary>
+    public int HeaderDarkness { get; set; } = 65;
+
     [JsonIgnore]
     public Rectangle Bounds
     {

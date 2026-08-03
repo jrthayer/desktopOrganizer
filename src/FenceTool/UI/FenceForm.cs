@@ -63,7 +63,6 @@ public sealed class FenceForm : Form
     // default. Light enough to still read clearly against ThemedBody's near-black fill.
     private static readonly Color DefaultAccentColor = Color.FromArgb(190, 190, 195);
     private static readonly Color DefaultBodyColor = Color.FromArgb(255, 32, 32, 36);
-    private static readonly Color DefaultTitleColor = Color.FromArgb(255, 10, 10, 13);
     private static readonly Color DefaultBorderColor = Color.FromArgb(255, 70, 70, 78);
     private static readonly Color DefaultMenuSelectedColor = Color.FromArgb(255, 55, 55, 62);
     private static readonly Color DefaultCheckboxBorderColor = Color.FromArgb(255, 150, 150, 158);
@@ -99,6 +98,7 @@ public sealed class FenceForm : Form
     private const int CmdToggleOcdSizing = 12;
     private const int CmdColorDefault = 13;
     private const int CmdColorCustom = 14;
+    private const int CmdColorEyedrop = 15;
     // A contiguous block reserved for the preset swatches (see ColorPresets) - avoids one named
     // const per swatch the way the other commands have, since these are looked up by index rather
     // than individually referenced anywhere.
@@ -109,6 +109,7 @@ public sealed class FenceForm : Form
     // way, so these only need to be distinct from real command ids, never looked up).
     private const int TagColorHeader = 1003;
     private const int TagFenceDimensionsHeader = 1004;
+    private const int TagHeaderDarknessHeader = 1005;
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
@@ -272,8 +273,52 @@ public sealed class FenceForm : Form
     /// ring.</summary>
     private Color Accent => CurrentTint ?? DefaultAccentColor;
 
-    private Color ThemedBody => Tint(DefaultBodyColor, CurrentTint);
-    private Color ThemedTitle => Tint(DefaultTitleColor, CurrentTint);
+    /// <summary>An Eyedropper pick (FenceModel.TintIsExact) applies at full strength instead of
+    /// Tint's usual 55% blend - the whole point of sampling an on-screen pixel is to match it exactly,
+    /// which a diluted blend would defeat. Every other source (preset, Custom..., no tint) keeps the
+    /// blended look.</summary>
+    private Color ThemedBody => _model.TintIsExact && CurrentTint is { } exactBodyTint ? exactBodyTint : Tint(DefaultBodyColor, CurrentTint);
+
+    /// <summary>Always the diluted 55% blend, even when TintIsExact or the pick is just a light
+    /// preset/Custom... color - unlike ThemedBody/Accent, anything drawing fixed WhiteSmoke text or
+    /// glyphs on top of a fill needs to stay readable no matter how light/bright the fence's own color
+    /// is. Used for the settings dropdown's background (ShowFenceOptionsMenu) and the Settings/"+"/"x"
+    /// button fills (RenderAndPresent) instead of ThemedBody/Accent for this reason.</summary>
+    private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint);
+
+    /// <summary>color blended toward black by amount (0.0-1.0) - shared by HeaderBaseColor (starting
+    /// from the fixed default body color) and ThemedTitle's exact-tint case (starting from the
+    /// Eyedropper's own picked color instead).</summary>
+    private static Color DarkenTowardBlack(Color color, double amount) => Color.FromArgb(255,
+        (int)Math.Round(color.R * (1 - amount)),
+        (int)Math.Round(color.G * (1 - amount)),
+        (int)Math.Round(color.B * (1 - amount)));
+
+    /// <summary>DefaultBodyColor blended toward black by _model.HeaderDarkness (0-100%) - the title
+    /// bar's own base color before CurrentTint's separate blend on top (see ThemedTitle), for every
+    /// tint source except an exact Eyedropper pick (which darkens its own exact color instead - see
+    /// ThemedTitle). Used to be a fixed near-black constant until "Header Darkness" made it
+    /// user-adjustable - see ShowFenceOptionsMenu's slider row.</summary>
+    private Color HeaderBaseColor => DarkenTowardBlack(DefaultBodyColor, _model.HeaderDarkness / 100.0);
+
+    /// <summary>Tints HeaderBaseColor same as every other Themed* color, but with the tint's own
+    /// blend amount shrinking as HeaderDarkness rises - otherwise a strongly tinted fence could never
+    /// get very dark even at 100% darkness, since Tint's default 0.55 blend would keep pulling the
+    /// result back toward the (likely much brighter) tint color regardless of how dark the base
+    /// started. At 100% darkness the tint's influence drops to 0, reaching true black. An exact
+    /// Eyedropper pick (see ThemedBody) skips that blend entirely and just darkens its own exact color
+    /// by the same HeaderDarkness amount instead, for the same "matches what was actually picked"
+    /// reasoning.</summary>
+    private Color ThemedTitle
+    {
+        get
+        {
+            var darkness = _model.HeaderDarkness / 100.0;
+            if (_model.TintIsExact && CurrentTint is { } exactTitleTint)
+                return DarkenTowardBlack(exactTitleTint, darkness);
+            return Tint(HeaderBaseColor, CurrentTint, 0.55 * (1 - darkness));
+        }
+    }
     private Color ThemedBorder => Tint(DefaultBorderColor, CurrentTint);
     private Color ThemedMenuSelected => Tint(DefaultMenuSelectedColor, CurrentTint);
     private Color ThemedCheckboxBorder => Tint(DefaultCheckboxBorderColor, CurrentTint, 0.4);
@@ -1111,7 +1156,9 @@ public sealed class FenceForm : Form
                 // WritePremultipliedPixels scales it down.
                 var buttonRect = ToWindow(GetSettingsButtonRect(contentWidth));
                 using var buttonPath = RoundedRect(buttonRect, 6);
-                using var buttonFill = new SolidBrush(Accent);
+                // ChromeFill, not Accent - same fixed-WhiteSmoke-text-needs-to-stay-readable reasoning
+                // as the dropdown's own background (see ChromeFill's doc comment).
+                using var buttonFill = new SolidBrush(ChromeFill);
                 g.FillPath(buttonFill, buttonPath);
                 using var buttonBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
                 g.DrawPath(buttonBorderPen, buttonPath);
@@ -1131,7 +1178,7 @@ public sealed class FenceForm : Form
                 // glyph is stroked on top.
                 var newFenceRect = ToWindow(GetNewFenceButtonRect(contentWidth));
                 using var newFencePath = RoundedRect(newFenceRect, 6);
-                using var newFenceFill = new SolidBrush(Accent);
+                using var newFenceFill = new SolidBrush(ChromeFill);
                 g.FillPath(newFenceFill, newFencePath);
                 using var newFenceBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
                 g.DrawPath(newFenceBorderPen, newFencePath);
@@ -1139,8 +1186,8 @@ public sealed class FenceForm : Form
                 // The classic two-overlapping-squares "duplicate" glyph, hand-drawn like everything
                 // else here rather than pulled from an icon font - this app has no icon asset library
                 // (see FenceForm's own class comment on hand-painting UI). The front square's corner
-                // is punched out of the back square first (filled with the button's own Accent color)
-                // so it reads as sitting on top instead of two crossing outlines.
+                // is punched out of the back square first (filled with the button's own ChromeFill
+                // color) so it reads as sitting on top instead of two crossing outlines.
                 var cx = newFenceRect.X + newFenceRect.Width / 2f;
                 var cy = newFenceRect.Y + newFenceRect.Height / 2f;
                 const float iconSize = 9f;
@@ -1153,9 +1200,10 @@ public sealed class FenceForm : Form
                 g.FillRectangle(newFenceFill, frontRect);
                 g.DrawRectangle(copyPen, frontRect.X, frontRect.Y, frontRect.Width, frontRect.Height);
 
-                // Accent, same as Settings/"+" - matches this fence's own color theme instead of a
-                // fixed color; the "x" glyph itself already reads as destructive without needing a
-                // separate warning color too.
+                // ChromeFill (via the same newFenceFill brush), same as Settings/"+" - matches this
+                // fence's own color theme instead of a fixed color, while staying readable against
+                // fixed WhiteSmoke; the "x" glyph itself already reads as destructive without needing
+                // a separate warning color too.
                 var deleteRect = ToWindow(GetDeleteButtonRect(contentWidth));
                 using var deletePath = RoundedRect(deleteRect, 6);
                 g.FillPath(newFenceFill, deletePath);
@@ -1173,7 +1221,13 @@ public sealed class FenceForm : Form
             PaintItems(g, contentWidth, contentHeight);
         }
 
-        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), FenceOpacity);
+        // TintIsExact renders fully opaque instead of the usual FenceOpacity - Present applies opacity
+        // as a blanket extra alpha scale on every pixel (see its own doc comment), which blends even a
+        // fully-opaque-drawn fill against whatever's on the real desktop behind this window. That
+        // defeats the entire point of an Eyedropper pick (matching an exact on-screen color) - at
+        // 0.85 alpha, ~15% of whatever's behind the fence (usually darker) bleeds into it, so the
+        // displayed color visibly drifts from the one actually picked.
+        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), _model.TintIsExact ? 1f : FenceOpacity);
     }
 
     /// <summary>
@@ -1473,7 +1527,7 @@ public sealed class FenceForm : Form
         // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
         // fence's own color at the same blend amount than starting from dark gray would, since
         // there's more contrast for Tint() to work with between black and a bright pick.
-        _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ThemedBody, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
+        _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ChromeFill, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
             () => Tint(Color.Black, CurrentTint));
         _dropdown.ItemClicked += id =>
         {
@@ -1531,7 +1585,16 @@ public sealed class FenceForm : Form
         }
         // Swatch left null - an empty (outline-only) circle, distinct from every real color, rather
         // than a text row - see DropdownMenu.DrawGridItem.
-        rows.Add(new DropdownMenu.Row(CmdColorCustom, string.Empty, IsGridItem: true, Tooltip: "Custom..."));
+        rows.Add(new DropdownMenu.Row(CmdColorCustom, string.Empty, IsGridItem: true,
+            Glyph: DropdownMenu.GridGlyph.Plus, Tooltip: "Custom..."));
+        rows.Add(new DropdownMenu.Row(CmdColorEyedrop, string.Empty, IsGridItem: true,
+            Glyph: DropdownMenu.GridGlyph.Eyedropper, Tooltip: "Eyedropper"));
+        // No separator before this header - it's still part of the "Fence Color" category (how the
+        // fence's own colors look), just its own labeled control rather than lumped under that header.
+        rows.Add(new DropdownMenu.Row(TagHeaderDarknessHeader, "Header Darkness", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
+            SliderValue: () => _model.HeaderDarkness / 100.0,
+            OnSliderChange: value => SetHeaderDarkness((int)Math.Round(value * 100))));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
         // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
@@ -1687,6 +1750,7 @@ public sealed class FenceForm : Form
             case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
             case CmdColorDefault: SetTintColor(null); break;
             case CmdColorCustom: PickCustomColor(); break;
+            case CmdColorEyedrop: PickEyedropperColor(); break;
             case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
                 var presetColor = GetColorPreset(id - CmdColorPresetBase);
                 if (presetColor != Color.Empty)
@@ -1695,9 +1759,21 @@ public sealed class FenceForm : Form
         }
     }
 
-    private void SetTintColor(Color? color)
+    /// <summary>exact is only ever true from PickEyedropperColor - see FenceModel.TintIsExact.</summary>
+    private void SetTintColor(Color? color, bool exact = false)
     {
-        _manager.SetTintColor(FenceId, color);
+        _manager.SetTintColor(FenceId, color, exact);
+        RenderAndPresent();
+    }
+
+    /// <summary>"Header Darkness" slider - called directly from DropdownMenu.Row.OnSliderChange
+    /// (not routed through HandleCommand/ItemClicked the way every other row is, since a slider needs
+    /// a live value rather than a single command id) on mouse-down and on every subsequent mouse-move
+    /// while dragging, so the header repaints continuously as it's dragged rather than only once on
+    /// release.</summary>
+    private void SetHeaderDarkness(int darkness)
+    {
+        _manager.SetHeaderDarkness(FenceId, darkness);
         RenderAndPresent();
     }
 
@@ -1713,6 +1789,19 @@ public sealed class FenceForm : Form
         };
         if (dialog.ShowDialog(this) == DialogResult.OK)
             SetTintColor(dialog.Color);
+    }
+
+    /// <summary>"Fence Color > Eyedropper" - shows a full-virtual-screen overlay (see
+    /// EyedropperOverlay) that lets the user click any pixel anywhere on screen, even outside this
+    /// app, to sample its color as this fence's new tint. Not modal like PickCustomColor's
+    /// ColorDialog, but showing it still steals activation from the settings dropdown the same way,
+    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would.</summary>
+    private void PickEyedropperColor()
+    {
+        var overlay = new EyedropperOverlay();
+        overlay.ColorPicked += color => SetTintColor(color, exact: true);
+        overlay.FormClosed += (_, _) => overlay.Dispose();
+        overlay.Show();
     }
 
     private void OpenItem(string? path)
