@@ -1504,6 +1504,10 @@ public sealed class FenceForm : Form
 
     private Icon? GetIcon(string path)
     {
+        // Only successes are cached - a failed extraction isn't necessarily permanent (e.g. the
+        // file was mid-move via DesktopIconHider, or briefly locked by another process), and
+        // caching null here would otherwise wedge the item icon-less for the rest of this fence's
+        // lifetime even once the file becomes readable again. Every repaint just retries instead.
         if (_iconCache.TryGetValue(path, out var cached))
             return cached;
 
@@ -1523,7 +1527,8 @@ public sealed class FenceForm : Form
         {
         }
 
-        _iconCache[path] = icon;
+        if (icon is not null)
+            _iconCache[path] = icon;
         return icon;
     }
 

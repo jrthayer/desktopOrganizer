@@ -14,6 +14,14 @@ internal static class StartupManager
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "FenceTool";
 
+    /// Windows tracks a second, independent flag here for whether a Run-key entry is actually
+    /// allowed to launch at logon - Task Manager's Startup tab and Settings > Apps > Startup write
+    /// to this, not to the Run key itself. If a user ever disables FenceTool from there instead of
+    /// from this app, the Run key entry is left untouched but Windows silently stops launching it,
+    /// while IsEnabled (which only checks the Run key) would still report it as on.
+    private const string StartupApprovedKeyPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
     public static bool IsEnabled
     {
         get
@@ -38,6 +46,12 @@ internal static class StartupManager
             if (exePath is null)
                 return;
             key.SetValue(ValueName, $"\"{exePath}\"");
+
+            // Clear any stale "disabled" approval left over from a prior Task
+            // Manager/Settings toggle - its absence is what a freshly-added Run entry
+            // looks like, and Windows treats that as approved to launch.
+            using var approvedKey = Registry.CurrentUser.OpenSubKey(StartupApprovedKeyPath, writable: true);
+            approvedKey?.DeleteValue(ValueName, throwOnMissingValue: false);
         }
         else
         {
