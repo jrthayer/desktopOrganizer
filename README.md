@@ -29,7 +29,11 @@ showing the real desktop icons underneath. Dropping a file onto a fence adds
 a reference to it; dragging an item within a fence reorders it; dragging an
 item onto a *different* fence's window moves it there; dragging an item off
 any fence entirely removes it from that fence (see Desktop icon hiding
-below for what happens to its real desktop icon when that happens).
+below for what happens to its real desktop icon when that happens). While
+an item is being dragged, a small pill under the cursor names what's about
+to happen — "Move to *Fence Name*", "Change Position", "Remove from
+Fence", or "Move to Recycle Bin" (see Recycle Bin below) — the same way
+Windows itself hints at a drop target.
 
 **Limitations:** a fence only remembers a file's path, not a live watch on
 it - if the underlying file is later moved or deleted outside Fence Tool,
@@ -72,6 +76,12 @@ Tray menu below for the same issue in a different form.
 
 ### Tray menu
 
+- **New Fence** — creates a new, empty fence.
+- **Show/Hide All** — toggles every fence's visibility at once; also
+  triggered by double-clicking the tray icon.
+- **Start with Windows** — adds (or removes) Fence Tool from your user's
+  Run key so it launches automatically at sign-in. The checkbox always
+  reflects the Run key's actual current state, even if changed by hand.
 - **Show Hidden Files** — toggles Windows' own "Show hidden files, folders,
   and drives" Explorer setting (the same one under Folder Options), exposed
   here for convenience since fenced items live in the hidden `hiddenDesktop`
@@ -80,20 +90,72 @@ Tray menu below for the same issue in a different form.
   on your machine, not just fenced ones, and the checkbox always reflects
   its actual current state even if changed from Explorer's own Folder
   Options instead.
+- **Manage Snap Lines...** — opens the snap-line editor (see Snap lines
+  below).
+- **Add Recycle Bin** — adds the synthetic Recycle Bin fence item (see
+  Recycle Bin below) to a new, dedicated fence. Hidden once one already
+  exists anywhere, since only one is allowed.
 
-**Limitations:** the setting itself takes effect immediately, but the
-desktop's own icon view doesn't visibly pick it up until manually
-refreshed (F5, or right-click > Refresh) - a real Refresh forces Explorer
-to re-check which items currently match the filter, which nothing else
-tried does. Several alternatives were tried and none worked: the standard
-`SHChangeNotify` broadcast Explorer's own Folder Options dialog sends
-(refreshes ordinary Explorer windows, not the desktop), the same plus a
-forced repaint of the icon list, targeted `SHCNE_UPDATEDIR` notifications
-at both real desktop folders, simulating an actual F5 keypress (requires
-genuine keyboard focus, which proved unreliable to fake from another
-process), and posting `WM_COMMAND`/`FCIDM_SHVIEW_REFRESH` directly (the
-same message the desktop's own right-click Refresh sends). The setting is
-correct immediately either way - only the visual update is delayed.
+**Limitations:** the Show Hidden Files setting itself takes effect
+immediately, but the desktop's own icon view doesn't visibly pick it up
+until manually refreshed (F5, or right-click > Refresh) - a real Refresh
+forces Explorer to re-check which items currently match the filter, which
+nothing else tried does. Several alternatives were tried and none worked:
+the standard `SHChangeNotify` broadcast Explorer's own Folder Options
+dialog sends (refreshes ordinary Explorer windows, not the desktop), the
+same plus a forced repaint of the icon list, targeted `SHCNE_UPDATEDIR`
+notifications at both real desktop folders, simulating an actual F5
+keypress (requires genuine keyboard focus, which proved unreliable to
+fake from another process), and posting `WM_COMMAND`/`FCIDM_SHVIEW_REFRESH`
+directly (the same message the desktop's own right-click Refresh sends).
+The setting is correct immediately either way - only the visual update is
+delayed.
+
+### Recycle Bin
+
+Fence Tool can host a synthetic Recycle Bin icon inside a fence, since the
+real desktop Recycle Bin is a virtual shell item with no filesystem path
+and can't be dragged in directly. **Add Recycle Bin** in the tray menu
+hides the real desktop icon (via the standard Explorer registry setting)
+and creates a new fence containing the synthetic one in its place — it
+always shows the real, state-aware (empty/full) system icon. Dropping a
+file onto it — whether dragged fresh from Explorer or moved out of another
+fence — sends that file to the real Recycle Bin (respecting your normal
+delete-confirmation setting); double-clicking it opens the real Recycle
+Bin folder. Removing the synthetic icon from its fence (dragging it out
+onto the bare desktop) restores the real desktop icon's visibility. Only
+one is allowed to exist across every fence at once.
+
+**Limitations:** dragging a file directly out of the *real* Recycle Bin's
+own folder view (rather than using Explorer's Restore command) and back
+into a fence adds a reference to the file still sitting inside Recycle
+Bin's own internal storage — deleting that fenced item again permanently
+purges it instead of just re-deleting a normal file. Use Explorer's own
+Restore first if you want a previously-deleted file back in a fence.
+
+### Snap lines
+
+While dragging a fence, it can snap to other fences' edges and to custom
+guide lines you place yourself, the same gap-closing feel as Stardock
+Fences' or a design tool's own alignment guides:
+
+- **Left-click drag** snaps to both your custom snap lines and every other
+  fence's edges by default. Holding the **right** mouse button down at the
+  same time hides the fence-edge snapping for that drag, leaving just your
+  custom lines active, if a screen full of fences is making snapping feel
+  too eager.
+- **Manage Snap Lines...** (tray menu) opens an edit overlay: click and
+  drag directly on a line to move it, or use the corner box to add a new
+  one, set its orientation, position (typed in directly, or relative to a
+  screen edge via the From Top/Bottom/Left/Right dropdown), and which
+  monitor it belongs to. A line only offers itself as a snap target on the
+  monitor it was created for.
+- Every monitor gets four default lines — flush with its own top, bottom,
+  left, and right working-area edges — seeded automatically the first time
+  Fence Tool sees it. They can be deleted like any other line, and won't
+  come back once you do (a monitor is only ever seeded once).
+- **Fence Margin** (see Fence settings below) adds a consistent gap instead
+  of snapping flush to whatever it's snapping to.
 
 ### Fence settings
 
@@ -112,7 +174,13 @@ restored (see Desktop icon hiding above).
   margin.
 - **OCD Fence Sizing** — after you resize the fence by hand, automatically
   snaps it to the tightest size that fits its icons (equivalent to running
-  OCD → Both after every manual resize).
+  OCD → Both after every manual resize). Also fires immediately the moment
+  you turn it on, rather than waiting for the next resize.
+- **Fence Margin** — 0-100px (in steps of 5, via the +/- stepper). How far
+  this fence wants to sit from whatever it's snapping to (another fence's
+  edge, or a custom snap line) while being dragged, instead of landing
+  flush against it — see Snap lines above. It's this fence's own value that
+  applies while it's the one being dragged, like a CSS margin.
 - **Full Opacity When Active** — off by default. When on, the fence
   renders fully opaque while hovered, while being dragged or resized, or
   while its own settings menu is open, easing back down to the Fence
