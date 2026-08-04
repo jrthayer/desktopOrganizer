@@ -96,6 +96,13 @@ internal sealed class DropdownMenu : Form
     private int _hoverIndex = -1;
     private int _tooltipRowIndex = -1;
     private bool _preferLeft;
+    // Which side this menu actually ended up opening on relative to its own anchor button (not
+    // necessarily the same as the preferLeft it was asked for - ComputeBounds falls back to the
+    // opposite side, or clamps, when the preferred one doesn't fit) - set alongside Bounds itself, in
+    // both the constructor and RepositionRelativeTo. Read by UpdateTooltip, which keeps a row's own
+    // tooltip on this same side rather than letting it point some other way on its own - see its own
+    // comment for why that's always already correct rather than something decided here.
+    private bool _actualLeft;
     // Set only on a submenu instance, pointing back to whichever DropdownMenu opened it (see
     // OpenSubmenu) - forms the chain OnDeactivate walks (via Root/IsInFamily) to tell "focus moved to
     // one of my own flyouts" apart from "focus moved somewhere else entirely, close everything".
@@ -157,6 +164,7 @@ internal sealed class DropdownMenu : Form
         DoubleBuffered = true;
 
         Bounds = ComputeBounds(anchorScreenRect, MeasureLayout(), preferLeft);
+        _actualLeft = Bounds.X + Bounds.Width / 2 < anchorScreenRect.X + anchorScreenRect.Width / 2;
     }
 
     /// <summary>Re-anchors an already-open menu to its button - used when the fence's own window
@@ -171,6 +179,7 @@ internal sealed class DropdownMenu : Form
     {
         _preferLeft = preferLeft;
         Bounds = ComputeBounds(anchorScreenRect, MeasureLayout(), preferLeft);
+        _actualLeft = Bounds.X + Bounds.Width / 2 < anchorScreenRect.X + anchorScreenRect.Width / 2;
         if (_submenu is { IsDisposed: false } submenu)
             submenu.RepositionRelativeTo(RectangleToScreen(_rowRects[_submenuRowIndex]), preferLeft);
     }
@@ -274,6 +283,24 @@ internal sealed class DropdownMenu : Form
     /// constructing one - used by FenceForm.ShouldSettingsButtonOpenLeft to decide which corner the
     /// settings button belongs in before the real DropdownMenu exists to measure.</summary>
     public static Size Measure(IEnumerable<Row> rows, Font font) => LayoutRows(rows.ToList(), font).Size;
+
+    /// <summary>The widest a row's own tooltip pill would render (same +16 padding UpdateTooltip
+    /// itself adds), across every row that has one - 0 if none do. Also used by
+    /// FenceForm.ShouldSettingsButtonOpenLeft, alongside Measure, so the button/menu side is decided
+    /// with the widest tooltip already accounted for before anything actually opens, rather than
+    /// discovering mid-hover that a particular tooltip needs more room than the menu alone did and
+    /// having to flip everything live at that point (which read as a jarring on-screen jump).</summary>
+    public static int MaxTooltipWidth(IEnumerable<Row> rows, Font font)
+    {
+        var max = 0;
+        foreach (var row in rows)
+        {
+            if (row.Tooltip is not { } text)
+                continue;
+            max = Math.Max(max, TextRenderer.MeasureText(text, font).Width + 16);
+        }
+        return max;
+    }
 
     private Size MeasureLayout()
     {
@@ -695,7 +722,33 @@ internal sealed class DropdownMenu : Form
             return;
         }
 
-        _toolTip.Show(text, this, _rowRects[index].Right + 4, _rowRects[index].Y);
+        // A row's own tooltip always extends the same direction this menu itself is open (see
+        // _actualLeft) - kept visually attached rather than pointing some other way on its own.
+        // Whether that side actually has room for the widest tooltip among these rows is decided
+        // before any of this ever opens - FenceForm.ShouldSettingsButtonOpenLeft factors
+        // DropdownMenu.MaxTooltipWidth into the same button/menu side it already picks, so the whole
+        // button-and-buttons group, the menu, and every row's tooltip all end up on the correct side
+        // together from the very first frame, rather than flipping live the moment a wide-tooltip row
+        // happens to get hovered (which read as a jarring on-screen jump). What's left here is just a
+        // defensive clamp for whatever that precalculation couldn't foresee (rows built or reworded
+        // after the button/menu side was already locked in, or a genuinely too-narrow monitor) -
+        // keeps the tooltip fully on-screen even then, which can mean overlapping the fence, but never
+        // the edge of the monitor itself. Also sidesteps the flicker loop letting the *native*
+        // tooltip control's own automatic on-screen repositioning handle it was causing (see git
+        // history) - that was landing the relocated tooltip on top of the cursor, which this menu's
+        // own hover tracking read as the cursor having left, hiding it, then immediately showing it
+        // again next frame since the cursor was still right there.
+        var rowRect = _rowRects[index];
+        var tooltipWidth = TextRenderer.MeasureText(text, _font).Width + 16;
+        var x = _actualLeft ? rowRect.Left - 4 - tooltipWidth : rowRect.Right + 4;
+
+        var workingArea = Screen.FromControl(this).WorkingArea;
+        var screenOriginX = PointToScreen(Point.Empty).X;
+        var minX = workingArea.Left - screenOriginX;
+        var maxX = Math.Max(minX, workingArea.Right - screenOriginX - tooltipWidth);
+        x = Math.Clamp(x, minX, maxX);
+
+        _toolTip.Show(text, this, x, rowRect.Y);
     }
 
     /// <summary>OwnerDraw's paint hook (see _toolTip's own field comment for why this is needed at

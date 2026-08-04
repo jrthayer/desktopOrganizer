@@ -292,6 +292,21 @@ public sealed class FenceForm : Form
     // apart at that point.
     private bool _resizeInProgress;
 
+    // Cursor screen position at WM_ENTERSIZEMOVE - lets WM_MOVING/WM_SIZING compute the proposed
+    // rect as _model.Bounds (fixed for the whole drag) plus the *total* cursor delta since the drag
+    // started, instead of trusting the RECT the OS's own loop hands us in lParam directly. That RECT
+    // tracks INCREMENTALLY, not absolutely - once this code writes back a snapped rect that differs
+    // from what was proposed, the OS's internal drag state adopts that snapped rect as its new
+    // baseline, and the next tick's proposal is built from *that* plus only the latest incremental
+    // mouse movement. Every individual snap during a drag permanently bakes its own clamp into that
+    // baseline with no way to undo it, so across a drag that snaps more than once the cursor and the
+    // fence drift further and further apart, compounding with each snap rather than resetting once
+    // you pull free of one. Recomputing the proposal from a fixed start point every tick sidesteps
+    // the OS's own drifted baseline entirely - our snap decisions are always made against where the
+    // cursor truly is relative to where the drag began, so leaving a snap zone snaps the fence right
+    // back to tracking the cursor exactly, with nothing carried over from any earlier snap.
+    private Point _leftDragStartScreenPoint;
+
     // The currently-open fence-options dropdown (see ShowFenceOptionsMenu/DropdownMenu), or null
     // when none is open. Tracked so a second click on the settings button while one is already open
     // can dispose the stale instance first, and so Dispose can tear it down along with everything
@@ -564,18 +579,28 @@ public sealed class FenceForm : Form
 
     /// <summary>Measures the actual options menu (see BuildOptionsMenuRows/DropdownMenu.Measure)
     /// against the screen the fence is currently on, using the button's default top-right placement
-    /// as the anchor - i.e. "would the menu fit opening to the right of a right-corner button". Only
-    /// true near the right edge of a monitor, same trigger as the menu's own fallback flip inside
-    /// DropdownMenu; this just decides it earlier so the button can already be on the correct corner
-    /// before the menu exists.</summary>
+    /// as the anchor - i.e. "would the menu fit opening to the right of a right-corner button". Also
+    /// factors in the widest row tooltip (DropdownMenu.MaxTooltipWidth) - a row's own tooltip always
+    /// extends the same direction the menu itself opened (see DropdownMenu's _actualLeft), so it
+    /// reaches even further right than the menu's own edge, and needs accounting for here too or the
+    /// button/menu could end up correctly on-screen while a wide tooltip still didn't fit, only to be
+    /// discovered - and only fixable - by flipping everything live the moment that row got hovered.
+    /// Deciding it all here instead, before the button/menu/tooltip ever open, means they're already
+    /// on the correct corner together from the very first frame. Only true near the right edge of a
+    /// monitor, same trigger as the menu's own fallback flip inside DropdownMenu.ComputeBounds (a
+    /// second, independent safety net for whatever this couldn't foresee - see DropdownMenu.
+    /// UpdateTooltip's own defensive clamp).</summary>
     private bool ShouldSettingsButtonOpenLeft(int contentWidth)
     {
         var rightAligned = new Rectangle(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap),
             SettingsButtonWidth, SettingsButtonHeight);
         var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(rightAligned.Location)), rightAligned.Size);
         var workingArea = Screen.FromRectangle(buttonScreenRect).WorkingArea;
-        var menuSize = DropdownMenu.Measure(BuildOptionsMenuRows(), _font);
-        return buttonScreenRect.Right + DropdownMenu.AnchorGap + menuSize.Width > workingArea.Right;
+        var rows = BuildOptionsMenuRows();
+        var menuSize = DropdownMenu.Measure(rows, _font);
+        var maxTooltipWidth = DropdownMenu.MaxTooltipWidth(rows, _font);
+        var tooltipReach = maxTooltipWidth > 0 ? DropdownMenu.AnchorGap + maxTooltipWidth : 0;
+        return buttonScreenRect.Right + DropdownMenu.AnchorGap + menuSize.Width + tooltipReach > workingArea.Right;
     }
 
     /// <summary>Immediately inside the settings button (i.e. between it and the fence body) rather
@@ -855,8 +880,27 @@ public sealed class FenceForm : Form
 
         if (text is not null)
         {
-            var screenRect = ToWindow(buttonRect);
-            _toolTip.Show(text, this, screenRect.X, screenRect.Bottom + 4);
+            var windowRect = ToWindow(buttonRect);
+
+            // Anchoring the tooltip's left edge to the button's left edge, as below, is fine almost
+            // everywhere - but for a fence sitting close enough to the right edge of its monitor,
+            // the tooltip (extending further right from there, past the button itself) could
+            // overflow off-screen. Left to the native tooltip control's own automatic "keep me on
+            // screen" repositioning, the relocated tooltip ended up landing right on top of the
+            // cursor - this window's own hover-tracking then saw a different top-level window now
+            // covering that exact point, treated it as the cursor having left, hid the tooltip,
+            // immediately saw the cursor was still right there and showed it again - a tight
+            // show/hide flicker loop. Computing a safe position ourselves up front (right-aligning
+            // to the button's right edge instead, only when actually needed) avoids that native
+            // reposition ever having a reason to kick in.
+            var formScreenOrigin = PointToScreen(Point.Empty);
+            var workingArea = Screen.FromControl(this).WorkingArea;
+            var tooltipWidth = TextRenderer.MeasureText(text, _font).Width + 16;
+            var x = formScreenOrigin.X + windowRect.Left + tooltipWidth > workingArea.Right
+                ? windowRect.Right - tooltipWidth
+                : windowRect.Left;
+
+            _toolTip.Show(text, this, x, windowRect.Bottom + 4);
         }
         else
         {
@@ -1079,19 +1123,41 @@ public sealed class FenceForm : Form
                 return;
 
             // Sent repeatedly by the OS's own interactive move/resize loop (already running by the
-            // time either of these arrive - see WM_ENTERSIZEMOVE/HitTest) with lParam pointing at a
-            // RECT this can mutate before it's applied; DefWindowProc has no default handling for
-            // either message, so unlike messages that need base.WndProc's processing afterward,
-            // mutating the RECT and returning here is enough - the outer loop (not DefWindowProc)
-            // is what reads it back. The RECT is in raw window coordinates (OuterMargin/TopMargin
-            // padding included, same as WM_EXITSIZEMOVE converts below) - snap comparisons need to
-            // happen against the visible fence body instead, then get re-inflated the same
-            // asymmetric way before writing back.
+            // time either of these arrive - see WM_ENTERSIZEMOVE/HitTest); DefWindowProc has no
+            // default handling for either message, so unlike messages that need base.WndProc's
+            // processing afterward, mutating the RECT at lParam and returning here is enough - the
+            // outer loop (not DefWindowProc) is what reads it back. Deliberately NOT using that RECT
+            // as the basis for where the fence should propose to go, though (see
+            // _leftDragStartScreenPoint's own comment on why - it tracks incrementally off whatever
+            // this code last wrote back, not absolutely off the cursor) - body is instead computed
+            // fresh from the fixed drag-start anchor every single tick, and only ever re-inflated
+            // back into a raw window RECT (OuterMargin/TopBand padding added back on) once, right at
+            // the end, for the write-back.
             case NativeMethods.WM_MOVING:
             {
-                var raw = Marshal.PtrToStructure<RECT>(m.LParam);
-                var body = Rectangle.FromLTRB(raw.Left + OuterMargin, raw.Top + TopBand, raw.Right - OuterMargin, raw.Bottom - BottomBand);
-                var (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
+                var currentScreenPoint = Cursor.Position;
+                var body = new Rectangle(
+                    _model.Bounds.X + (currentScreenPoint.X - _leftDragStartScreenPoint.X),
+                    _model.Bounds.Y + (currentScreenPoint.Y - _leftDragStartScreenPoint.Y),
+                    _model.Bounds.Width, _model.Bounds.Height);
+                // Both candidate sources by default - this fence's own custom lines (see SnapMove's
+                // default includeCustomLines: true) and every other fence's edges. Holding the right
+                // button down at the same time hides the fence-edge candidates for as long as it's
+                // held, leaving just the custom lines - checked live via Control.MouseButtons (a
+                // physical-state poll, not tied to any message actually having been dispatched for
+                // that button's own down-press, which DefWindowProc's own modal SC_MOVE loop may
+                // never route to this WndProc at all while it's running) rather than any button-down
+                // message. Used to be the reverse (fence edges only opted into by holding right, off
+                // by default) from when right-click was its own separate way to drag the fence, back
+                // when merging both by default made dragging feel "sticky" - now that that stickiness
+                // turned out to actually be drift from the OS's own incrementally-proposed rect (see
+                // _leftDragStartScreenPoint's comment) rather than the candidate set itself, merging
+                // both by default is fine again, and right-click is back to being a plain hide-the-
+                // fence-lines modifier instead of a whole separate drag mechanism.
+                IReadOnlyList<int> vCandidates = Array.Empty<int>();
+                IReadOnlyList<int> hCandidates = Array.Empty<int>();
+                if ((MouseButtons & MouseButtons.Right) == 0)
+                    (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
                 var result = _manager.SnapLines.SnapMove(body, vCandidates, hCandidates, _model.Margin);
                 // Re-decided against the proposed rect's own new position - a drag that crosses the
                 // "would go off the top of the screen" threshold mid-tick flips right here, so
@@ -1105,9 +1171,20 @@ public sealed class FenceForm : Form
 
             case NativeMethods.WM_SIZING:
             {
-                var raw = Marshal.PtrToStructure<RECT>(m.LParam);
-                var body = Rectangle.FromLTRB(raw.Left + OuterMargin, raw.Top + TopBand, raw.Right - OuterMargin, raw.Bottom - BottomBand);
+                // Same fixed-anchor reasoning as WM_MOVING above, just per-edge: whichever edges
+                // this particular resize handle doesn't control stay pinned exactly where the drag
+                // started (_model.Bounds, unchanging for the whole drag), and only the active ones
+                // move by the cursor's total delta since then.
                 var edges = SnapEdgesFromWmSz((int)m.WParam.ToInt64());
+                var currentScreenPoint = Cursor.Position;
+                var dx = currentScreenPoint.X - _leftDragStartScreenPoint.X;
+                var dy = currentScreenPoint.Y - _leftDragStartScreenPoint.Y;
+                var start = _model.Bounds;
+                var body = Rectangle.FromLTRB(
+                    (edges & SnapEdges.Left) != 0 ? start.Left + dx : start.Left,
+                    (edges & SnapEdges.Top) != 0 ? start.Top + dy : start.Top,
+                    (edges & SnapEdges.Right) != 0 ? start.Right + dx : start.Right,
+                    (edges & SnapEdges.Bottom) != 0 ? start.Bottom + dy : start.Bottom);
                 var (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
                 var result = _manager.SnapLines.SnapResize(body, edges, vCandidates, hCandidates, _model.Margin);
                 _buttonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location);
@@ -1141,25 +1218,23 @@ public sealed class FenceForm : Form
                 break;
 
             case NativeMethods.WM_NCRBUTTONDOWN:
+                // A real caption's right-click would show the system menu (Restore/Move/Close etc.)
+                // via the default proc - there's no such menu for this custom-drawn title bar, so
+                // this always swallows the message itself (return, never falling through to
+                // base.WndProc/DefWindowProc - see the note on that in WM_RBUTTONUP below, this is
+                // also what stopped a stray mouse-capture DefWindowProc used to leave dangling here).
+                // Right-clicking the caption/margin area (including a resize edge/corner, which only
+                // occurs while inactive - see HitTest) just activates the fence, same as a resize
+                // edge always has - it doesn't drag anything itself. Holding right WHILE separately
+                // left-click-dragging (see MouseButtons.Right checks in WM_ENTERSIZEMOVE/WM_MOVING)
+                // is what controls snapping now - it hides the fence-edge snap lines for that drag,
+                // leaving only this fence's own custom lines active - rather than right-click being
+                // its own separate way to move the fence, which is what this used to do.
                 var ncRButtonHitTest = (int)m.WParam.ToInt64();
-                if (ncRButtonHitTest == HTCAPTION)
-                {
-                    // A real caption's right-click shows the system menu (Restore/Move/Close etc.)
-                    // via the default proc - there's no such menu for this custom-drawn title bar,
-                    // so this swallows the message either way. The header's own menu (rename) only
-                    // pops up when the click landed on the rendered title text itself (see
-                    // IsPointOverTitleText), not just anywhere in the caption/move-margin area.
-                    ActivateFence();
-                    if (IsPointOverTitleText(m.LParam))
-                        ShowHeaderContextMenu();
-                    return;
-                }
-                // Right-clicking a resize edge/corner activates too - this only ever fires while
-                // inactive (resize hit-test codes stop occurring once active, see HitTest), so it's
-                // simply "resize is available right now, and you right-clicked in that area".
-                if (IsResizeHitTest(ncRButtonHitTest))
-                    ActivateFence();
-                break;
+                ActivateFence();
+                if (ncRButtonHitTest == HTCAPTION && IsPointOverTitleText(m.LParam))
+                    ShowHeaderContextMenu();
+                return;
 
             case NativeMethods.WM_NCMOUSEMOVE:
                 // WinForms' own client-area hover tracking (OnMouseEnter/OnMouseLeave) doesn't cover
@@ -1199,6 +1274,14 @@ public sealed class FenceForm : Form
                 return;
 
             case WM_RBUTTONUP:
+                // WM_NCRBUTTONDOWN always swallows itself (see that case above) rather than falling
+                // through to base.WndProc/DefWindowProc, so DefWindowProc's own default handling -
+                // which used to answer a resize-hit-test right-click by capturing the mouse, normally
+                // released again once DefWindowProc saw the matching button-up - never runs anymore
+                // either, and can't leave that capture dangling the way it used to (see the fix for
+                // that). Still releasing here defensively (a harmless no-op if nothing is actually
+                // captured) rather than relying on that root cause staying fixed.
+                Capture = false;
                 var clientPoint = new Point((short)(m.LParam.ToInt64() & 0xFFFF), (short)((m.LParam.ToInt64() >> 16) & 0xFFFF));
                 ShowContextMenu(ToContent(clientPoint));
                 return;
@@ -1248,7 +1331,27 @@ public sealed class FenceForm : Form
 
             case WM_ENTERSIZEMOVE:
                 _isMoving = true;
-                _manager.SnapLines.BeginDrag();
+                // See _leftDragStartScreenPoint's own comment - WM_MOVING/WM_SIZING both measure
+                // against this fixed point (and _model.Bounds, equally fixed for the whole drag)
+                // instead of trusting the OS's own incrementally-drifting proposed rect.
+                _leftDragStartScreenPoint = Cursor.Position;
+                // Fires for both a move and a resize (see _resizeInProgress's own comment) - a
+                // resize always shows both custom lines and fence edges (WM_SIZING has no
+                // right-click modifier, unlike WM_MOVING - see its own comment), and a move shows
+                // both too unless right is already held right at the start of the drag (the common
+                // case is checked live every tick in WM_MOVING instead; this is only for the very
+                // first frame, before any movement has happened yet, so the guides don't lag one
+                // tick behind).
+                if (_resizeInProgress || (MouseButtons & MouseButtons.Right) == 0)
+                {
+                    var (vGuides, hGuides) = _manager.GetOtherFenceEdges(FenceId);
+                    var monitor = Screen.FromRectangle(_model.Bounds).Bounds;
+                    _manager.SnapLines.BeginDrag(includeCustomLines: true, vGuides, hGuides, monitor);
+                }
+                else
+                {
+                    _manager.SnapLines.BeginDrag();
+                }
                 BeginOpacityAnimationIfNeeded();
                 break;
 

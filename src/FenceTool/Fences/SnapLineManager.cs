@@ -97,34 +97,55 @@ public sealed class SnapLineManager : IDisposable
     }
 
     /// <summary>Shows the guide overlay for the duration of a drag, starting with just the plain
-    /// (nothing highlighted yet) custom lines - SnapMove/SnapResize update it from there as
-    /// candidates are actually snapped to.</summary>
-    public void BeginDrag()
+    /// (nothing highlighted yet) lines - SnapMove/SnapResize update it from there as candidates are
+    /// actually snapped to. includeCustomLines true (the native left-button drag) shows this
+    /// fence's own custom lines; false (the fence-edge-only right-button drag, see
+    /// FenceForm.BeginRightDrag) shows verticalGuides/horizontalGuides instead - the other fences'
+    /// edges, passed in by the caller since this class has no notion of "other fences" itself -
+    /// drawn spanning guideSpan (the dragged fence's own monitor).</summary>
+    public void BeginDrag(bool includeCustomLines = true, IReadOnlyList<int>? verticalGuides = null, IReadOnlyList<int>? horizontalGuides = null, Rectangle guideSpan = default)
     {
         _guideOverlay ??= new SnapGuideOverlay();
-        _guideOverlay.SetLines(_lines.Select(l => (l.Orientation, l.Position, Highlighted: false, Span: MonitorSpanOf(l))).ToList());
+
+        var lines = includeCustomLines
+            ? _lines.Select(l => (l.Orientation, l.Position, Highlighted: false, Span: MonitorSpanOf(l))).ToList()
+            : new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
+
+        if (!includeCustomLines)
+        {
+            if (verticalGuides is not null)
+                lines.AddRange(verticalGuides.Distinct().Select(p => (SnapOrientation.Vertical, p, false, guideSpan)));
+            if (horizontalGuides is not null)
+                lines.AddRange(horizontalGuides.Distinct().Select(p => (SnapOrientation.Horizontal, p, false, guideSpan)));
+        }
+
+        _guideOverlay.SetLines(lines);
         _guideOverlay.Show();
     }
 
     /// <summary>margin is the dragged fence's own FenceModel.Margin - applied to custom line
     /// candidates the exact same way FenceManager.GetOtherFenceEdges already applies it to other
     /// fences' edges, so a fence with a margin set keeps that same gap away from a custom snap line
-    /// too, not just from other fences.</summary>
-    public SnapResult SnapMove(Rectangle proposedBody, IReadOnlyList<int> verticalCandidates, IReadOnlyList<int> horizontalCandidates, int margin)
+    /// too, not just from other fences. includeCustomLines false (see BeginDrag) drops this fence's
+    /// own custom lines from the merge entirely, leaving only whatever candidates the caller passed
+    /// in directly (FenceForm's right-button drag passes just the other fences' edges) - splitting
+    /// the two candidate sources across the two buttons instead of always merging them, which made
+    /// dragging feel "sticky" with several fences and lines on screen at once.</summary>
+    public SnapResult SnapMove(Rectangle proposedBody, IReadOnlyList<int> verticalCandidates, IReadOnlyList<int> horizontalCandidates, int margin, bool includeCustomLines = true)
     {
         var monitor = Screen.FromRectangle(proposedBody).Bounds;
-        var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates);
+        var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates, includeCustomLines);
         var result = SnapEngine.SnapMove(proposedBody, vCandidates, hCandidates);
-        UpdateDragOverlay(result, monitor);
+        UpdateDragOverlay(result, monitor, includeCustomLines, verticalCandidates, horizontalCandidates);
         return result;
     }
 
     public SnapResult SnapResize(Rectangle proposedBody, SnapEdges activeEdges, IReadOnlyList<int> verticalCandidates, IReadOnlyList<int> horizontalCandidates, int margin)
     {
         var monitor = Screen.FromRectangle(proposedBody).Bounds;
-        var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates);
+        var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates, includeCustomLines: true);
         var result = SnapEngine.SnapResize(proposedBody, activeEdges, vCandidates, hCandidates);
-        UpdateDragOverlay(result, monitor);
+        UpdateDragOverlay(result, monitor, includeCustomLines: true, verticalCandidates, horizontalCandidates);
         return result;
     }
 
@@ -220,27 +241,45 @@ public sealed class SnapLineManager : IDisposable
         _guideOverlay?.Dispose();
     }
 
-    private void UpdateDragOverlay(SnapResult result, Rectangle monitor)
+    /// <summary>extraVertical/extraHorizontal are the same raw (pre-merge) candidates SnapMove/
+    /// SnapResize were called with - only actually used when includeCustomLines is false, as the
+    /// full set of passive guide lines to keep showing every tick (not just whichever of them
+    /// happen to be snapped right now - same "shown the whole time, highlighted when matched"
+    /// treatment BeginDrag already gives the custom lines in the includeCustomLines-true case, see
+    /// its own comment), letting a right-button drag show every other fence's edge as a guide, not
+    /// just the one it's currently snapped to.</summary>
+    private void UpdateDragOverlay(SnapResult result, Rectangle monitor, bool includeCustomLines, IReadOnlyList<int> extraVertical, IReadOnlyList<int> extraHorizontal)
     {
         _guideOverlay ??= new SnapGuideOverlay();
 
         var vSnapped = new HashSet<int>(result.SnappedVerticalPositions);
         var hSnapped = new HashSet<int>(result.SnappedHorizontalPositions);
 
-        var lines = _lines.Select(l => (l.Orientation, l.Position,
-            Highlighted: l.Orientation == SnapOrientation.Horizontal ? hSnapped.Contains(l.Position) : vSnapped.Contains(l.Position),
-            Span: MonitorSpanOf(l)))
-            .ToList();
+        // Built as a union of two independent sources rather than an either/or branch, so a drag
+        // that's combining both buttons' candidates (see FenceForm's own MouseButtons check in
+        // WM_MOVING/UpdateRightDrag) shows both sets of guide lines together, not just whichever
+        // one this call happened to lead with.
+        var lines = includeCustomLines
+            ? _lines.Select(l => (l.Orientation, l.Position,
+                Highlighted: l.Orientation == SnapOrientation.Horizontal ? hSnapped.Contains(l.Position) : vSnapped.Contains(l.Position),
+                Span: MonitorSpanOf(l)))
+                .ToList()
+            : new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
 
-        // Any snapped position that isn't already one of the custom lines came from another
-        // fence's edge instead - draw an ad-hoc highlighted line for it too, spanning the monitor
-        // the drag is currently on, so the live-drag guide covers both sources uniformly.
-        foreach (var position in vSnapped)
-            if (!_lines.Any(l => l.Orientation == SnapOrientation.Vertical && l.Position == position))
-                lines.Add((SnapOrientation.Vertical, position, true, monitor));
-        foreach (var position in hSnapped)
-            if (!_lines.Any(l => l.Orientation == SnapOrientation.Horizontal && l.Position == position))
-                lines.Add((SnapOrientation.Horizontal, position, true, monitor));
+        var customPositions = includeCustomLines
+            ? _lines.Select(l => (l.Orientation, l.Position)).ToHashSet()
+            : new HashSet<(SnapOrientation, int)>();
+
+        // extraVertical/extraHorizontal are the caller's own additional candidates (fence edges,
+        // for the right-button drag) - skipped only when they duplicate a custom line already
+        // listed above (possible once both sources are combined), never dropped just because
+        // includeCustomLines happens to be true otherwise.
+        foreach (var position in extraVertical.Distinct())
+            if (!customPositions.Contains((SnapOrientation.Vertical, position)))
+                lines.Add((SnapOrientation.Vertical, position, vSnapped.Contains(position), monitor));
+        foreach (var position in extraHorizontal.Distinct())
+            if (!customPositions.Contains((SnapOrientation.Horizontal, position)))
+                lines.Add((SnapOrientation.Horizontal, position, hSnapped.Contains(position), monitor));
 
         _guideOverlay.SetLines(lines);
     }
@@ -263,10 +302,13 @@ public sealed class SnapLineManager : IDisposable
     /// own edge (which only makes sense padded outward, away from its own span - see
     /// FenceManager.GetOtherFenceEdges), a standalone line has no "interior" to avoid overlapping,
     /// so both directions are equally valid depending on which side the fence approaches from.</summary>
-    private (List<int> Vertical, List<int> Horizontal) MergeCandidates(Rectangle monitor, int margin, IReadOnlyList<int> extraVertical, IReadOnlyList<int> extraHorizontal)
+    private (List<int> Vertical, List<int> Horizontal) MergeCandidates(Rectangle monitor, int margin, IReadOnlyList<int> extraVertical, IReadOnlyList<int> extraHorizontal, bool includeCustomLines)
     {
         var vertical = new List<int>(extraVertical);
         var horizontal = new List<int>(extraHorizontal);
+
+        if (!includeCustomLines)
+            return (vertical, horizontal);
 
         foreach (var line in _lines)
         {
