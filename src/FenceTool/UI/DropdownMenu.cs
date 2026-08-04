@@ -45,7 +45,20 @@ internal sealed class DropdownMenu : Form
         // label lives in a preceding IsHeader row instead (see FenceForm.BuildOptionsMenuRows).
         bool IsSlider = false,
         Func<double>? SliderValue = null,
-        Action<double>? OnSliderChange = null);
+        Action<double>? OnSliderChange = null,
+        // IsStepper turns this row into a "- value +" row: owner-drawn like everything else here
+        // (a real embedded NumericUpDown was tried first, but its native spinner chrome doesn't
+        // match this menu's own dark theme the way every hand-painted row does) - a plain click on
+        // either button steps StepperValue by StepperStep, clamped to StepperMin/Max. StepperValue
+        // is read fresh on every paint, same live-callback pattern as SliderValue/IsChecked.
+        // Id/Text are unused for these rows; the label lives in a preceding IsHeader row instead.
+        bool IsStepper = false,
+        Func<int>? StepperValue = null,
+        Action<int>? OnStepperChange = null,
+        int StepperMin = 0,
+        int StepperMax = 100,
+        int StepperStep = 1,
+        string StepperSuffix = "");
 
     private const int RowPadding = 8;
     private const int CheckboxSize = 12;
@@ -55,6 +68,7 @@ internal sealed class DropdownMenu : Form
     private const int SliderRowHeight = 28;
     private const int SliderTrackHeight = 4;
     private const int SliderThumbSize = 12;
+    private const int StepperButtonSize = 20;
 
     // A run of consecutive IsGridItem rows (see MeasureLayout/FenceForm.ShowFenceOptionsMenu's color
     // rows) lays out as a fixed-column grid of circles instead of one full-width row each - the
@@ -313,7 +327,7 @@ internal sealed class DropdownMenu : Form
 
             var row = rows[i];
             var height = row.IsSeparator ? SeparatorHeight
-                : row.IsSlider ? SliderRowHeight
+                : row.IsSlider || row.IsStepper ? SliderRowHeight
                 : Math.Max(TextRenderer.MeasureText(row.Text, font).Height + 8, MinRowHeight);
             rowRects.Add(new Rectangle(1, y, width - 2, height));
             y += height;
@@ -353,6 +367,12 @@ internal sealed class DropdownMenu : Form
             using var pen = new Pen(Color.FromArgb(60, 255, 255, 255));
             var midY = rect.Y + rect.Height / 2;
             g.DrawLine(pen, rect.X + RowPadding, midY, rect.Right - RowPadding, midY);
+            return;
+        }
+
+        if (row.IsStepper)
+        {
+            DrawStepper(g, row, rect);
             return;
         }
 
@@ -492,6 +512,47 @@ internal sealed class DropdownMenu : Form
     private static Rectangle SliderTrack(Rectangle rowRect) =>
         new(rowRect.X + RowPadding, rowRect.Y + (rowRect.Height - SliderTrackHeight) / 2, rowRect.Width - RowPadding * 2, SliderTrackHeight);
 
+    /// <summary>"- value +": a minus button flush left, a plus button flush right, the current value
+    /// centered between them - StepperValue read fresh here every repaint, same live-callback
+    /// pattern as SliderValue/IsChecked.</summary>
+    private void DrawStepper(Graphics g, Row row, Rectangle rect)
+    {
+        var (minusRect, plusRect) = StepperButtonRects(rect);
+        DrawStepperButton(g, minusRect, isPlus: false);
+        DrawStepperButton(g, plusRect, isPlus: true);
+
+        var value = Math.Clamp(row.StepperValue?.Invoke() ?? 0, row.StepperMin, row.StepperMax);
+        var textRect = new Rectangle(minusRect.Right, rect.Y, plusRect.Left - minusRect.Right, rect.Height);
+        TextRenderer.DrawText(g, $"{value}{row.StepperSuffix}", _font, textRect, Color.WhiteSmoke,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    /// <summary>A small outlined square with a +/- glyph - same crossed-line construction as
+    /// DrawGridItem's Plus glyph, just without needing a whole circle around it.</summary>
+    private void DrawStepperButton(Graphics g, Rectangle rect, bool isPlus)
+    {
+        using (var pen = new Pen(_getCheckboxBorder()))
+            g.DrawRectangle(pen, rect);
+
+        var cx = rect.X + rect.Width / 2f;
+        var cy = rect.Y + rect.Height / 2f;
+        const float halfLength = 4.5f;
+        using var glyphPen = new Pen(_getAccent(), 1.5f);
+        g.DrawLine(glyphPen, cx - halfLength, cy, cx + halfLength, cy);
+        if (isPlus)
+            g.DrawLine(glyphPen, cx, cy - halfLength, cx, cy + halfLength);
+    }
+
+    /// <summary>Shared between DrawStepper and the click hit-testing in OnMouseDown, so the painted
+    /// buttons and the clickable area are always the exact same rectangles.</summary>
+    private static (Rectangle Minus, Rectangle Plus) StepperButtonRects(Rectangle rowRect)
+    {
+        var y = rowRect.Y + (rowRect.Height - StepperButtonSize) / 2;
+        var minus = new Rectangle(rowRect.X + RowPadding, y, StepperButtonSize, StepperButtonSize);
+        var plus = new Rectangle(rowRect.Right - RowPadding - StepperButtonSize, y, StepperButtonSize, StepperButtonSize);
+        return (minus, plus);
+    }
+
     private int RowAt(Point clientPoint)
     {
         for (var i = 0; i < _rowRects.Count; i++)
@@ -507,7 +568,10 @@ internal sealed class DropdownMenu : Form
             return;
 
         var index = RowAt(e.Location);
-        if (index >= 0 && _rows[index].IsSlider)
+        if (index < 0)
+            return;
+
+        if (_rows[index].IsSlider)
         {
             _sliderDragRowIndex = index;
             // Keeps receiving MouseMove even once the cursor drags outside this row (or this whole
@@ -516,6 +580,28 @@ internal sealed class DropdownMenu : Form
             Capture = true;
             UpdateSliderFromMouseX(index, e.X);
         }
+        else if (_rows[index].IsStepper)
+        {
+            AdjustStepper(index, e.Location);
+        }
+    }
+
+    /// <summary>A plain click-per-step on whichever button (if either) the click actually landed on -
+    /// no press-and-hold repeat, same one-shot feel as every other row's click.</summary>
+    private void AdjustStepper(int index, Point clientPoint)
+    {
+        var row = _rows[index];
+        var (minusRect, plusRect) = StepperButtonRects(_rowRects[index]);
+        var current = Math.Clamp(row.StepperValue?.Invoke() ?? 0, row.StepperMin, row.StepperMax);
+
+        if (minusRect.Contains(clientPoint))
+            row.OnStepperChange?.Invoke(Math.Max(row.StepperMin, current - row.StepperStep));
+        else if (plusRect.Contains(clientPoint))
+            row.OnStepperChange?.Invoke(Math.Min(row.StepperMax, current + row.StepperStep));
+        else
+            return;
+
+        Invalidate();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -642,7 +728,7 @@ internal sealed class DropdownMenu : Form
         if (index < 0)
             return;
 
-        if (_rows[index].IsSlider)
+        if (_rows[index].IsSlider || _rows[index].IsStepper)
             return;
 
         if (_rows[index].Submenu is { } submenuRows)

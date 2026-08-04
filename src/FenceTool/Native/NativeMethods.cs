@@ -176,6 +176,23 @@ internal static class NativeMethods
     public const int WM_MOUSEACTIVATE = 0x0021;
     public const int MA_NOACTIVATE = 3;
 
+    // Sent repeatedly by the OS's own interactive move/resize loop (entered via DefWndProc after
+    // WM_NCLBUTTONDOWN on an HTCAPTION/resize hit-test code) with lParam pointing at a RECT the
+    // window proc can mutate before it's applied - the standard mechanism for live drag snapping.
+    // WM_SIZING's wParam is one of the WMSZ_* values below, identifying which edge(s) are being
+    // dragged - a flat enumeration, not a bitfield (the four corners don't decompose into their
+    // two edges by OR-ing the single-edge values together).
+    public const int WM_MOVING = 0x0216;
+    public const int WM_SIZING = 0x0214;
+    public const int WMSZ_LEFT = 1;
+    public const int WMSZ_RIGHT = 2;
+    public const int WMSZ_TOP = 3;
+    public const int WMSZ_TOPLEFT = 4;
+    public const int WMSZ_TOPRIGHT = 5;
+    public const int WMSZ_BOTTOM = 6;
+    public const int WMSZ_BOTTOMLEFT = 7;
+    public const int WMSZ_BOTTOMRIGHT = 8;
+
     // WinForms' own OnMouseEnter/OnMouseLeave already track TME_LEAVE for the CLIENT area - these
     // two plus TrackMouseEvent(TME_LEAVE | TME_NONCLIENT) are what FenceForm needs on top of that to
     // also notice hover over the margin/resize band, which mostly generates non-client mouse

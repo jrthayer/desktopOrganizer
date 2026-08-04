@@ -30,6 +30,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Opening += (_, _) => hiddenFilesItem.Checked = HiddenFilesManager.IsEnabled;
         menu.Items.Add(hiddenFilesItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Manage Snap Lines...", null, OnManageSnapLines);
+        menu.Items.Add(new ToolStripSeparator());
+        // Only one Recycle Bin item is allowed across every fence at once (see
+        // FenceManager.HasRecycleBin) - hidden entirely once one exists anywhere, re-checked fresh
+        // on every open same as the toggles above.
+        var addRecycleBinItem = new ToolStripMenuItem("Add Recycle Bin", null, OnAddRecycleBin);
+        menu.Opening += (_, _) => addRecycleBinItem.Visible = !_fenceManager.HasRecycleBin;
+        menu.Items.Add(addRecycleBinItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
 
         _trayIcon = new NotifyIcon
@@ -54,6 +63,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // Doesn't force the desktop to visually pick this up - see README's Tray menu limitations.
     private void OnToggleHiddenFiles(object? sender, EventArgs e) =>
         HiddenFilesManager.SetEnabled(((ToolStripMenuItem)sender!).Checked);
+
+    private void OnManageSnapLines(object? sender, EventArgs e) =>
+        _fenceManager.SnapLines.EnterEditMode();
+
+    private void OnAddRecycleBin(object? sender, EventArgs e) =>
+        _fenceManager.AddRecycleBin();
 
     private void OnShowHideAll(object? sender, EventArgs e)
     {

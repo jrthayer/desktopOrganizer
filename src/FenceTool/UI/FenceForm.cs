@@ -4,6 +4,7 @@ using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using FenceTool.Fences;
 using FenceTool.Native;
+using FenceTool.Snapping;
 
 namespace FenceTool.UI;
 
@@ -54,6 +55,38 @@ public sealed class FenceForm : Form
     private const int SettingsButtonOverhang = 19;
     private const int TopMargin = OuterMargin + SettingsButtonOverhang;
     private const int CornerRadius = 22;
+
+    // True when placing the wider TopMargin band above the fence's current on-screen position would
+    // extend above its monitor's own working area - in that case the extra band (and the settings/
+    // "+"/"x" button row within it) moves below the fence instead, so the fence can still sit flush
+    // with the very top of the screen without its own button row going unreachably off-screen. Kept
+    // in sync wherever the fence's position is computed/changed (CreateParams at handle-creation
+    // time, and WM_MOVING/WM_SIZING on every tick of a live drag/resize) rather than read fresh on
+    // every use, since CreateParams itself is only ever consulted once, before the window - and so
+    // TopBand/BottomBand below - exist at all.
+    private bool _buttonRowAtBottom;
+
+    /// <summary>The margin band on whichever side currently holds the button row - see
+    /// _buttonRowAtBottom. TopMargin-sized there, same as always; zero on the top side once flipped
+    /// (see BottomBand below for why).</summary>
+    private int TopBand => _buttonRowAtBottom ? 0 : TopMargin;
+
+    /// <summary>The margin band on whichever side does NOT currently hold the button row - see
+    /// _buttonRowAtBottom. Normally a plain OuterMargin, like the left/right/bottom edges always
+    /// are - except once flipped, when TopBand above goes to 0 instead: whatever keeps this app's
+    /// own drag loop from letting the fence's edge fully reach the screen's own edge (observed
+    /// settling exactly OuterMargin short of it, every time, even after the flip first shrank it
+    /// from TopMargin down to OuterMargin) reacts to any nonzero margin there at all, not just a
+    /// wide one - only removing it outright lets the fence sit flush with the very top of the
+    /// screen. The resize-grab hit-test zone on that side still isn't literally zero-width (see
+    /// HitTest's own ResizeMargin addition), just without this extra invisible cushion beyond the
+    /// body's own edge.</summary>
+    private int BottomBand => _buttonRowAtBottom ? TopMargin : OuterMargin;
+
+    /// <summary>bodyScreenLocation is the fence's visible body's own top-left corner in screen
+    /// coordinates (FenceModel.Bounds' convention, or a live candidate replacement for it mid-drag).</summary>
+    private static bool ComputeButtonRowAtBottom(Point bodyScreenLocation) =>
+        bodyScreenLocation.Y - TopMargin < Screen.FromPoint(bodyScreenLocation).WorkingArea.Top;
 
     // Fallback accent (drag-target outline, menu checkmarks, settings button, active-fence border)
     // for a fence that hasn't been given its own color (FenceModel.TintColor is null) - see
@@ -114,6 +147,7 @@ public sealed class FenceForm : Form
     private const int TagHeaderDarknessHeader = 1005;
     private const int TagFenceOpacityHeader = 1006;
     private const int TagTintStrengthHeader = 1007;
+    private const int TagMarginHeader = 1008;
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
@@ -285,6 +319,10 @@ public sealed class FenceForm : Form
 
     public Guid FenceId => _model.Id;
 
+    /// <summary>Used only for the cross-fence "Move to {name}" drag hint (see ComputeDragHint) -
+    /// every other cross-fence reference goes through FenceId/FenceManager instead.</summary>
+    internal string FenceName => _model.Name;
+
     /// <summary>The fence's own color (FenceModel.TintColor), or null for the plain default dark
     /// theme - the single source every themed color below (body/title fill, margin, borders,
     /// settings button, settings menu chrome) derives from. See Tint and ShowFenceOptionsMenu's
@@ -418,12 +456,14 @@ public sealed class FenceForm : Form
             if (_model is null)
                 return cp;
 
+            _buttonRowAtBottom = ComputeButtonRowAtBottom(_model.Bounds.Location);
+
             cp.Style = NativeMethods.WS_POPUP | NativeMethods.WS_VISIBLE | NativeMethods.WS_CLIPCHILDREN;
             cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
             cp.X = _model.Bounds.X - OuterMargin;
-            cp.Y = _model.Bounds.Y - TopMargin;
+            cp.Y = _model.Bounds.Y - TopBand;
             cp.Width = _model.Bounds.Width + OuterMargin * 2;
-            cp.Height = _model.Bounds.Height + TopMargin + OuterMargin;
+            cp.Height = _model.Bounds.Height + TopBand + BottomBand;
             return cp;
         }
     }
@@ -470,20 +510,20 @@ public sealed class FenceForm : Form
     public void Reanchor() => _anchorStrategy.Apply(Handle, _model.Bounds);
 
     /// <summary>The visible fence's size, i.e. the actual (padded) window size minus OuterMargin on
-    /// the left/right/bottom and TopMargin on top - all grid/hit-test math below is in this
-    /// "content" space.</summary>
+    /// the left/right/bottom-band side and TopMargin on the button-row side (see _buttonRowAtBottom)
+    /// - all grid/hit-test math below is in this "content" space.</summary>
     private Size GetContentSize()
     {
         NativeMethods.GetClientRect(Handle, out var clientRect);
-        return new Size(Math.Max(0, clientRect.Right - OuterMargin * 2), Math.Max(0, clientRect.Bottom - TopMargin - OuterMargin));
+        return new Size(Math.Max(0, clientRect.Right - OuterMargin * 2), Math.Max(0, clientRect.Bottom - TopBand - BottomBand));
     }
 
-    private static Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - TopMargin);
+    private Point ToContent(Point windowPoint) => new(windowPoint.X - OuterMargin, windowPoint.Y - TopBand);
 
-    private static Point ToWindow(Point contentPoint) => new(contentPoint.X + OuterMargin, contentPoint.Y + TopMargin);
+    private Point ToWindow(Point contentPoint) => new(contentPoint.X + OuterMargin, contentPoint.Y + TopBand);
 
-    private static Rectangle ToWindow(Rectangle contentRect) =>
-        new(contentRect.X + OuterMargin, contentRect.Y + TopMargin, contentRect.Width, contentRect.Height);
+    private Rectangle ToWindow(Rectangle contentRect) =>
+        new(contentRect.X + OuterMargin, contentRect.Y + TopBand, contentRect.Width, contentRect.Height);
 
     /// <summary>Window-relative (e.g. already run through ToWindow) to screen coordinates - needed
     /// for EditBox, which (unlike everything else drawn here) is a real top-level window rather than
@@ -504,18 +544,22 @@ public sealed class FenceForm : Form
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Content-relative, positioned just outside the visible fence (directly above it, in
-    /// the taller TopMargin band) - works the same whether or not FenceModel.HideTitle leaves a title
-    /// bar underneath it. Only meaningful while _isActive (the button isn't shown otherwise). Y is
-    /// negative - above content-space y=0 - which is fine everywhere this is used (hit-testing,
-    /// painting via ToWindow, menu positioning). Flush with the top-right corner by default; flipped
-    /// to the top-left corner instead when ShouldSettingsButtonOpenLeft says the options menu
-    /// wouldn't fit opening rightward from the right corner - see ShowFenceOptionsMenu, which reuses
-    /// this same rect's X to decide which side the menu itself opens on, so the two always agree.</summary>
+    /// <summary>Content-relative, positioned just outside the visible fence, in the taller band -
+    /// normally directly above it, but below instead once _buttonRowAtBottom flips there (see its
+    /// own comment) so the row stays reachable when the fence is flush with the top of the screen.
+    /// Works the same whether or not FenceModel.HideTitle leaves a title bar underneath it. Only
+    /// meaningful while _isActive (the button isn't shown otherwise). Y is negative when above
+    /// content-space y=0, which is fine everywhere this is used (hit-testing, painting via ToWindow,
+    /// menu positioning) - painting the "below" case the same way just needs a positive Y past the
+    /// content's own bottom instead. Flush with the top-right corner by default; flipped to the
+    /// top-left corner instead when ShouldSettingsButtonOpenLeft says the options menu wouldn't fit
+    /// opening rightward from the right corner - see ShowFenceOptionsMenu, which reuses this same
+    /// rect's X to decide which side the menu itself opens on, so the two always agree.</summary>
     private Rectangle GetSettingsButtonRect(int contentWidth)
     {
         var x = ShouldSettingsButtonOpenLeft(contentWidth) ? 0 : contentWidth - SettingsButtonWidth;
-        return new Rectangle(x, -(SettingsButtonHeight + SettingsButtonGap), SettingsButtonWidth, SettingsButtonHeight);
+        var y = _buttonRowAtBottom ? GetContentSize().Height + SettingsButtonGap : -(SettingsButtonHeight + SettingsButtonGap);
+        return new Rectangle(x, y, SettingsButtonWidth, SettingsButtonHeight);
     }
 
     /// <summary>Measures the actual options menu (see BuildOptionsMenuRows/DropdownMenu.Measure)
@@ -641,7 +685,13 @@ public sealed class FenceForm : Form
         if (e.Data?.GetData(DataFormats.FileDrop) is not string[] paths)
             return;
 
-        _manager.AddFiles(FenceId, paths);
+        // e.X/e.Y are screen coordinates (unlike MouseEventArgs.Location) - PointToClient first to
+        // land in the same window-relative space ToContent/IndexAtGridPosition expect elsewhere.
+        var contentPoint = ToContent(PointToClient(new Point(e.X, e.Y)));
+        if (IndexAtGridPosition(contentPoint) is int index && _manager.IsRecycleBinAt(FenceId, index))
+            _manager.DeletePaths(paths, Handle);
+        else
+            _manager.AddFiles(FenceId, paths);
         RenderAndPresent();
     }
 
@@ -653,9 +703,13 @@ public sealed class FenceForm : Form
         // WM_NCLBUTTONDBLCLK/WM_NCRBUTTONDOWN - both gated on IsPointOverTitleText) - no fallback
         // here when FenceModel.HideTitle leaves no title bar to click at all; renaming just isn't
         // reachable that way then, rather than an empty double-click anywhere substituting for it.
-        var path = FileAtGridPosition(ToContent(e.Location));
-        if (path is not null)
-            OpenItem(path);
+        if (IndexAtGridPosition(ToContent(e.Location)) is not int index)
+            return;
+        var item = _model.Files[index];
+        // FenceItem.Path is the Recycle Bin's shell-namespace CLSID string for icon-extraction
+        // purposes only (see FenceItem.IsRecycleBin) - opening it needs the "shell:" alias instead,
+        // a different shell path grammar OpenItem's ShellExecute still resolves the same way.
+        OpenItem(item.IsRecycleBin ? "shell:RecycleBinFolder" : item.Path);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -759,6 +813,7 @@ public sealed class FenceForm : Form
         if (_draggingIndex is not null)
         {
             _dragCurrentPoint = ToContent(e.Location);
+            _dragGhost?.SetHint(ComputeDragHint(e.Location));
             _dragGhost?.MoveTo(PointToScreen(e.Location));
             RenderAndPresent();
             return;
@@ -823,6 +878,46 @@ public sealed class FenceForm : Form
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
+    /// <summary>Live drop-target hint for an in-app item drag (see _draggingIndex), shown in the
+    /// pill below the drag ghost - mirrors the tooltip Windows itself shows while dragging a file
+    /// over a folder or the desktop Recycle Bin icon. Mirrors OnMouseUp's own same-fence/cross-
+    /// fence/neither resolution exactly (including the recycle-bin sub-case), just read-only (no
+    /// mutation) and re-run on every mouse-move rather than only at drop time. Never returns a hint
+    /// while the trash item itself is what's being dragged - same reasoning as OnMouseUp's own
+    /// isSourceTrash guard, repositioning the trash icon onto its own cell is never a delete, and
+    /// dragging it to another fence or off onto the desktop isn't really a "move"/"remove" either
+    /// since it always stays exactly one Recycle Bin, just relocated.</summary>
+    private string? ComputeDragHint(Point windowLocation)
+    {
+        if (_draggingIndex is not int sourceIndex || _model.Files[sourceIndex].IsRecycleBin)
+            return null;
+
+        var contentPoint = ToContent(windowLocation);
+        if (new Rectangle(Point.Empty, GetContentSize()).Contains(contentPoint))
+        {
+            var index = IndexAtGridPosition(contentPoint) ?? _model.Files.Count;
+            if (_manager.IsRecycleBinAt(FenceId, index))
+                return "Move to Recycle Bin →";
+            // Landing back on (or adjacent to) its own starting cell isn't really a reorder, but
+            // there's no cheap way to tell "would actually move" from "would land right back where
+            // it started" here without duplicating MoveFile's own index-shift math - and showing the
+            // hint a little early/late right at the source cell is harmless, unlike misreporting a
+            // Recycle Bin/cross-fence target.
+            return "Change Position";
+        }
+
+        var screenPoint = PointToScreen(windowLocation);
+        if (_manager.FindFenceAt(screenPoint, FenceId) is { } targetForm)
+        {
+            var index = targetForm.IndexForExternalDrop(screenPoint);
+            return _manager.IsRecycleBinAt(targetForm.FenceId, index)
+                ? "Move to Recycle Bin →"
+                : $"Move to {targetForm.FenceName} →";
+        }
+
+        return "Remove from Fence";
+    }
+
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
@@ -871,9 +966,17 @@ public sealed class FenceForm : Form
 
         var contentPoint = ToContent(e.Location);
         var path = _model.Files[sourceIndex].Path;
+        // The trash item being dragged (repositioned, or dropped back near its own cell) is never
+        // itself "dropped onto the trash" - only some *other* item landing on the trash cell means
+        // delete. Checked once up front rather than at each landing-spot branch below.
+        var isSourceTrash = _model.Files[sourceIndex].IsRecycleBin;
         if (new Rectangle(Point.Empty, GetContentSize()).Contains(contentPoint))
         {
-            _manager.MoveFile(FenceId, path, IndexAtGridPosition(contentPoint) ?? _model.Files.Count);
+            var targetIndex = IndexAtGridPosition(contentPoint) ?? _model.Files.Count;
+            if (!isSourceTrash && _manager.IsRecycleBinAt(FenceId, targetIndex))
+                _manager.DeleteFencedItem(FenceId, path, Handle);
+            else
+                _manager.MoveFile(FenceId, path, targetIndex);
         }
         else
         {
@@ -882,7 +985,13 @@ public sealed class FenceForm : Form
             // it (the pre-existing behavior for a drop that lands nowhere).
             var screenPoint = PointToScreen(e.Location);
             if (_manager.FindFenceAt(screenPoint, FenceId) is { } targetForm)
-                _manager.MoveFileToFence(FenceId, targetForm.FenceId, path, targetForm.IndexForExternalDrop(screenPoint));
+            {
+                var targetIndex = targetForm.IndexForExternalDrop(screenPoint);
+                if (!isSourceTrash && _manager.IsRecycleBinAt(targetForm.FenceId, targetIndex))
+                    _manager.DeleteFencedItem(FenceId, path, Handle);
+                else
+                    _manager.MoveFileToFence(FenceId, targetForm.FenceId, path, targetIndex);
+            }
             else
                 _manager.RemoveFile(FenceId, path);
         }
@@ -968,6 +1077,44 @@ public sealed class FenceForm : Form
             case WM_NCHITTEST:
                 m.Result = (IntPtr)HitTest(m.LParam);
                 return;
+
+            // Sent repeatedly by the OS's own interactive move/resize loop (already running by the
+            // time either of these arrive - see WM_ENTERSIZEMOVE/HitTest) with lParam pointing at a
+            // RECT this can mutate before it's applied; DefWindowProc has no default handling for
+            // either message, so unlike messages that need base.WndProc's processing afterward,
+            // mutating the RECT and returning here is enough - the outer loop (not DefWindowProc)
+            // is what reads it back. The RECT is in raw window coordinates (OuterMargin/TopMargin
+            // padding included, same as WM_EXITSIZEMOVE converts below) - snap comparisons need to
+            // happen against the visible fence body instead, then get re-inflated the same
+            // asymmetric way before writing back.
+            case NativeMethods.WM_MOVING:
+            {
+                var raw = Marshal.PtrToStructure<RECT>(m.LParam);
+                var body = Rectangle.FromLTRB(raw.Left + OuterMargin, raw.Top + TopBand, raw.Right - OuterMargin, raw.Bottom - BottomBand);
+                var (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
+                var result = _manager.SnapLines.SnapMove(body, vCandidates, hCandidates, _model.Margin);
+                // Re-decided against the proposed rect's own new position - a drag that crosses the
+                // "would go off the top of the screen" threshold mid-tick flips right here, so
+                // WriteBackWindowRect (next) already inflates using whichever side the button row
+                // belongs on now, not wherever it was a moment ago.
+                _buttonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location);
+                WriteBackWindowRect(m.LParam, result.Rect);
+                m.Result = (IntPtr)1;
+                return;
+            }
+
+            case NativeMethods.WM_SIZING:
+            {
+                var raw = Marshal.PtrToStructure<RECT>(m.LParam);
+                var body = Rectangle.FromLTRB(raw.Left + OuterMargin, raw.Top + TopBand, raw.Right - OuterMargin, raw.Bottom - BottomBand);
+                var edges = SnapEdgesFromWmSz((int)m.WParam.ToInt64());
+                var (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
+                var result = _manager.SnapLines.SnapResize(body, edges, vCandidates, hCandidates, _model.Margin);
+                _buttonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location);
+                WriteBackWindowRect(m.LParam, result.Rect);
+                m.Result = (IntPtr)1;
+                return;
+            }
 
             case WM_NCLBUTTONDBLCLK:
                 // HitTest reports HTCAPTION for the whole title bar/margin area, not just the
@@ -1101,13 +1248,27 @@ public sealed class FenceForm : Form
 
             case WM_ENTERSIZEMOVE:
                 _isMoving = true;
+                _manager.SnapLines.BeginDrag();
                 BeginOpacityAnimationIfNeeded();
                 break;
 
             case WM_EXITSIZEMOVE:
+                _manager.SnapLines.EndDrag();
+
                 if (NativeMethods.GetWindowRect(Handle, out var rect))
                     _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
-                        rect.Left + OuterMargin, rect.Top + TopMargin, rect.Right - OuterMargin, rect.Bottom - OuterMargin));
+                        rect.Left + OuterMargin, rect.Top + TopBand, rect.Right - OuterMargin, rect.Bottom - BottomBand));
+
+                // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
+                // whatever size was just dragged to - not after a move, see _resizeInProgress. Done
+                // before the HWND_BOTTOM restack below (rather than after) so that restack is always
+                // the last z-order-relevant call in this handler - FormatDimensions makes its own
+                // SetWindowPos call (SWP_NOZORDER, meant to leave z-order untouched), but a resize
+                // followed by a move was still landing behind other fences with the restack first,
+                // so the z-order push now unconditionally comes last regardless of what ran before it.
+                if (_resizeInProgress && _model.OcdFenceSizing)
+                    FormatDimensions(adjustWidth: true, adjustHeight: true);
+                _resizeInProgress = false;
 
                 // Dragging a fence via its caption (see HTCAPTION/WM_NCLBUTTONDOWN) goes through the
                 // OS's own window-move loop, which activates it like any normal window drag would -
@@ -1119,11 +1280,6 @@ public sealed class FenceForm : Form
                 NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
                     NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
 
-                // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
-                // whatever size was just dragged to - not after a move, see _resizeInProgress.
-                if (_resizeInProgress && _model.OcdFenceSizing)
-                    FormatDimensions(adjustWidth: true, adjustHeight: true);
-                _resizeInProgress = false;
                 _isMoving = false;
                 BeginOpacityAnimationIfNeeded();
 
@@ -1148,6 +1304,36 @@ public sealed class FenceForm : Form
 
     private static bool IsResizeHitTest(int hitTest) =>
         hitTest is HTLEFT or HTRIGHT or HTTOP or HTBOTTOM or HTTOPLEFT or HTTOPRIGHT or HTBOTTOMLEFT or HTBOTTOMRIGHT;
+
+    /// <summary>WM_SIZING's wParam - a flat enumeration, not a bitfield (the four corner values
+    /// don't decompose into their two edges by combining the single-edge values).</summary>
+    private static SnapEdges SnapEdgesFromWmSz(int wmsz) => wmsz switch
+    {
+        NativeMethods.WMSZ_LEFT => SnapEdges.Left,
+        NativeMethods.WMSZ_RIGHT => SnapEdges.Right,
+        NativeMethods.WMSZ_TOP => SnapEdges.Top,
+        NativeMethods.WMSZ_TOPLEFT => SnapEdges.Top | SnapEdges.Left,
+        NativeMethods.WMSZ_TOPRIGHT => SnapEdges.Top | SnapEdges.Right,
+        NativeMethods.WMSZ_BOTTOM => SnapEdges.Bottom,
+        NativeMethods.WMSZ_BOTTOMLEFT => SnapEdges.Bottom | SnapEdges.Left,
+        NativeMethods.WMSZ_BOTTOMRIGHT => SnapEdges.Bottom | SnapEdges.Right,
+        _ => SnapEdges.None,
+    };
+
+    /// <summary>Re-inflates a snapped visible-body rect back into raw window coordinates (the
+    /// inverse of WM_MOVING/WM_SIZING's own body conversion above) and writes it into the RECT at
+    /// lParam for the OS's own move/resize loop to pick up.</summary>
+    private void WriteBackWindowRect(IntPtr lParam, Rectangle body)
+    {
+        var snapped = new RECT
+        {
+            Left = body.Left - OuterMargin,
+            Top = body.Top - TopBand,
+            Right = body.Right + OuterMargin,
+            Bottom = body.Bottom + BottomBand,
+        };
+        Marshal.StructureToPtr(snapped, lParam, false);
+    }
 
     private int HitTest(IntPtr lParam)
     {
@@ -1174,9 +1360,11 @@ public sealed class FenceForm : Form
             return HTCLIENT;
 
         int band = OuterMargin + ResizeMargin;
-        // The top band is taller than the other three (see TopMargin) to make room for the settings
-        // button, so it gets its own resize-grab threshold instead of sharing the plain one above.
-        int topBand = TopMargin + ResizeMargin;
+        // Whichever side currently holds the button row is the taller one (see TopBand/
+        // _buttonRowAtBottom), so it's this pair - not always "top"/"bottom" - that gets the wider
+        // resize-grab threshold instead of sharing the plain one above.
+        int topZone = TopBand + ResizeMargin;
+        int bottomZone = BottomBand + ResizeMargin;
 
         if (ShowsSettingsButton)
         {
@@ -1192,15 +1380,15 @@ public sealed class FenceForm : Form
             // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
             // ThemedActiveBorder highlight) without an ambiguous strip where both would apply.
             // Resizing an active fence isn't available until it's deactivated again.
-            if (x <= band || x >= width - band || y <= topBand || y >= height - band)
+            if (x <= band || x >= width - band || y <= topZone || y >= height - bottomZone)
                 return HTCAPTION;
         }
         else
         {
             bool left = x <= band;
             bool right = x >= width - band;
-            bool top = y <= topBand;
-            bool bottom = y >= height - band;
+            bool top = y <= topZone;
+            bool bottom = y >= height - bottomZone;
 
             if (top && left) return HTTOPLEFT;
             if (top && right) return HTTOPRIGHT;
@@ -1214,7 +1402,7 @@ public sealed class FenceForm : Form
 
         // Empty space within the title bar itself (content-relative, not the margin above) works
         // the same way for a fence that still has one.
-        if (!_model.HideTitle && y - TopMargin <= TitleBarHeight)
+        if (!_model.HideTitle && y - TopBand <= TitleBarHeight)
             return HTCAPTION;
 
         return HTCLIENT;
@@ -1237,7 +1425,7 @@ public sealed class FenceForm : Form
         int width = windowRect.Right - windowRect.Left;
         int height = windowRect.Bottom - windowRect.Top;
         int contentWidth = width - OuterMargin * 2;
-        int contentHeight = height - TopMargin - OuterMargin;
+        int contentHeight = height - TopBand - BottomBand;
         if (contentWidth <= 0 || contentHeight <= 0)
             return;
 
@@ -1514,10 +1702,17 @@ public sealed class FenceForm : Form
         Icon? icon = null;
         try
         {
+            // The Recycle Bin's shell-namespace CLSID string (FenceItem.IsRecycleBin) isn't a real
+            // path - ExtractLargeIcon's path-based SHGetFileInfo call doesn't resolve it, so this
+            // needs the special-folder-PIDL route instead. Icon.ExtractAssociatedIcon would just
+            // throw for it too (already caught below), so it's skipped entirely for this path.
+            //
             // The shell's large image list gives a genuinely high-resolution icon (crisp at
             // IconSize) rather than the ~32px one Icon.ExtractAssociatedIcon returns, which looks
             // blurry once drawn at a larger size - only fall back to it if the shell lookup fails.
-            icon = ShellIcons.ExtractLargeIcon(path) ?? Icon.ExtractAssociatedIcon(path);
+            icon = path == FenceManager.RecycleBinPath
+                ? ShellIcons.ExtractRecycleBinIcon()
+                : ShellIcons.ExtractLargeIcon(path) ?? Icon.ExtractAssociatedIcon(path);
         }
         catch (IOException)
         {
@@ -1766,6 +1961,16 @@ public sealed class FenceForm : Form
             SliderValue: () => _model.TintStrength / 100.0,
             OnSliderChange: value => SetTintStrength((int)Math.Round(value * 100))));
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
+        // How far this fence wants to sit from another fence's edge when it snaps against one (see
+        // FenceManager.GetOtherFenceEdges) - this fence's own value, not the other one's, the same
+        // way OcdFenceSizing/HeaderDarkness/etc. above are all per-fence rather than app-wide. A
+        // typed number with +/- steppers rather than a slider like the others above - a pixel count
+        // is exact-value-driven (you want e.g. "10", not "whatever a slider drag landed near").
+        rows.Add(new DropdownMenu.Row(TagMarginHeader, "Fence Margin", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsStepper: true,
+            StepperValue: () => _model.Margin, OnStepperChange: SetMargin,
+            StepperMin: 0, StepperMax: 100, StepperStep: 5, StepperSuffix: "px"));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
         // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
         // header now lives inside the flyout itself instead, same as "Fence Color" above.
@@ -1980,6 +2185,16 @@ public sealed class FenceForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>"Fence Margin" numeric input. Doesn't need a repaint of its own (unlike the sliders
+    /// above, nothing this fence draws depends on its own Margin value - it only affects candidates
+    /// offered to OTHER fences' drags via FenceManager.GetOtherFenceEdges) but RenderAndPresent
+    /// stays for consistency and to keep anything else the dropdown reflects in sync.</summary>
+    private void SetMargin(int margin)
+    {
+        _manager.SetMargin(FenceId, margin);
+        RenderAndPresent();
+    }
+
     /// <summary>"Fence Color > Custom..." - the settings menu has already closed by the time this runs
     /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
     /// here doesn't fight it for the message loop.</summary>
@@ -2054,6 +2269,10 @@ public sealed class FenceForm : Form
     private void ToggleOcdFenceSizing()
     {
         _manager.SetOcdFenceSizing(FenceId, !_model.OcdFenceSizing);
+        // Otherwise this only ever takes effect after the next manual resize (see WM_EXITSIZEMOVE) -
+        // turning it on should tidy up the fence right away instead of waiting for that.
+        if (_model.OcdFenceSizing)
+            FormatDimensions(adjustWidth: true, adjustHeight: true);
         RenderAndPresent();
     }
 
@@ -2114,7 +2333,7 @@ public sealed class FenceForm : Form
         // NotifyBoundsChanged just needs to persist it, the same way WM_EXITSIZEMOVE does after an
         // interactive drag-resize.
         NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
-            newBounds.Width + OuterMargin * 2, newBounds.Height + TopMargin + OuterMargin,
+            newBounds.Width + OuterMargin * 2, newBounds.Height + TopBand + BottomBand,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
         _manager.NotifyBoundsChanged(FenceId, newBounds);
     }

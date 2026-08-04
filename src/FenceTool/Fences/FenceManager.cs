@@ -12,6 +12,8 @@ public sealed class FenceManager : IDisposable
     private readonly List<FenceModel> _models = new();
     private readonly Dictionary<Guid, FenceForm> _forms = new();
 
+    public SnapLineManager SnapLines { get; } = new();
+
     public FenceManager()
     {
         // EmbeddedDesktopAnchorStrategy's SetParent mechanics work correctly (verified via
@@ -42,7 +44,8 @@ public sealed class FenceManager : IDisposable
         // AddFiles, where the same failure is worth surfacing once, at the moment it's added.
         foreach (var model in _models)
             foreach (var file in model.Files)
-                _iconHider.Hide(file);
+                if (!file.IsRecycleBin)
+                    _iconHider.Hide(file);
         Save();
     }
 
@@ -59,9 +62,9 @@ public sealed class FenceManager : IDisposable
     }
 
     /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (color,
-    /// HideTitle/HideLabels, OCD sizing) instead of the defaults - see FenceForm's "+" button next to
-    /// Settings. Deliberately doesn't copy Files: this is "another fence styled the same way", not a
-    /// clone of its contents.</summary>
+    /// HideTitle/HideLabels, OCD sizing, Margin) instead of the defaults - see FenceForm's "+" button
+    /// next to Settings. Deliberately doesn't copy Files: this is "another fence styled the same
+    /// way", not a clone of its contents.</summary>
     public void CreateFenceLike(Guid sourceId)
     {
         var source = _models.Find(m => m.Id == sourceId);
@@ -76,6 +79,7 @@ public sealed class FenceManager : IDisposable
             HideTitle = source.HideTitle,
             OcdFenceSizing = source.OcdFenceSizing,
             TintColor = source.TintColor,
+            Margin = source.Margin,
         };
         _models.Add(model);
         ShowFence(model);
@@ -137,8 +141,10 @@ public sealed class FenceManager : IDisposable
         // whatever's still fenced on the next launch, so this deliberately doesn't Save afterward.
         foreach (var model in _models)
             foreach (var file in model.Files)
-                _iconHider.Restore(file);
+                if (!file.IsRecycleBin)
+                    _iconHider.Restore(file);
         _desktopListView.Dispose();
+        SnapLines.Dispose();
     }
 
     /// <summary>
@@ -179,12 +185,94 @@ public sealed class FenceManager : IDisposable
             Save();
     }
 
+    /// <summary>The Recycle Bin's own well-known shell namespace CLSID string - not a real
+    /// filesystem path, but SHGetFileInfo (see ShellIcons.ExtractLargeIcon) resolves it directly to
+    /// the current, empty/full-aware system icon, so this doubles as FenceItem.Path for the
+    /// synthetic trash item without needing any icon-code changes.</summary>
+    public const string RecycleBinPath = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+
+    /// <summary>Only one Recycle Bin item is allowed across every fence at once - there's only one
+    /// real Recycle Bin, so more than one visual icon for it would be confusing rather than useful.
+    /// Scans _models fresh rather than caching a flag, so this can never drift from the model data
+    /// that's actually the source of truth.</summary>
+    public bool HasRecycleBin => _models.Any(m => m.Files.Any(f => f.IsRecycleBin));
+
+    public bool IsRecycleBinAt(Guid fenceId, int index)
+    {
+        var model = _models.Find(m => m.Id == fenceId);
+        return model is not null && index >= 0 && index < model.Files.Count && model.Files[index].IsRecycleBin;
+    }
+
+    /// <summary>Creates a new dedicated fence (mirroring CreateFence) holding just the single
+    /// synthetic Recycle Bin item, and hides the real desktop icon (see RecycleBinIconManager) so it
+    /// doesn't sit doubled-up. Triggered from the tray menu rather than any particular fence's own
+    /// settings, so there's no existing fence to target - a fresh one is the least ambiguous place
+    /// to put it; the item can still be dragged into a different fence afterward like any other.
+    /// No-ops if one already exists anywhere - see HasRecycleBin.</summary>
+    public void AddRecycleBin()
+    {
+        if (HasRecycleBin)
+            return;
+
+        var model = new FenceModel { Name = "Recycle Bin", Bounds = NextDefaultBounds() };
+        model.Files.Add(new FenceItem { Path = RecycleBinPath, DisplayName = "Recycle Bin", IsRecycleBin = true });
+        _models.Add(model);
+        ShowFence(model);
+        RecycleBinIconManager.SetHidden(true);
+        Save();
+    }
+
+    /// <summary>Sends files that were dropped directly onto a fence's trash cell straight to the
+    /// Recycle Bin - these were never fence items to begin with (dragged fresh from Explorer), so
+    /// there's no model to reconcile, unlike DeleteFencedItem below.</summary>
+    public void DeletePaths(IReadOnlyList<string> paths, IntPtr ownerHwnd) =>
+        RecycleBinOperations.SendToRecycleBin(ownerHwnd, paths);
+
+    /// <summary>Deletes an item that was already sitting in a fence by dragging it onto the trash
+    /// cell (same fence or a different one), and only removes it from the fence model if the delete
+    /// actually succeeded, so a locked file or a declined confirmation dialog leaves the item right
+    /// where it was rather than vanishing regardless of outcome.</summary>
+    public bool DeleteFencedItem(Guid fenceId, string path, IntPtr ownerHwnd)
+    {
+        var model = _models.Find(m => m.Id == fenceId);
+        var item = model?.Files.Find(f => f.Path == path);
+        if (model is null || item is null)
+            return false;
+
+        // Windows always restores a deleted file to wherever it was deleted FROM - if this item was
+        // relocated into the hidden folder (see DesktopIconHider), deleting it from there means a
+        // later Recycle Bin restore would put it back in that same hidden, un-fenced folder: not on
+        // the real desktop, not in any fence, invisible either way. Moving it back to the real
+        // desktop first (best-effort; RemoveFile below accepts the same rare failure case) means a
+        // restore instead lands somewhere the user can actually see and re-fence it from. Updates
+        // item.Path/RealDesktopPath in place on success; leaves them untouched on failure, so the
+        // delete below still targets whatever the item's real current location is either way.
+        if (item.RealDesktopPath is not null)
+            _iconHider.Restore(item);
+
+        if (!RecycleBinOperations.SendToRecycleBin(ownerHwnd, new[] { item.Path }))
+            return false;
+
+        model.Files.Remove(item);
+        Save();
+        return true;
+    }
+
     public void RemoveFile(Guid fenceId, string path)
     {
         var model = _models.Find(m => m.Id == fenceId);
         var item = model?.Files.Find(f => f.Path == path);
         if (model is null || item is null || !model.Files.Remove(item))
             return;
+
+        // The trash item has no real desktop icon of its own to restore - dragging it off a fence
+        // just gives the real desktop's own Recycle Bin icon its visibility back instead.
+        if (item.IsRecycleBin)
+        {
+            RecycleBinIconManager.SetHidden(false);
+            Save();
+            return;
+        }
 
         // Only bring the real desktop icon back once no other fence holds this same path anymore -
         // and if that restore fails, put it right back rather than let this fence's removal
@@ -229,6 +317,47 @@ public sealed class FenceManager : IDisposable
                 return form;
         }
         return null;
+    }
+
+    /// <summary>Candidate snap positions from every other currently-tracked fence's edges - Left/
+    /// Right (vertical, for X-axis snapping) and Top/Bottom (horizontal, for Y-axis snapping) - for
+    /// SnapLineManager.SnapMove/SnapResize. Not filtered by visibility: FenceForm.Show/SetVisible
+    /// change visibility via a raw ShowWindow call that bypasses Control.Visible, so a reliable
+    /// check would need IsWindowVisible; not worth that plumbing just to avoid snapping to a
+    /// currently-hidden ("Show/Hide All") fence's edges.
+    ///
+    /// When excludeId's own fence has FenceModel.Margin set - it's the dragged fence's own value
+    /// that applies, like a CSS margin, not each candidate fence's own - every other fence's edge
+    /// also contributes a second candidate offset outward by that amount (their Left minus margin,
+    /// their Right plus margin, etc.) alongside the flush one, not replacing it: flush alignment
+    /// (lining an edge up exactly with another fence's same-side edge, e.g. two Lefts) is still just
+    /// as valid a thing to snap to as resting adjacent to it with a gap. SnapEngine's own
+    /// nearest-candidate-wins logic picks whichever of the two is actually closest.</summary>
+    public (IReadOnlyList<int> Vertical, IReadOnlyList<int> Horizontal) GetOtherFenceEdges(Guid excludeId)
+    {
+        var margin = _models.Find(m => m.Id == excludeId)?.Margin ?? 0;
+        var vertical = new List<int>();
+        var horizontal = new List<int>();
+
+        foreach (var model in _models)
+        {
+            if (model.Id == excludeId)
+                continue;
+            vertical.Add(model.Bounds.Left);
+            vertical.Add(model.Bounds.Right);
+            horizontal.Add(model.Bounds.Top);
+            horizontal.Add(model.Bounds.Bottom);
+
+            if (margin > 0)
+            {
+                vertical.Add(model.Bounds.Left - margin);
+                vertical.Add(model.Bounds.Right + margin);
+                horizontal.Add(model.Bounds.Top - margin);
+                horizontal.Add(model.Bounds.Bottom + margin);
+            }
+        }
+
+        return (vertical, horizontal);
     }
 
     /// <summary>Moves an item from one fence to another - unlike MoveFile (reorder within a single
@@ -386,6 +515,16 @@ public sealed class FenceManager : IDisposable
         if (model is null || model.TintStrength == clamped)
             return;
         model.TintStrength = clamped;
+        Save();
+    }
+
+    public void SetMargin(Guid id, int margin)
+    {
+        var model = _models.Find(m => m.Id == id);
+        var clamped = Math.Clamp(margin, 0, 100);
+        if (model is null || model.Margin == clamped)
+            return;
+        model.Margin = clamped;
         Save();
     }
 

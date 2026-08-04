@@ -19,6 +19,14 @@ public sealed class FenceItem
     /// when Fence Tool exits cleanly. Null for anything dragged in from elsewhere, which never had
     /// a real desktop icon to hide in the first place. See DesktopIconHider.</summary>
     public string? RealDesktopPath { get; set; }
+
+    /// <summary>True only for the single synthetic Recycle Bin item a fence can hold (see
+    /// FenceManager.AddRecycleBin) - not backed by a real file, so DesktopIconHider/AddFiles'
+    /// existence checks must never run against it, and dropping other items onto it deletes them
+    /// instead of the usual add/reorder/move behavior. Path is set to the Recycle Bin's own shell
+    /// namespace CLSID string purely so the existing icon-extraction code can render its (empty/
+    /// full-aware) system icon unmodified - it's never treated as a filesystem path anywhere else.</summary>
+    public bool IsRecycleBin { get; set; }
 }
 
 /// <summary>Reads both the current fences.json format (Files as an array of FenceItem objects)
@@ -108,6 +116,13 @@ public sealed class FenceModel
     /// TintIsExact's own full-strength Eyedropper path. 55 matches the fixed blend this used to be
     /// before it became adjustable.</summary>
     public int TintStrength { get; set; } = DefaultTintStrength;
+
+    /// <summary>0-100 physical pixels - how far this fence wants to sit from another fence's edge
+    /// when it snaps against one (see FenceManager.GetOtherFenceEdges), instead of landing flush.
+    /// It's this fence's own value that applies while it's the one being dragged, not the other
+    /// fence's - like a CSS margin, which is also where the name comes from. 0 (the default) means
+    /// flush edge-to-edge, the original behavior. Doesn't affect snapping to a custom snap line.</summary>
+    public int Margin { get; set; }
 
     [JsonIgnore]
     public Rectangle Bounds
