@@ -1,3 +1,4 @@
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace FenceTool.Native;
@@ -61,14 +62,27 @@ internal static class ShellIcons
         if (SHGetFileInfo(path, 0, ref shfi, size, SHGFI_SYSICONINDEX) == IntPtr.Zero)
             return null;
 
+        // Not every icon actually has 256x256 source art - when the underlying .ico only embeds
+        // up to some smaller native resolution (observed for a Steam-generated shortcut icon whose
+        // .ico was a few KB, versus a few hundred KB for one with real jumbo art), the jumbo list
+        // doesn't stretch that smaller frame to fill the request; it blits it unscaled into one
+        // corner of an otherwise-transparent 256x256 canvas. FenceForm then scales that whole
+        // (mostly empty) canvas down to IconSize, so what's drawn ends up a fraction of the cell -
+        // requireFullBleed rejects that case in favor of the extra-large (48x48) list, which asks
+        // for a size the shell can actually deliver as a fully-filled frame instead of padding it.
+        return GetIcon(shfi.iIcon, SHIL_JUMBO, requireFullBleed: true)
+            ?? GetIcon(shfi.iIcon, SHIL_EXTRALARGE, requireFullBleed: false);
+    }
+
+    private static Icon? GetIcon(int iIcon, int shilList, bool requireFullBleed)
+    {
         var iid = IID_IImageList;
-        if (SHGetImageList(SHIL_JUMBO, ref iid, out var imageList) != 0 &&
-            SHGetImageList(SHIL_EXTRALARGE, ref iid, out imageList) != 0)
+        if (SHGetImageList(shilList, ref iid, out var imageList) != 0)
             return null;
 
         try
         {
-            if (imageList.GetIcon(shfi.iIcon, ILD_TRANSPARENT, out var hIcon) != 0 || hIcon == IntPtr.Zero)
+            if (imageList.GetIcon(iIcon, ILD_TRANSPARENT, out var hIcon) != 0 || hIcon == IntPtr.Zero)
                 return null;
 
             try
@@ -76,6 +90,8 @@ internal static class ShellIcons
                 // Icon.FromHandle doesn't take ownership of hIcon - Clone() copies the image data
                 // into a managed Icon we can keep, so the original handle can be destroyed here.
                 using var temp = Icon.FromHandle(hIcon);
+                if (requireFullBleed && !FillsCanvas(temp))
+                    return null;
                 return (Icon)temp.Clone();
             }
             finally
@@ -86,6 +102,53 @@ internal static class ShellIcons
         finally
         {
             Marshal.ReleaseComObject(imageList);
+        }
+    }
+
+    /// <summary>True if icon's actual (non-transparent) artwork spans most of its own canvas,
+    /// rather than being a smaller native-resolution frame padded out with empty space - see
+    /// ExtractLargeIcon's own comment for why that distinction matters.</summary>
+    private static bool FillsCanvas(Icon icon)
+    {
+        using var bitmap = icon.ToBitmap();
+        var width = bitmap.Width;
+        var height = bitmap.Height;
+        if (width == 0 || height == 0)
+            return false;
+
+        var data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            var stride = data.Stride;
+            var bytes = new byte[stride * height];
+            Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+
+            int minX = width, minY = height, maxX = -1, maxY = -1;
+            for (var y = 0; y < height; y++)
+            {
+                var row = y * stride;
+                for (var x = 0; x < width; x++)
+                {
+                    if (bytes[row + x * 4 + 3] <= 10)
+                        continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+
+            if (maxX < 0)
+                return false;
+
+            // A genuine full-resolution icon's artwork typically fills most of its canvas (game/app
+            // icons rarely leave more than ~20% empty padding); a smaller frame blitted unscaled
+            // into one corner instead leaves most of it transparent - 60% catches that gap cleanly.
+            return (maxX - minX + 1) >= width * 0.6 && (maxY - minY + 1) >= height * 0.6;
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
         }
     }
 }
