@@ -1,8 +1,8 @@
 # Desktop Tool
 
 A Windows desktop app, run from the system tray, built to grow into a
-general desktop-organization toolkit over time. Its first (and currently
-only) feature is **Fences** — see below.
+general desktop-organization toolkit over time. Its features are
+**Fences** and **Layouts** — see below.
 
 ## Requirements
 
@@ -32,6 +32,23 @@ See [`src/DesktopTool/Features/Fences/README.md`](src/DesktopTool/Features/Fence
 for the full feature writeup, settings reference, and known limitations.
 All of its code lives under [`src/DesktopTool/Features/Fences`](src/DesktopTool/Features/Fences).
 
+### Layouts
+
+Named profiles that relaunch (or reuse, if already running) a set of
+programs and place each one's window on a chosen monitor and position.
+**Save Current Layout** builds a profile straight from whatever's
+currently open and where it's sitting, instead of picking each program by
+hand through **Manage Layouts...**. All of its code lives under
+[`src/DesktopTool/Features/Layouts`](src/DesktopTool/Features/Layouts).
+
+**Limitations:** Save Current Layout can end up including one of Desktop
+Tool's own windows (a fence) as a captured entry - it's excluded by
+matching the window's owning process ID against the running app's own, but
+that hasn't reliably kept it out in every case seen so far. Harmless to
+leave in a saved layout (running it just tries to "relaunch" Desktop Tool
+itself, which is already running and a no-op in practice), but worth
+deleting by hand via Manage Layouts if you notice it.
+
 ## Tray menu
 
 - **New Fence** — creates a new, empty fence.
@@ -54,6 +71,9 @@ All of its code lives under [`src/DesktopTool/Features/Fences`](src/DesktopTool/
   [Fences: Recycle Bin](src/DesktopTool/Features/Fences/README.md#recycle-bin)) to a
   new, dedicated fence. Hidden once one already exists anywhere, since only
   one is allowed.
+- **Layouts** — submenu listing every saved layout profile (click to run
+  one), plus **Save Current Layout** and **Manage Layouts...** (see
+  [Layouts](#layouts) above).
 
 **Limitations:** the Show Hidden Files setting itself takes effect
 immediately, but the desktop's own icon view doesn't visibly pick it up

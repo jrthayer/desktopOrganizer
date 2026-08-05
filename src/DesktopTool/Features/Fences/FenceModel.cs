@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DesktopTool.UI;
 
 namespace DesktopTool.Features.Fences;
 
@@ -56,7 +57,13 @@ internal sealed class FenceItemListConverter : JsonConverter<List<FenceItem>>
         JsonSerializer.Serialize(writer, value, options);
 }
 
-public sealed class FenceModel
+/// <summary>Implements IWidgetStyle (TintColor/HeaderDarkness/Opacity/FullOpacityOnHover/
+/// TintStrength/Margin, all already declared below with matching types) purely so StyleMenuRows/
+/// StyleTint's shared helpers can operate against a Fence the same way they do LayoutLauncherModel -
+/// zero effect on JSON serialization (System.Text.Json serializes FenceModel's own concrete
+/// properties regardless of what interfaces it implements) and zero behavior change for FenceForm,
+/// which still reads/writes these properties directly, not through the interface.</summary>
+public sealed class FenceModel : IWidgetStyle
 {
     // Shared with FenceManager.SetTintColor's "click the same color again resets these" gesture, so
     // the reset target and each property's own initial value can never drift apart.

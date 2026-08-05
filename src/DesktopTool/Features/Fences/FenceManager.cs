@@ -333,10 +333,15 @@ public sealed class FenceManager : IDisposable
     /// their Right plus margin, etc.) alongside the flush one, not replacing it: flush alignment
     /// (lining an edge up exactly with another fence's same-side edge, e.g. two Lefts) is still just
     /// as valid a thing to snap to as resting adjacent to it with a gap. SnapEngine's own
-    /// nearest-candidate-wins logic picks whichever of the two is actually closest.</summary>
-    public (IReadOnlyList<int> Vertical, IReadOnlyList<int> Horizontal) GetOtherFenceEdges(Guid excludeId)
+    /// nearest-candidate-wins logic picks whichever of the two is actually closest.
+    ///
+    /// marginOverride lets a non-fence caller (LayoutLauncherWidget - not a FenceModel, so it has no
+    /// entry in _models for excludeId to ever match) supply its own margin directly instead of it
+    /// silently resolving to 0 via the _models lookup below. Null (every FenceForm call site) keeps
+    /// the original lookup-by-excludeId behavior unchanged.</summary>
+    public (IReadOnlyList<int> Vertical, IReadOnlyList<int> Horizontal) GetOtherFenceEdges(Guid excludeId, int? marginOverride = null)
     {
-        var margin = _models.Find(m => m.Id == excludeId)?.Margin ?? 0;
+        var margin = marginOverride ?? _models.Find(m => m.Id == excludeId)?.Margin ?? 0;
         var vertical = new List<int>();
         var horizontal = new List<int>();
 

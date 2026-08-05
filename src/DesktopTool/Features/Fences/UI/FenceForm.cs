@@ -4,8 +4,9 @@ using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using DesktopTool.Features.Fences;
 using DesktopTool.Features.Fences.Native;
-using DesktopTool.Native;
 using DesktopTool.Features.Snapping;
+using DesktopTool.Native;
+using DesktopTool.UI;
 
 namespace DesktopTool.Features.Fences.UI;
 
@@ -152,18 +153,11 @@ public sealed class FenceForm : Form
 
     /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
     /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
-    /// fully saturated so the tinted body/title still read as a dark theme - see Tint.</summary>
-    private static readonly Color[] ColorPresets =
-    {
-        Color.FromArgb(200, 80, 80),   // Red
-        Color.FromArgb(210, 140, 70),  // Orange
-        Color.FromArgb(200, 180, 70),  // Yellow
-        Color.FromArgb(90, 170, 100),  // Green
-        Color.FromArgb(70, 170, 170),  // Teal
-        Color.FromArgb(90, 140, 210),  // Blue
-        Color.FromArgb(150, 110, 210), // Purple
-        Color.FromArgb(210, 110, 160), // Pink
-    };
+    /// fully saturated so the tinted body/title still read as a dark theme - see Tint. Now just this
+    /// file's own name for StyleTint.Presets (shared with LayoutLauncherWidget/StyleMenuRows) rather
+    /// than its own array, kept as a property so every existing ColorPresets[i]/.Length call site
+    /// below stays unchanged.</summary>
+    private static Color[] ColorPresets => StyleTint.Presets;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -405,11 +399,10 @@ public sealed class FenceForm : Form
 
     /// <summary>color blended toward black by amount (0.0-1.0) - shared by HeaderBaseColor (starting
     /// from the fixed default body color) and ThemedTitle's exact-tint case (starting from the
-    /// Eyedropper's own picked color instead).</summary>
-    private static Color DarkenTowardBlack(Color color, double amount) => Color.FromArgb(255,
-        (int)Math.Round(color.R * (1 - amount)),
-        (int)Math.Round(color.G * (1 - amount)),
-        (int)Math.Round(color.B * (1 - amount)));
+    /// Eyedropper's own picked color instead). Thin wrapper kept under this file's own name/call
+    /// sites rather than switching every one of them to StyleTint.DarkenTowardBlack directly - same
+    /// behavior, smaller diff.</summary>
+    private static Color DarkenTowardBlack(Color color, double amount) => StyleTint.DarkenTowardBlack(color, amount);
 
     /// <summary>DefaultBodyColor blended toward black by _model.HeaderDarkness (0-100%) - the title
     /// bar's own base color before CurrentTint's separate blend on top (see ThemedTitle), for every
@@ -596,12 +589,7 @@ public sealed class FenceForm : Form
         var rightAligned = new Rectangle(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap),
             SettingsButtonWidth, SettingsButtonHeight);
         var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(rightAligned.Location)), rightAligned.Size);
-        var workingArea = Screen.FromRectangle(buttonScreenRect).WorkingArea;
-        var rows = BuildOptionsMenuRows();
-        var menuSize = DropdownMenu.Measure(rows, _font);
-        var maxTooltipWidth = DropdownMenu.MaxTooltipWidth(rows, _font);
-        var tooltipReach = maxTooltipWidth > 0 ? DropdownMenu.AnchorGap + maxTooltipWidth : 0;
-        return buttonScreenRect.Right + DropdownMenu.AnchorGap + menuSize.Width + tooltipReach > workingArea.Right;
+        return StyleMenuRows.ShouldOpenLeft(buttonScreenRect, BuildOptionsMenuRows(), _font);
     }
 
     /// <summary>Immediately inside the settings button (i.e. between it and the fence body) rather
@@ -2124,11 +2112,12 @@ public sealed class FenceForm : Form
     };
 
     /// <summary>Preset name shown next to its swatch (e.g. "Red") - index must line up with
-    /// ColorPresets, see ShowFenceOptionsMenu/CmdColorPresetBase.</summary>
-    private static readonly string[] ColorPresetNames = { "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink" };
+    /// ColorPresets, see ShowFenceOptionsMenu/CmdColorPresetBase. Same StyleTint.PresetNames rename
+    /// as ColorPresets above.</summary>
+    private static string[] ColorPresetNames => StyleTint.PresetNames;
 
-    private static Color GetColorPreset(int index) => index >= 0 && index < ColorPresets.Length ? ColorPresets[index] : Color.Empty;
-    private static string GetColorPresetName(int index) => index >= 0 && index < ColorPresetNames.Length ? ColorPresetNames[index] : string.Empty;
+    private static Color GetColorPreset(int index) => StyleTint.GetPreset(index);
+    private static string GetColorPresetName(int index) => StyleTint.GetPresetName(index);
 
     private static uint ColorRef(Color c) => (uint)(c.R | (c.G << 8) | (c.B << 16));
 
@@ -2138,14 +2127,9 @@ public sealed class FenceForm : Form
     /// (e.g. a pure ColorDialog pick), since only part of it makes it into the final fill. amount has
     /// no default on purpose - every call site below deliberately picks either TintAmount (the fence's
     /// own adjustable look) or SafeChromeBlend (menu/tooltip/button chrome, pinned regardless of
-    /// TintStrength so fixed WhiteSmoke text/icons on top always stay readable).</summary>
-    private static Color Tint(Color baseColor, Color? tint, double amount) =>
-        tint is not { } t
-            ? baseColor
-            : Color.FromArgb(255,
-                (int)Math.Round(baseColor.R + (t.R - baseColor.R) * amount),
-                (int)Math.Round(baseColor.G + (t.G - baseColor.G) * amount),
-                (int)Math.Round(baseColor.B + (t.B - baseColor.B) * amount));
+    /// TintStrength so fixed WhiteSmoke text/icons on top always stay readable). Thin wrapper over
+    /// StyleTint.Tint, same reasoning as DarkenTowardBlack above.</summary>
+    private static Color Tint(Color baseColor, Color? tint, double amount) => StyleTint.Tint(baseColor, tint, amount);
 
     /// <summary>Only rows worth explaining get one - most menu items are self-explanatory from
     /// their label alone.</summary>

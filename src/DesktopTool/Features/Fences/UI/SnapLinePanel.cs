@@ -13,13 +13,14 @@ namespace DesktopTool.Features.Fences.UI;
 /// re-homed to a different monitor, or removed.
 ///
 /// Every field here is either a plain owner-drawable control (RadioButton/Button, both switched to
-/// FlatStyle.Flat) or one of this file's own nested replacements (ComboButton, DarkNumericField) for
-/// the two stock controls whose native chrome fights a dark theme: a plain ComboBox's dropdown
-/// popup and a NumericUpDown's spin-button pair are both rendered by the OS using visual styles that
-/// bake in a light-theme background no BackColor/ForeColor override reaches (DropdownMenu ran into
-/// the exact same wall with its own tooltip - see its own field comment). Reusing DropdownMenu
-/// itself for the two option pickers keeps their popup pixel-identical to every other dropdown in
-/// the app instead of a second, slightly-different-looking implementation.
+/// FlatStyle.Flat), the shared ComboButton (UI/ComboButton.cs), or this file's own nested
+/// DarkNumericField - all replacements for stock controls whose native chrome fights a dark theme:
+/// a plain ComboBox's dropdown popup and a NumericUpDown's spin-button pair are both rendered by
+/// the OS using visual styles that bake in a light-theme background no BackColor/ForeColor override
+/// reaches (DropdownMenu ran into the exact same wall with its own tooltip - see its own field
+/// comment). Reusing DropdownMenu itself for the two option pickers keeps their popup
+/// pixel-identical to every other dropdown in the app instead of a second, slightly-different-looking
+/// implementation.
 /// </summary>
 internal sealed class SnapLinePanel : Form
 {
@@ -350,105 +351,6 @@ internal sealed class SnapLinePanel : Form
     private readonly record struct ScreenOption(int Index, Rectangle Bounds, Rectangle WorkingArea)
     {
         public override string ToString() => $"Screen {Index + 1} ({Bounds.Width}x{Bounds.Height})";
-    }
-
-    /// <summary>A closed-state combo box face (current selection + dropdown arrow) that opens this
-    /// app's own DropdownMenu instead of a native combo popup - see this file's own top-of-class
-    /// comment for why the native popup couldn't just be recolored. Only ever holds plain strings;
-    /// SnapLinePanel keeps its own parallel list (_screenOptions/_referenceOptions) mapping a
-    /// SelectedIndex back to the real value, the same relationship ComboBox.Items/SelectedItem used
-    /// to have.</summary>
-    private sealed class ComboButton : Control
-    {
-        private const int ArrowSize = 8;
-        private List<string> _items = new();
-
-        public int SelectedIndex { get; private set; } = -1;
-
-        /// <summary>Fired both for a real user pick (OpenDropdown's ItemClicked) and for a
-        /// programmatic SetSelectedIndex call (SelectScreen) - same as ComboBox.SelectedIndexChanged,
-        /// which fires either way too; SnapLinePanel already guards the one handler that cares
-        /// (OnReferenceChanged) with _isPopulating for the bulk-repopulate case.</summary>
-        public event Action<int>? SelectedIndexChanged;
-
-        public ComboButton()
-        {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            BackColor = AppTheme.Field;
-            ForeColor = AppTheme.Text;
-            Cursor = Cursors.Hand;
-        }
-
-        /// <summary>A full repopulate (new item list is a different set of choices, not just a new
-        /// pick among the existing ones) - deliberately silent, unlike SetSelectedIndex, so callers
-        /// that rebuild the whole list (PopulateScreens/PopulateReferenceOptions) don't have to
-        /// re-guard against their own repopulation the way _isPopulating exists for.</summary>
-        public void SetItems(IReadOnlyList<string> items, int selectedIndex)
-        {
-            _items = items.ToList();
-            SelectedIndex = selectedIndex;
-            Invalidate();
-        }
-
-        public void SetSelectedIndex(int index)
-        {
-            SelectedIndex = index;
-            Invalidate();
-            SelectedIndexChanged?.Invoke(index);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var background = new SolidBrush(AppTheme.Field))
-                e.Graphics.FillRectangle(background, ClientRectangle);
-            using (var borderPen = new Pen(AppTheme.Border))
-                e.Graphics.DrawRectangle(borderPen, 0, 0, Width - 1, Height - 1);
-
-            var text = SelectedIndex >= 0 && SelectedIndex < _items.Count ? _items[SelectedIndex] : string.Empty;
-            var textRect = new Rectangle(8, 0, Math.Max(0, Width - 8 - ArrowSize - 16), Height);
-            TextRenderer.DrawText(e.Graphics, text, Font, textRect, AppTheme.Text,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-
-            var cx = Width - 8 - ArrowSize / 2;
-            var cy = Height / 2;
-            using var arrowBrush = new SolidBrush(Color.FromArgb(255, 190, 190, 196));
-            e.Graphics.FillPolygon(arrowBrush, new[]
-            {
-                new Point(cx - ArrowSize / 2, cy - 2),
-                new Point(cx + ArrowSize / 2, cy - 2),
-                new Point(cx, cy + 3),
-            });
-        }
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left)
-                OpenDropdown();
-        }
-
-        private void OpenDropdown()
-        {
-            if (_items.Count == 0)
-                return;
-
-            var rows = new List<DropdownMenu.Row>();
-            for (var i = 0; i < _items.Count; i++)
-            {
-                var index = i; // captured per-row, not the loop variable itself
-                rows.Add(new DropdownMenu.Row(index, _items[index], HasCheckbox: true, IsChecked: () => index == SelectedIndex));
-            }
-
-            var menu = new DropdownMenu(rows, RectangleToScreen(ClientRectangle), preferLeft: false, Font,
-                () => AppTheme.Field, () => AppTheme.Hover, () => AppTheme.Accent, () => AppTheme.Border, () => AppTheme.Field);
-            menu.ItemClicked += id =>
-            {
-                SetSelectedIndex(id);
-                menu.Close();
-            };
-            menu.Show(FindForm());
-        }
     }
 
     /// <summary>A numeric field with the same "- [value] + " shape as DropdownMenu's own IsStepper

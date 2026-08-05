@@ -19,6 +19,22 @@ internal struct RECT
     public int Bottom;
 }
 
+// Used by WindowPlacer.CaptureCurrentLayout to get a minimized window's restore position -
+// GetWindowRect on a minimized window returns its off-screen iconic rect, not where it'll land
+// once un-minimized, so rcNormalPosition (plus the WPF_RESTORETOMAXIMIZED flag, since a window
+// that was maximized before being minimized reports showCmd/style as merely minimized, not
+// maximized) is the only way to capture its real placement.
+[StructLayout(LayoutKind.Sequential)]
+internal struct WINDOWPLACEMENT
+{
+    public uint length;
+    public uint flags;
+    public uint showCmd;
+    public POINT ptMinPosition;
+    public POINT ptMaxPosition;
+    public RECT rcNormalPosition;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct SIZE
 {
@@ -216,8 +232,17 @@ internal static class NativeMethods
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int WS_EX_TOPMOST = 0x00000008;
     public const byte LWA_ALPHA = 0x2;
-    public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_HIDE = 0;
+    public const int SW_MINIMIZE = 6;
+    public const int SW_MAXIMIZE = 3;
+    public const int SW_SHOWNOACTIVATE = 4;
+    public const int SW_RESTORE = 9;
+
+    // WINDOWPLACEMENT.flags - set when a currently-minimized window should restore to maximized
+    // rather than its rcNormalPosition rect (see WINDOWPLACEMENT's own doc comment).
+    public const uint WPF_RESTORETOMAXIMIZED = 0x0002;
+
+    public const uint GW_OWNER = 4;
 
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
@@ -263,6 +288,12 @@ internal static class NativeMethods
     public const int EM_SETSEL = 0x00B1;
 
     public const uint GA_PARENT = 1;
+
+    // Used by WindowPickerOverlay to walk from whatever WindowFromPoint hit (which can be a
+    // child/owned control, e.g. a button inside a dialog) up to the actual unowned top-level window
+    // - GA_ROOT stops at the first ancestor with no parent but can still have an owner, which
+    // WindowPlacer.CaptureWindow's own GW_OWNER check would then reject.
+    public const uint GA_ROOTOWNER = 3;
 
     public const uint PROCESS_VM_OPERATION = 0x0008;
     public const uint PROCESS_VM_READ = 0x0010;
@@ -359,6 +390,12 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
 
+    // GW_OWNER distinguishes a true top-level window from an owned popup/tool window (a plain
+    // owned window still passes IsWindowVisible/EnumWindows just fine, but isn't a real
+    // application window worth matching against when hunting for one - see WindowPlacer).
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsWindowVisible(IntPtr hWnd);
@@ -373,7 +410,24 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    // Used by WindowPlacer.CaptureCurrentLayout to tell a minimized window apart from a normal one
+    // (IsWindowVisible alone doesn't - a minimized window keeps WS_VISIBLE set, just with an
+    // iconic/off-screen GetWindowRect that isn't its real on-screen position - GetWindowPlacement's
+    // rcNormalPosition is used instead for those) and to record a currently-maximized one as
+    // LayoutPlacement.Maximized instead of an approximate Custom rect.
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsZoomed(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -474,6 +528,12 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    // Used by WindowPickerOverlay to find whatever window is beneath the clicked screen point -
+    // called only after that overlay hides itself, since it's otherwise the topmost window at every
+    // point on screen and would just report itself.
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetDC(IntPtr hWnd);
