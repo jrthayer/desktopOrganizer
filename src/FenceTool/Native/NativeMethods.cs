@@ -419,6 +419,26 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
+    // Used by EditBox to translate a WM_KEYDOWN's virtual-key code into the character it represents
+    // and insert it directly, instead of relying on a companion WM_CHAR ever arriving - see EditBox's
+    // own class comment for why that can't be trusted in this app's message loop.
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetKeyboardState(byte[] lpKeyState);
+
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int ToUnicode(uint wVirtKey, uint wScanCode, byte[] lpKeyState,
+        StringBuilder pwszBuff, int cchBuff, uint wFlags);
+
+    [DllImport("user32.dll")]
+    public static extern short GetKeyState(int nVirtKey);
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
     [DllImport("user32.dll")]
     public static extern IntPtr CreatePopupMenu();
 

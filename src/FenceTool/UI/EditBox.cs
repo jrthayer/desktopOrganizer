@@ -14,6 +14,16 @@ namespace FenceTool.UI;
 /// reliably composite child windows on top of its surface - the child still exists and can take
 /// focus, but never visually appears. DragGhostWindow works around the same limitation the same way
 /// (a separate top-level window rather than a child).
+///
+/// Character input is handled entirely off WM_KEYDOWN (see TranslateChar/InsertText/DeleteBackward),
+/// not the Edit control's normal WM_CHAR-driven insertion - confirmed via message tracing that in
+/// this app's message loop, WM_KEYDOWN always reaches this WndProc (with correct focus/foreground
+/// state) but a companion WM_CHAR never does, so typing silently did nothing even though the box
+/// itself opened and Enter/Escape (both pure WM_KEYDOWN, no WM_CHAR involved) worked fine. Rather
+/// than chase why TranslateMessage's generated WM_CHAR never survives to DispatchMessage here, this
+/// sidesteps it: GetKeyboardState+ToUnicode reproduces what WM_CHAR would have carried directly from
+/// the WM_KEYDOWN that's already reliably arriving, and every WM_CHAR is unconditionally swallowed
+/// below so a system where it DOES arrive doesn't double-insert.
 /// </summary>
 internal sealed class EditBox : NativeWindow, IDisposable
 {
@@ -22,8 +32,17 @@ internal sealed class EditBox : NativeWindow, IDisposable
     private const int WM_KILLFOCUS = 0x0008;
     private const int WM_GETDLGCODE = 0x0087;
     private const int WM_SETFONT = 0x0030;
+    private const int WM_CUT = 0x0300;
+    private const int WM_COPY = 0x0301;
+    private const int WM_PASTE = 0x0302;
     private const int VK_RETURN = 0x0D;
     private const int VK_ESCAPE = 0x1B;
+    private const int VK_BACK = 0x08;
+    private const int VK_CONTROL = 0x11;
+
+    private const int EM_GETSEL = 0x00B0;
+    private const int EM_REPLACESEL = 0x00C2;
+    private const uint MAPVK_VK_TO_VSC = 0;
 
     private readonly IntPtr _hFont;
 
@@ -83,13 +102,30 @@ internal sealed class EditBox : NativeWindow, IDisposable
             var vk = m.WParam.ToInt32();
             if (vk == VK_RETURN) { CommitNow(); return; }
             if (vk == VK_ESCAPE) { CancelNow(); return; }
+            if (vk == VK_BACK) { DeleteBackward(); return; }
+
+            // Copy/Cut/Paste/Select-All sent as their own dedicated messages rather than relying on
+            // the Ctrl+C/X/V/A control characters a WM_CHAR would normally have carried - same "don't
+            // depend on WM_CHAR" reasoning as TranslateChar below, and the Edit control natively
+            // handles these three regardless of how they arrive.
+            if ((NativeMethods.GetKeyState(VK_CONTROL) & 0x8000) != 0)
+            {
+                if (vk == 'C') { NativeMethods.SendMessage(Handle, WM_COPY, IntPtr.Zero, IntPtr.Zero); return; }
+                if (vk == 'X') { NativeMethods.SendMessage(Handle, WM_CUT, IntPtr.Zero, IntPtr.Zero); return; }
+                if (vk == 'V') { NativeMethods.SendMessage(Handle, WM_PASTE, IntPtr.Zero, IntPtr.Zero); return; }
+                if (vk == 'A') { NativeMethods.SendMessage(Handle, NativeMethods.EM_SETSEL, IntPtr.Zero, (IntPtr)(-1)); return; }
+            }
+            else if (TranslateChar(vk) is { } ch)
+            {
+                InsertText(ch.ToString());
+                return;
+            }
         }
         else if (m.Msg == WM_CHAR)
         {
-            // Swallow the WM_CHAR that follows Enter/Escape's WM_KEYDOWN so the edit control
-            // doesn't do anything with those characters (already fully handled above).
-            var ch = m.WParam.ToInt32();
-            if (ch == VK_RETURN || ch == VK_ESCAPE) return;
+            // Always swallowed - see this class's own doc comment. Character insertion already
+            // happened (if at all) from the WM_KEYDOWN this followed.
+            return;
         }
         else if (m.Msg == WM_KILLFOCUS)
         {
@@ -99,6 +135,44 @@ internal sealed class EditBox : NativeWindow, IDisposable
         }
 
         base.WndProc(ref m);
+    }
+
+    /// <summary>What WM_CHAR would have carried for this keydown, reproduced directly from the
+    /// current keyboard state via ToUnicode - null for anything that isn't a single printable
+    /// character (navigation keys, dead keys still awaiting a second keystroke, Ctrl-combos already
+    /// handled above, etc.).</summary>
+    private static char? TranslateChar(int vk)
+    {
+        var keyboardState = new byte[256];
+        if (!NativeMethods.GetKeyboardState(keyboardState))
+            return null;
+
+        var scanCode = NativeMethods.MapVirtualKey((uint)vk, MAPVK_VK_TO_VSC);
+        var buffer = new StringBuilder(8);
+        var result = NativeMethods.ToUnicode((uint)vk, scanCode, keyboardState, buffer, buffer.Capacity, 0);
+        if (result != 1)
+            return null;
+
+        var ch = buffer[0];
+        return char.IsControl(ch) ? null : ch;
+    }
+
+    private void InsertText(string text) =>
+        NativeMethods.SendMessage(Handle, EM_REPLACESEL, (IntPtr)1 /* allow undo */, text);
+
+    /// <summary>Deletes the current selection, or the single character before the caret when there
+    /// isn't one - the Edit control's own default Backspace behavior, reimplemented here since it's
+    /// normally WM_CHAR(0x08)-driven and this class no longer trusts WM_CHAR to arrive at all.</summary>
+    private void DeleteBackward()
+    {
+        var selection = (long)NativeMethods.SendMessage(Handle, EM_GETSEL, IntPtr.Zero, IntPtr.Zero);
+        var start = (int)(selection & 0xFFFF);
+        var end = (int)((selection >> 16) & 0xFFFF);
+        if (start == end && start > 0)
+            start--;
+
+        NativeMethods.SendMessage(Handle, NativeMethods.EM_SETSEL, (IntPtr)start, (IntPtr)end);
+        InsertText(string.Empty);
     }
 
     private void CommitNow()
