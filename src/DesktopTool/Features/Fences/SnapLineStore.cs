@@ -15,10 +15,8 @@ public sealed class SnapLineSettings
 
 public sealed class SnapLineStore
 {
-    // Same "FenceTool", not renamed, reasoning as FenceStore.DirectoryPath - this is where
-    // existing users' real snap-line settings already live.
     private static readonly string DirectoryPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FenceTool");
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopTool");
 
     private static readonly string FilePath = Path.Combine(DirectoryPath, "snaplines.json");
 

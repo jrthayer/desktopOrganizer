@@ -4,12 +4,8 @@ namespace DesktopTool.Features.Fences;
 
 public sealed class FenceStore
 {
-    // Kept as "FenceTool", not renamed alongside the app/assembly - this is where existing
-    // users' real fence data already lives; changing it would make every current fence (and the
-    // real desktop files it's hiding, see DesktopIconHider) silently "disappear" until someone
-    // migrates the AppData folder by hand.
     private static readonly string DirectoryPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FenceTool");
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopTool");
 
     private static readonly string FilePath = Path.Combine(DirectoryPath, "fences.json");
 
