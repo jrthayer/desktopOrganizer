@@ -512,4 +512,13 @@ internal static class NativeMethods
     // TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR, which only affect the older classic GDI rendering path.
     [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
     public static extern int SetWindowTheme(IntPtr hWnd, string? pszSubAppName, string? pszSubIdList);
+
+    // Switches a top-level window's own native non-client chrome (title bar/border) to the dark
+    // variant - without this, a plain stock Form (SnapLinePanel) keeps its caption bar rendered in
+    // Windows' light-theme white regardless of how dark the client area underneath is painted,
+    // which would read as two different apps glued together rather than one consistent window.
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 }

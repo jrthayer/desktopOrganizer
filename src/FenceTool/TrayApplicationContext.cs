@@ -1,4 +1,5 @@
 using FenceTool.Fences;
+using FenceTool.UI;
 
 namespace FenceTool;
 
@@ -10,7 +11,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     public TrayApplicationContext()
     {
-        var menu = new ContextMenuStrip();
+        var menu = new ContextMenuStrip
+        {
+            Renderer = new TrayMenuRenderer(),
+            BackColor = AppTheme.Body,
+            ForeColor = AppTheme.Text,
+            Font = AppTheme.Font,
+            // No item carries an icon, so the reserved image-margin strip down the left edge would
+            // otherwise just be an empty light-gray band next to every row - only the check-mark
+            // margin (ShowCheckMargin, left at its default) is actually used, by the two toggles
+            // below.
+            ShowImageMargin = false,
+        };
         menu.Items.Add("New Fence", null, OnNewFence);
         menu.Items.Add("Show/Hide All", null, OnShowHideAll);
         menu.Items.Add(new ToolStripSeparator());
