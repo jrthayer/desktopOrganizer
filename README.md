@@ -1,7 +1,8 @@
 # Fence Tool
 
-A Windows desktop-icon organizer (Stardock Fences-style): draggable, resizable,
-translucent "fence" regions that group desktop icons.
+A Windows desktop app, run from the system tray, built to grow into a
+general desktop-organization toolkit over time. Its first (and currently
+only) feature is **Fences** — see below.
 
 ## Requirements
 
@@ -22,59 +23,16 @@ tray icon for the menu.
 
 ### Fences
 
-A fence is a draggable, resizable, translucent region that groups desktop
-shortcuts under a name you choose. It owns a plain list of file paths
-(`FenceModel.Files`) and draws its own icon+label grid for them rather than
-showing the real desktop icons underneath. Dropping a file onto a fence adds
-a reference to it; dragging an item within a fence reorders it; dragging an
-item onto a *different* fence's window moves it there; dragging an item off
-any fence entirely removes it from that fence (see Desktop icon hiding
-below for what happens to its real desktop icon when that happens). While
-an item is being dragged, a small pill under the cursor names what's about
-to happen — "Move to *Fence Name*", "Change Position", "Remove from
-Fence", or "Move to Recycle Bin" (see Recycle Bin below) — the same way
-Windows itself hints at a drop target.
+Draggable, resizable, translucent "fence" regions (Stardock Fences-style)
+that group your desktop icons under a name you choose, with drag-and-drop
+reordering/moving between fences, a synthetic Recycle Bin item, and
+snap-to-fence/snap-to-guide-line dragging.
 
-**Limitations:** a fence only remembers a file's path, not a live watch on
-it - if the underlying file is later moved or deleted outside Fence Tool,
-its entry stays in the fence but its icon/label may go stale (see
-`FenceForm.GetIcon`'s fallback handling) until removed by hand.
+See [`src/FenceTool/Fences/README.md`](src/FenceTool/Fences/README.md) for
+the full feature writeup, settings reference, and known limitations. All of
+its code lives under [`src/FenceTool/Fences`](src/FenceTool/Fences).
 
-### Desktop icon hiding
-
-When a shortcut is added to a fence, Fence Tool hides its real desktop icon
-so it isn't visible twice — once as the fence's own drawing of it, and once
-underneath on the actual desktop. This works by moving the real file into a
-hidden folder (`hiddenDesktop`) living directly on your own desktop -
-Explorer's desktop view only shows items directly inside the merged
-Desktop/Public Desktop root, not a subfolder's contents, so this makes the
-item disappear the same way moving it anywhere else would, while keeping it
-easy to find by hand (un-hide that one folder in Explorer) rather than
-buried in an app-data folder. Two earlier approaches were tried and dropped
-first: moving the icon's on-screen position off-screen (Explorer would
-periodically undo that on its own, e.g. after full-screening another app on
-a multi-monitor setup, for reasons this app has no reliable way to detect),
-and setting the Hidden attribute on the file in place instead of moving it
-(faster when it worked, but silently could never work at all for a file
-whose own ACL blocks attribute access outright - observed on shortcuts
-originally installed onto the Public Desktop by an elevated installer,
-which kept that restrictive ACL even after being moved elsewhere).
-
-**Limitations:** only applies to files that live directly in your (or the
-Public) Desktop folder - anything dragged in from elsewhere never had a
-real desktop icon to hide. If Fence Tool is closed uncleanly (crash, Task
-Manager kill) rather than via the tray's Exit, the file stays in
-`hiddenDesktop` (fully intact and easy to find by hand) until Fence Tool is
-run again. Adding or removing a shortcut also visibly lags Explorer's
-desktop icon view by roughly 1-2 seconds - the move itself, the shell
-notification, and a forced repaint of the icon list were all confirmed
-(via temporary timing instrumentation) to complete in single-digit
-milliseconds, so this is happening inside Explorer's own rendering after
-being told about the change, not anything on Fence Tool's side. Accepted
-as a known limitation rather than something worth chasing further; see
-Tray menu below for the same issue in a different form.
-
-### Tray menu
+## Tray menu
 
 - **New Fence** — creates a new, empty fence.
 - **Show/Hide All** — toggles every fence's visibility at once; also
@@ -84,17 +42,18 @@ Tray menu below for the same issue in a different form.
   reflects the Run key's actual current state, even if changed by hand.
 - **Show Hidden Files** — toggles Windows' own "Show hidden files, folders,
   and drives" Explorer setting (the same one under Folder Options), exposed
-  here for convenience since fenced items live in the hidden `hiddenDesktop`
-  folder (see Desktop icon hiding above). This is a system-wide setting, not
-  something scoped to Fence Tool - turning it on reveals every hidden file
-  on your machine, not just fenced ones, and the checkbox always reflects
-  its actual current state even if changed from Explorer's own Folder
-  Options instead.
-- **Manage Snap Lines...** — opens the snap-line editor (see Snap lines
-  below).
+  here for convenience since fenced items live in a hidden `hiddenDesktop`
+  folder (see [Fences: Desktop icon hiding](src/FenceTool/Fences/README.md#desktop-icon-hiding)).
+  This is a system-wide setting, not something scoped to Fence Tool -
+  turning it on reveals every hidden file on your machine, not just fenced
+  ones, and the checkbox always reflects its actual current state even if
+  changed from Explorer's own Folder Options instead.
+- **Manage Snap Lines...** — opens the snap-line editor (see
+  [Fences: Snap lines](src/FenceTool/Fences/README.md#snap-lines)).
 - **Add Recycle Bin** — adds the synthetic Recycle Bin fence item (see
-  Recycle Bin below) to a new, dedicated fence. Hidden once one already
-  exists anywhere, since only one is allowed.
+  [Fences: Recycle Bin](src/FenceTool/Fences/README.md#recycle-bin)) to a
+  new, dedicated fence. Hidden once one already exists anywhere, since only
+  one is allowed.
 
 **Limitations:** the Show Hidden Files setting itself takes effect
 immediately, but the desktop's own icon view doesn't visibly pick it up
@@ -111,119 +70,8 @@ directly (the same message the desktop's own right-click Refresh sends).
 The setting is correct immediately either way - only the visual update is
 delayed.
 
-### Recycle Bin
-
-Fence Tool can host a synthetic Recycle Bin icon inside a fence, since the
-real desktop Recycle Bin is a virtual shell item with no filesystem path
-and can't be dragged in directly. **Add Recycle Bin** in the tray menu
-hides the real desktop icon (via the standard Explorer registry setting)
-and creates a new fence containing the synthetic one in its place — it
-always shows the real, state-aware (empty/full) system icon. Dropping a
-file onto it — whether dragged fresh from Explorer or moved out of another
-fence — sends that file to the real Recycle Bin (respecting your normal
-delete-confirmation setting); double-clicking it opens the real Recycle
-Bin folder. Removing the synthetic icon from its fence (dragging it out
-onto the bare desktop) restores the real desktop icon's visibility. Only
-one is allowed to exist across every fence at once.
-
-**Limitations:** dragging a file directly out of the *real* Recycle Bin's
-own folder view (rather than using Explorer's Restore command) and back
-into a fence adds a reference to the file still sitting inside Recycle
-Bin's own internal storage — deleting that fenced item again permanently
-purges it instead of just re-deleting a normal file. Use Explorer's own
-Restore first if you want a previously-deleted file back in a fence.
-
-### Snap lines
-
-While dragging a fence, it can snap to other fences' edges and to custom
-guide lines you place yourself, the same gap-closing feel as Stardock
-Fences' or a design tool's own alignment guides:
-
-- **Left-click drag** snaps to both your custom snap lines and every other
-  fence's edges by default. Holding the **right** mouse button down at the
-  same time hides the fence-edge snapping for that drag, leaving just your
-  custom lines active, if a screen full of fences is making snapping feel
-  too eager.
-- **Manage Snap Lines...** (tray menu) opens an edit overlay: click and
-  drag directly on a line to move it, or use the corner box to add a new
-  one, set its orientation, position (typed in directly, or relative to a
-  screen edge via the From Top/Bottom/Left/Right dropdown), and which
-  monitor it belongs to. A line only offers itself as a snap target on the
-  monitor it was created for.
-- Every monitor gets four default lines — flush with its own top, bottom,
-  left, and right working-area edges — seeded automatically the first time
-  Fence Tool sees it. They can be deleted like any other line, and won't
-  come back once you do (a monitor is only ever seeded once).
-- **Fence Margin** (see Fence settings below) adds a consistent gap instead
-  of snapping flush to whatever it's snapping to.
-
-### Fence settings
-
-Click a fence to activate it, then click **Settings** near the top of its
-title bar to open its settings menu. Two more buttons sit next to it: a
-duplicate-icon button that creates a new, empty fence with this one's
-settings (color, Hide Title/Labels, OCD sizing) copied over, and an **x**
-that deletes the fence (with a confirmation prompt) — its shortcuts aren't
-deleted, only removed from the fence; their real desktop icons are
-restored (see Desktop icon hiding above).
-
-- **Hide Shortcut Names** — hides the label under each icon, showing icons
-  only. Toggle it again to bring labels back.
-- **Hide Title** — hides the fence's title bar entirely, reclaiming that
-  space for the icon grid. The fence can still be moved via its outer
-  margin.
-- **OCD Fence Sizing** — after you resize the fence by hand, automatically
-  snaps it to the tightest size that fits its icons (equivalent to running
-  OCD → Both after every manual resize). Also fires immediately the moment
-  you turn it on, rather than waiting for the next resize.
-- **Fence Margin** — 0-100px (in steps of 5, via the +/- stepper). How far
-  this fence wants to sit from whatever it's snapping to (another fence's
-  edge, or a custom snap line) while being dragged, instead of landing
-  flush against it — see Snap lines above. It's this fence's own value that
-  applies while it's the one being dragged, like a CSS margin.
-- **Full Opacity When Active** — off by default. When on, the fence
-  renders fully opaque while hovered, while being dragged or resized, or
-  while its own settings menu is open, easing back down to the Fence
-  Opacity slider's value once none of those still apply.
-- **Fence Color** — pick one of the eight preset swatches, **Custom...**
-  for the full Windows color picker, **Eyedropper** to sample a color from
-  anywhere on screen (even outside the app), or **Default** to reset to
-  the plain dark theme.
-  - **Header Darkness** — how much black blends into the title bar,
-    independent of the fence's own color.
-  - **Fence Opacity** — how translucent the fence renders, clamped to a
-    15% floor so it can never be dragged all the way to
-    invisible/unclickable.
-  - **Tint Strength** — how strongly a preset/Custom... color blends into
-    the dark theme rather than replacing it outright. An Eyedropper pick
-    uses this the opposite way: 0% (where every fresh pick starts) keeps
-    the sampled color exact, and dragging it up mutes that color back
-    toward the plain theme instead. Picking any color — even re-picking
-    the one already selected — resets Header Darkness, Fence Opacity, and
-    Tint Strength back to their defaults.
-- **OCD** — a submenu with three one-off resize actions: **Both** (trims
-  width and height), **Left/Right** (width only), and **Top/Down** (height
-  only). Each shrinks or grows the fence to fit its current icons without
-  changing its top-left corner.
-
-**Limitations:** Full Opacity When Active's hover detection covers the
-outer margin (used for dragging/resizing) as well as the visible body, but
-it does so via a separate, lower-level Windows message path than normal
-mouse events use — an edge case in a future Windows version changing that
-behavior could in theory leave the margin's hover detection stale, though
-the visible body would be unaffected either way.
-
 ## Status
 
 Early scaffold — see the implementation plan for the staged build-out
 (tray shell, fence UI, desktop icon discovery/repositioning, auto-arrange
 handling, z-order integration, DPI/multi-monitor support, resilience).
-
-## Credits
-
-Fence contents (each fence owning its own list of file references and
-rendering its own icon grid, rather than moving the real desktop icons
-around) follows the approach used by
-[NoFences](https://github.com/Twometer/NoFences), an open-source Stardock
-Fences alternative. No code from that project is reused directly here, but
-its design is what this app's drag-and-drop model is based on.

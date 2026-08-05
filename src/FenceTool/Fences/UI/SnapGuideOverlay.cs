@@ -1,7 +1,7 @@
 using FenceTool.Native;
 using FenceTool.Snapping;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// Non-interactive, click-through display of snap guide lines - shown at idle (custom lines only,

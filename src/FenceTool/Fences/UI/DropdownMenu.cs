@@ -1,6 +1,6 @@
 using System.Drawing.Drawing2D;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// A persistent replacement for the native TrackPopupMenuEx-based fence-options dropdown (see

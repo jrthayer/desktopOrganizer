@@ -1,4 +1,4 @@
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// Controls how a fence window sits relative to the desktop. Kept swappable so the riskier

@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using FenceTool.Fences;
 
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// Hides/restores the real desktop icon behind a fenced shortcut, so it doesn't sit doubled-up

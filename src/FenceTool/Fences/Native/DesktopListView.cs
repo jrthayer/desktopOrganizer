@@ -1,7 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using FenceTool.Native;
 
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 public sealed record DesktopIcon(int Index, string Label, Point Position);
 

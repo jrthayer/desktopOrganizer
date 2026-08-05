@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
-namespace FenceTool;
+namespace FenceTool.Fences;
 
 /// <summary>
 /// Windows' own "Show Recycle Bin" desktop icon setting (Desktop Icon Settings > Recycle Bin

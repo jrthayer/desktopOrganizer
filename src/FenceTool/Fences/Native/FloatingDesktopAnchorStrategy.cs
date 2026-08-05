@@ -1,4 +1,4 @@
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// No-op fallback: leaves the fence as an ordinary top-level window (visually on top of icons,

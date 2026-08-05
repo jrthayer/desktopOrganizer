@@ -1,7 +1,7 @@
 using System.Drawing.Drawing2D;
 using FenceTool.Native;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// A small floating card (icon + label, styled like a fence cell) that follows the cursor during

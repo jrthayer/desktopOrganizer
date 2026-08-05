@@ -1,7 +1,7 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 internal struct SHFILEINFO

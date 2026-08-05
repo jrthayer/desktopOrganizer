@@ -1,6 +1,6 @@
 using FenceTool.Native;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// A full-virtual-screen click-catcher for "Fence Color > Eyedropper" - covers every monitor so a

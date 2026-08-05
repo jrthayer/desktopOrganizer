@@ -1,5 +1,5 @@
-using FenceTool.Native;
-using FenceTool.UI;
+using FenceTool.Fences.Native;
+using FenceTool.Fences.UI;
 
 namespace FenceTool.Fences;
 

@@ -2,8 +2,9 @@ using System.Drawing.Drawing2D;
 using FenceTool.Fences;
 using FenceTool.Native;
 using FenceTool.Snapping;
+using FenceTool.UI;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// Small corner panel shown alongside SnapLineEditOverlay during "snap line edit mode" - lets a new

@@ -1,4 +1,6 @@
-namespace FenceTool.Native;
+using FenceTool.Native;
+
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// An invisible top-level window whose only purpose is to receive the "TaskbarCreated"

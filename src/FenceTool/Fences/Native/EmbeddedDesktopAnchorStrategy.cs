@@ -1,4 +1,6 @@
-namespace FenceTool.Native;
+using FenceTool.Native;
+
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// SetParent's a fence window onto the Progman/WorkerW window that hosts the desktop's icon

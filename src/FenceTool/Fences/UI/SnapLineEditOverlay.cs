@@ -2,7 +2,7 @@ using System.Drawing.Drawing2D;
 using FenceTool.Fences;
 using FenceTool.Snapping;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// Interactive "snap line edit mode" overlay - entered via the tray's "Manage Snap Lines..." item

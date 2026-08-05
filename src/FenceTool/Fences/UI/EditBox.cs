@@ -1,7 +1,7 @@
 using System.Text;
 using FenceTool.Native;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// Thin wrapper around a native Win32 "Edit" control, subclassed (via NativeWindow.AssignHandle) to

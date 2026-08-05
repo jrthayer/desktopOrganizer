@@ -1,7 +1,8 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using FenceTool.Native;
 
-namespace FenceTool.Native;
+namespace FenceTool.Fences.Native;
 
 /// <summary>
 /// Presents a GDI+ bitmap (with a real alpha channel, e.g. antialiased rounded corners) onto a

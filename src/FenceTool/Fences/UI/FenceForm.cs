@@ -3,10 +3,11 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using FenceTool.Fences;
+using FenceTool.Fences.Native;
 using FenceTool.Native;
 using FenceTool.Snapping;
 
-namespace FenceTool.UI;
+namespace FenceTool.Fences.UI;
 
 /// <summary>
 /// A real WinForms Form (custom-drawn, WS_POPUP, no native chrome) rather than a raw NativeWindow.
