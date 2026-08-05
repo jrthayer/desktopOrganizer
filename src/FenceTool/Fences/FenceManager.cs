@@ -62,9 +62,10 @@ public sealed class FenceManager : IDisposable
     }
 
     /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (color,
-    /// HideTitle/HideLabels, OCD sizing, Margin) instead of the defaults - see FenceForm's "+" button
-    /// next to Settings. Deliberately doesn't copy Files: this is "another fence styled the same
-    /// way", not a clone of its contents.</summary>
+    /// HideTitle/HideLabels, OCD sizing, Margin, and now size) instead of the defaults - see
+    /// FenceForm's "+" button next to Settings. Deliberately doesn't copy Files or Bounds' own
+    /// position: this is "another fence styled and sized the same way", not a clone of its contents
+    /// or a stack-on-top-of-the-original duplicate.</summary>
     public void CreateFenceLike(Guid sourceId)
     {
         var source = _models.Find(m => m.Id == sourceId);
@@ -74,7 +75,7 @@ public sealed class FenceManager : IDisposable
         var model = new FenceModel
         {
             Name = $"Fence {_models.Count + 1}",
-            Bounds = NextDefaultBounds(),
+            Bounds = NextDefaultBounds(source.Bounds.Size),
             HideLabels = source.HideLabels,
             HideTitle = source.HideTitle,
             OcdFenceSizing = source.OcdFenceSizing,
@@ -534,11 +535,12 @@ public sealed class FenceManager : IDisposable
             form.SetVisible(visible);
     }
 
-    private Rectangle NextDefaultBounds()
+    private Rectangle NextDefaultBounds(Size? size = null)
     {
         var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
         var offset = (_forms.Count % 8) * 24;
-        return new Rectangle(workArea.Left + 80 + offset, workArea.Top + 80 + offset, 240, 200);
+        var resolvedSize = size ?? new Size(240, 200);
+        return new Rectangle(workArea.Left + 80 + offset, workArea.Top + 80 + offset, resolvedSize.Width, resolvedSize.Height);
     }
 
     private void ShowFence(FenceModel model)
