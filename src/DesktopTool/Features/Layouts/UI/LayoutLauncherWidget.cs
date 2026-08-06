@@ -407,7 +407,12 @@ internal sealed class LayoutLauncherWidget : Form
             // cheap way to know that without computing it, so it's called unconditionally instead.
             _buttonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location);
             WriteBackWindowRect(m.LParam, result.Rect);
-            RenderAndPresent();
+            // Same padding math as WriteBackWindowRect just used for the RECT going back to the OS -
+            // passed straight through instead of letting RenderAndPresent fall back to GetWindowRect
+            // (see its own comment on why that would still read last tick's position here).
+            RenderAndPresent(new Rectangle(
+                result.Rect.Left - OuterMargin, result.Rect.Top - TopBand,
+                result.Rect.Width + OuterMargin * 2, result.Rect.Height + TopBand + BottomBand));
             m.Result = (IntPtr)1;
             return;
         }
@@ -521,7 +526,34 @@ internal sealed class LayoutLauncherWidget : Form
                 _fenceManager.SnapLines.EndDrag();
                 _isMoving = false;
                 _opacity.BeginIfNeeded();
-                RenderAndPresent();
+                // Re-derived from a single fresh GetWindowRect instead of trusting _model.X/Y (kept
+                // live by OnLocationChanged on every WM_MOVE) or the plain no-arg RenderAndPresent
+                // below to still agree with it - this widget's Activated handler (see the
+                // constructor's own wiring) can fire RefreshContent right as this same drag lets go
+                // of the mouse, and if that races ahead of the final OnLocationChanged, RefreshContent
+                // would rebuild Bounds from a body position one tick stale, visibly dropping the
+                // widget away from wherever it just snapped to. Settling _model.X/Y here first, from
+                // the OS's own now-final rect, closes that race regardless of which of the two actually
+                // runs first. TopBand/_buttonRowAtBottom here are still whatever the last WM_MOVING
+                // tick left them as - exactly the split this rect was already written back with (see
+                // WriteBackWindowRect), so peeling it back off first and only THEN recomputing the flip
+                // (a same-tick no-op unless something external moved the window) mirrors WM_MOVING's
+                // own "recompute fresh every time" discipline instead of assuming the fields already
+                // agree with reality.
+                if (NativeMethods.GetWindowRect(Handle, out var exitRect))
+                {
+                    var bodyLocation = new Point(exitRect.Left + OuterMargin, exitRect.Top + TopBand);
+                    _buttonRowAtBottom = ComputeButtonRowAtBottom(bodyLocation);
+                    _model.X = bodyLocation.X;
+                    _model.Y = bodyLocation.Y;
+                    Persist();
+                    RenderAndPresent(new Rectangle(exitRect.Left, exitRect.Top,
+                        exitRect.Right - exitRect.Left, exitRect.Bottom - exitRect.Top));
+                }
+                else
+                {
+                    RenderAndPresent();
+                }
                 break;
         }
     }
@@ -723,13 +755,25 @@ internal sealed class LayoutLauncherWidget : Form
     /// <summary>Resizes the window so its height always matches how many layouts there currently
     /// are (capped at MaxVisibleRows, past which the list scrolls instead of the window growing
     /// forever), then repaints - called after every content change (Save Current Layout, Copy,
-    /// Delete, or returning from the editor) so those changes are reflected immediately rather than
-    /// leaving dead space or a cramped scrollbar. Only ever grows/shrinks from the window's current
-    /// top-left, same as ClientSize always does - doesn't touch _buttonRowAtBottom, since how many
-    /// layouts are saved has no bearing on which side of the screen the button band belongs on.</summary>
+    /// Delete, or returning from the editor), and also on every reactivation (see the constructor's
+    /// own Activated wiring - profiles may have changed via the editor while this was in the
+    /// background). Recomputes _buttonRowAtBottom from the persisted body position fresh every time
+    /// (same formula CreateParams uses), rather than trusting whatever the field currently holds -
+    /// Activated firing right as a drag lets go of the mouse is exactly the moment a plain ClientSize
+    /// resize (top-left pinned, band split taken on faith) would bake in a wrong TopBand/BottomBand
+    /// split and visibly shift the body. Skipped entirely while a drag/resize is already in progress
+    /// - WM_MOVING owns the window's geometry for the whole gesture, and an out-of-band resize here
+    /// would desync the OS's own drag-loop baseline (see WM_MOVING's own comment on that drift).</summary>
     private void RefreshContent()
     {
-        ClientSize = new Size(_model.Width + OuterMargin * 2, GetContentHeight() + TopBand + BottomBand);
+        if (_isMoving || !IsHandleCreated)
+            return;
+
+        var bodyX = _model.X ?? Location.X + OuterMargin;
+        var bodyY = _model.Y ?? Location.Y + TopBand;
+        _buttonRowAtBottom = ComputeButtonRowAtBottom(new Point(bodyX, bodyY));
+        Bounds = new Rectangle(bodyX - OuterMargin, bodyY - TopBand,
+            _model.Width + OuterMargin * 2, GetContentHeight() + TopBand + BottomBand);
         RenderAndPresent();
     }
 
@@ -1268,16 +1312,37 @@ internal sealed class LayoutLauncherWidget : Form
     /// FenceForm.RenderAndPresent - called any time something visible changes (hover, drag, rename,
     /// content) rather than in response to WM_PAINT, since a layered window's content isn't
     /// repainted by Windows itself.</summary>
-    private void RenderAndPresent()
+    private void RenderAndPresent() => RenderAndPresent(null);
+
+    /// <summary>explicitWindowRect lets WM_MOVING pass the rect it just decided on (see
+    /// WriteBackWindowRect) instead of this falling back to GetWindowRect - at that point in the
+    /// drag the OS hasn't actually moved the window yet (WM_MOVING only proposes; the real move
+    /// happens after the handler returns), so GetWindowRect would still report last tick's
+    /// position. On exactly the tick a flip happens, that stale read pairs the OLD window rect with
+    /// the NEW TopBand/BottomBand split the flip just changed - painting/positioning the button row
+    /// on the wrong side for one frame, which is the one frame most likely to be the last thing
+    /// rendered before a drag ends right on a flip. Passing the about-to-be-real rect explicitly
+    /// keeps the paint and the position always in lockstep.</summary>
+    private void RenderAndPresent(Rectangle? explicitWindowRect)
     {
         if (_disposing || !IsHandleCreated)
             return;
 
-        if (!NativeMethods.GetWindowRect(Handle, out var windowRect))
-            return;
+        Rectangle windowRectValue;
+        if (explicitWindowRect is { } explicitRect)
+        {
+            windowRectValue = explicitRect;
+        }
+        else
+        {
+            if (!NativeMethods.GetWindowRect(Handle, out var rawWindowRect))
+                return;
+            windowRectValue = new Rectangle(rawWindowRect.Left, rawWindowRect.Top,
+                rawWindowRect.Right - rawWindowRect.Left, rawWindowRect.Bottom - rawWindowRect.Top);
+        }
 
-        var width = windowRect.Right - windowRect.Left;
-        var height = windowRect.Bottom - windowRect.Top;
+        var width = windowRectValue.Width;
+        var height = windowRectValue.Height;
         if (width <= 0 || height <= 0)
             return;
 
@@ -1381,7 +1446,7 @@ internal sealed class LayoutLauncherWidget : Form
             DrawChromeButton(g, ToWindow(GetManageButtonRect(contentWidth, listAreaHeight)), "Manage Layouts...", _manageButtonArmed, _hoverTarget == HoverTarget.Manage);
         }
 
-        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), _opacity.Value);
+        LayeredWindowPresenter.Present(Handle, buffer, windowRectValue.Location, _opacity.Value);
     }
 
     /// <summary>Every row reserves two glyph strips at its right edge (delete, then copy, working
