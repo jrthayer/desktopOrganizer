@@ -310,6 +310,12 @@ internal sealed class LayoutEditorForm : Form
             ItemHeight = 20,
         };
         list.DrawItem += drawItem ?? (removable ? DrawRemovableListItem : DrawListItem);
+
+        // Same theming battle CreateTextBox already fought (see its own comment) - a themed native
+        // ListBox paints its own blue focus/selection border regardless of BackColor/ForeColor,
+        // clashing with this app's dark theme instead of matching it. Handle isn't created yet here
+        // (control isn't parented), hence HandleCreated rather than calling SetWindowTheme directly.
+        list.HandleCreated += (_, _) => NativeMethods.SetWindowTheme(list.Handle, "", "");
         return list;
     }
 

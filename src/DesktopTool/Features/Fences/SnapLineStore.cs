@@ -43,6 +43,6 @@ public sealed class SnapLineStore
     {
         Directory.CreateDirectory(DirectoryPath);
         var json = JsonSerializer.Serialize(settings, SerializerOptions);
-        File.WriteAllText(FilePath, json);
+        AtomicFile.WriteAllText(FilePath, json);
     }
 }

@@ -9,9 +9,10 @@ namespace DesktopTool.Features.Layouts.UI;
 /// "Layout Launcher" widget - a persistent on-screen panel listing every saved layout, styled and
 /// behaving like a Fence: tint color, header darkness, opacity, tint strength, "full opacity when
 /// active", a hideable title, and the same drag-to-snap-against-other-fences behavior (see
-/// FenceForm's own WM_MOVING handling, which this mirrors). Separate from the tray's own "Layouts"
-/// submenu (a no-window quick-launch path that still exists) and from LayoutEditorForm (which edits
-/// a layout's programs/placements in detail) - this is the one that stays parked on the desktop.
+/// FenceForm's own WM_MOVING handling, which this mirrors). This is the only entry point into the
+/// Layouts feature now - quick-run (click a row), Save Current Layout, and Manage Layouts... all
+/// live here rather than a separate tray submenu. Separate from LayoutEditorForm (which edits a
+/// layout's programs/placements in detail) - this is the one that stays parked on the desktop.
 ///
 /// Unlike FenceForm this is a perfectly ordinary WinForms Form with real child controls, not a
 /// layered/hand-painted window - there's no icon grid, file drag/drop, or desktop-icon interop to
@@ -39,6 +40,8 @@ internal sealed class LayoutLauncherWidget : Form
     private const int RowHeight = 24;
     private const int MaxVisibleRows = 8;
     private const int EmptyStateHeight = 100;
+    private const int ScrollBarWidth = 8;
+    private const int ScrollBarGap = 2;
 
     private const int CmdToggleFullOpacityOnHover = 1;
     private const int CmdColorDefault = 2;
@@ -52,18 +55,28 @@ internal sealed class LayoutLauncherWidget : Form
     private readonly LayoutLauncherStore _store;
 
     private readonly Panel _headerPanel;
+    private readonly Panel _headerSeparator;
     private readonly Label _titleLabel;
     private readonly TextBox _titleBox;
     private readonly DarkButton _settingsButton;
     private readonly DarkButton _closeButton;
     private readonly ContextMenuStrip _headerContextMenu;
-    private readonly ListBox _list;
+    private readonly Panel _listBorder;
+    private readonly ThemedListBox _list;
+    private readonly ThemedScrollBar _scrollBar;
     private readonly Label _emptyLabel;
+    private readonly DarkButton _saveButton;
     private readonly DarkButton _manageButton;
 
     private bool _dropdownOpen;
     private bool _dragging;
     private bool _allowClose;
+
+    // Same trigger set as FenceForm's own _isActive (see that class's own comment on
+    // ActivateFence/OnDeactivate): right-click anywhere on the widget, or a title-bar click with
+    // either button - never a plain left-click on a list row, which just runs that layout the same
+    // way clicking a fence's own shortcut icon doesn't activate the fence either.
+    private bool _isActive;
 
     // Fixed anchor a drag measures against every WM_MOVING tick, instead of trusting the OS's own
     // incrementally-proposed rect - see FenceForm.WndProc's WM_MOVING case for why (drift/stickiness
@@ -71,7 +84,11 @@ internal sealed class LayoutLauncherWidget : Form
     private Point _leftDragStartScreenPoint;
     private Rectangle _dragStartBounds;
 
-    public event EventHandler? ManageLayoutsRequested;
+    // Guid? carries the freshly-captured profile's Id up from OnSaveCurrentLayout (null from
+    // _manageButton, which just wants whichever profile was already selected/none) so
+    // TrayApplicationContext.OpenLayoutEditor can land straight on it, same as the old tray
+    // "Save Current Layout" command used to.
+    public event EventHandler<Guid?>? ManageLayoutsRequested;
 
     public LayoutLauncherWidget(LayoutManager manager, FenceManager fenceManager, LayoutLauncherModel model, LayoutLauncherStore store)
     {
@@ -134,11 +151,14 @@ internal sealed class LayoutLauncherWidget : Form
         };
         _titleBox.Leave += (_, _) => CommitRename();
 
+        // Live Func<Color> getters, not a one-time snapshot - same reason OpenSettingsMenu passes
+        // its own DropdownMenu instances the same way. Without this the "Rename" right-click menu
+        // stayed the plain, untinted AppTheme.Body/Hover TrayMenuRenderer defaults regardless of
+        // whatever tint this widget's own header was showing, unlike FenceForm's equivalent native
+        // rename menu (see FenceForm.ChromeFill/DrawMenuItem), which already tints itself.
         _headerContextMenu = new ContextMenuStrip
         {
-            Renderer = new TrayMenuRenderer(),
-            BackColor = AppTheme.Body,
-            ForeColor = AppTheme.Text,
+            Renderer = new TrayMenuRenderer(() => EffectiveField, () => EffectiveHover, () => AppTheme.Text),
             Font = AppTheme.Font,
         };
         _headerContextMenu.Items.Add("Rename", null, (_, _) => StartRenaming());
@@ -149,27 +169,57 @@ internal sealed class LayoutLauncherWidget : Form
         _closeButton = new DarkButton { Text = "×", Location = new Point(ClientSize.Width - 26, 3), Size = new Size(22, 22) };
         _closeButton.Click += (_, _) => HideAndPersist();
 
-        var headerSeparator = new Panel { Location = new Point(0, HeaderHeight), Size = new Size(ClientSize.Width, 1) };
+        _headerSeparator = new Panel { Location = new Point(0, HeaderHeight), Size = new Size(ClientSize.Width, 1) };
 
         _emptyLabel = new Label
         {
-            Text = "No layouts saved yet.\nUse \"Manage Layouts...\" below\nto create one, or \"Save\nCurrent Layout\" from the\ntray menu.",
+            Text = "No layouts saved yet.\nUse \"Save Current Layout\"\nor \"Manage Layouts...\" below\nto create one.",
             Location = new Point(12, HeaderHeight + 13),
             Size = new Size(ClientSize.Width - 24, EmptyStateHeight),
             ForeColor = AppTheme.DisabledText,
             Visible = false,
         };
 
-        _list = new ListBox
+        // A 1px BackColor-filled frame around a borderless _list, rather than trusting a native
+        // control's own border - a themed native border color can't be pushed to this widget's own
+        // arbitrary tint RGB the way a plain WinForms BackColor can.
+        _listBorder = new Panel
         {
             Location = new Point(12, HeaderHeight + 13),
             Size = new Size(ClientSize.Width - 24, EmptyStateHeight),
-            BorderStyle = BorderStyle.FixedSingle,
-            DrawMode = DrawMode.OwnerDrawFixed,
+        };
+
+        _list = new ThemedListBox
+        {
+            Location = new Point(1, 1),
+            Size = new Size(_listBorder.Width - 2, _listBorder.Height - 2),
             ItemHeight = RowHeight,
         };
         _list.DrawItem += DrawRow;
         _list.MouseDown += OnListMouseDown;
+        _listBorder.Controls.Add(_list);
+
+        _scrollBar = new ThemedScrollBar
+        {
+            TrackColor = () => EffectiveField,
+            ThumbColor = () => EffectiveHover,
+        };
+        _scrollBar.ValueChanged += v => _list.TopIndex = v;
+        // ThemedListBox raises this for every reason its own TopIndex can change (mouse wheel,
+        // arrow keys, or the ValueChanged handler just above setting it directly) - pulling the
+        // thumb's drawn position back into agreement after all of them from a single event, rather
+        // than a native ListBox's own scrolling paths each needing their own separate "resync
+        // afterward" handler the way SyncValue used to be wired up here.
+        _list.TopIndexChanged += v => _scrollBar.SyncValue(v);
+        _listBorder.Controls.Add(_scrollBar);
+
+        _saveButton = new DarkButton
+        {
+            Text = "Save Current Layout",
+            Location = new Point(12, 0),
+            Size = new Size(ClientSize.Width - 24, 28),
+        };
+        _saveButton.Click += (_, _) => OnSaveCurrentLayout();
 
         _manageButton = new DarkButton
         {
@@ -177,15 +227,15 @@ internal sealed class LayoutLauncherWidget : Form
             Location = new Point(12, 0),
             Size = new Size(ClientSize.Width - 24, 28),
         };
-        _manageButton.Click += (_, _) => ManageLayoutsRequested?.Invoke(this, EventArgs.Empty);
+        _manageButton.Click += (_, _) => ManageLayoutsRequested?.Invoke(this, null);
 
-        foreach (var button in new[] { _settingsButton, _closeButton, _manageButton })
+        foreach (var button in new[] { _settingsButton, _closeButton, _saveButton, _manageButton })
             AppTheme.StyleButton(button);
 
         Controls.AddRange(new Control[]
         {
-            _headerPanel, _titleLabel, _titleBox, _settingsButton, _closeButton, headerSeparator,
-            _emptyLabel, _list, _manageButton,
+            _headerPanel, _titleLabel, _titleBox, _settingsButton, _closeButton, _headerSeparator,
+            _emptyLabel, _listBorder, _saveButton, _manageButton,
         });
         // A control added earlier ends up in FRONT of one added later (Control.Controls.Add puts
         // each new child at z-order index 0, ahead of every previous sibling) - without this,
@@ -199,6 +249,7 @@ internal sealed class LayoutLauncherWidget : Form
 
         Activated += (_, _) => RefreshList(); // profiles may have changed via the editor while this was in the background
         AttachHoverTracking(this);
+        AttachActivationTracking(this);
 
         ApplyTint();
         UpdateOpacity();
@@ -206,6 +257,7 @@ internal sealed class LayoutLauncherWidget : Form
         _titleLabel.Visible = !_model.HideTitle;
         RefreshList();
         RepositionHeaderButtons();
+        UpdateHeaderButtonsVisibility();
     }
 
     /// <summary>Shows (persisting Visible) if currently hidden, hides (persisting Visible) if
@@ -244,10 +296,15 @@ internal sealed class LayoutLauncherWidget : Form
     /// <summary>Covers both the "x" button (which calls HideAndPersist directly and never reaches
     /// here) and anything else that might ask this window to close - Alt+F4 while it has focus,
     /// chiefly - so the widget survives everything except an explicit Shutdown() the same way a
-    /// Fence survives everything except "Delete Fence".</summary>
+    /// Fence survives everything except "Delete Fence". Windows logging off/shutting down (or Task
+    /// Manager ending the process) is the one other case this must NOT cancel - e.Cancel = true
+    /// there answers the OS's WM_QUERYENDSESSION with "this app refuses to close", which is exactly
+    /// what left this window blocking shutdown until it got force-killed, corrupting whatever store
+    /// write was in flight at the time instead of exiting (and saving) cleanly.</summary>
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!_allowClose)
+        if (!_allowClose && e.CloseReason is not (CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
+            or CloseReason.ApplicationExitCall or CloseReason.FormOwnerClosing))
         {
             e.Cancel = true;
             HideAndPersist();
@@ -255,6 +312,18 @@ internal sealed class LayoutLauncherWidget : Form
         }
 
         base.OnFormClosing(e);
+    }
+
+    /// <summary>Same "losing focus always deactivates" rule as FenceForm.OnDeactivate - clears
+    /// _isActive unconditionally, even though opening the settings dropdown (a separate top-level
+    /// Form) also fires this. UpdateHeaderButtonsVisibility ORs in _dropdownOpen separately for
+    /// exactly that case, so the buttons stay visible while the dropdown they belong to is still
+    /// open, the same way ShowsSettingsButton ORs in FenceForm's own _dropdown.</summary>
+    protected override void OnDeactivate(EventArgs e)
+    {
+        base.OnDeactivate(e);
+        _isActive = false;
+        UpdateHeaderButtonsVisibility();
     }
 
     protected override void OnLocationChanged(EventArgs e)
@@ -380,6 +449,7 @@ internal sealed class LayoutLauncherWidget : Form
     // move loop (which WndProc's WM_MOVING case above then hooks for snapping) for free.
     private void OnHeaderMouseDown(object? sender, MouseEventArgs e)
     {
+        ActivateWidget();
         if (e.Button != MouseButtons.Left)
             return;
 
@@ -432,16 +502,26 @@ internal sealed class LayoutLauncherWidget : Form
 
     private void RefreshTitleLabel() => _titleLabel.Text = _model.Title;
 
+    /// <summary>"Save Current Layout" - a new profile pre-populated from whatever's actually open
+    /// and where it's sitting right now (see LayoutManager.CaptureCurrentLayout), instead of
+    /// building one program-by-program through the editor. Opens straight into the editor on the
+    /// new profile afterward (via ManageLayoutsRequested) so it's immediately visible and
+    /// renamable rather than just silently appearing in this list.</summary>
+    private void OnSaveCurrentLayout()
+    {
+        var profile = _manager.CaptureCurrentLayout($"Layout {_manager.Profiles.Count + 1}");
+        RefreshList();
+        ManageLayoutsRequested?.Invoke(this, profile.Id);
+    }
+
     private void RefreshList()
     {
         var previouslySelected = _list.SelectedIndex;
 
-        _list.Items.Clear();
-        foreach (var profile in _manager.Profiles)
-            _list.Items.Add(profile.Name);
+        _list.SetItems(_manager.Profiles.Select(p => p.Name));
 
         _emptyLabel.Visible = _manager.Profiles.Count == 0;
-        _list.Visible = _manager.Profiles.Count > 0;
+        _listBorder.Visible = _manager.Profiles.Count > 0;
 
         if (previouslySelected >= 0 && previouslySelected < _list.Items.Count)
             _list.SelectedIndex = previouslySelected;
@@ -456,12 +536,32 @@ internal sealed class LayoutLauncherWidget : Form
     private void UpdateContentSize()
     {
         var count = _manager.Profiles.Count;
-        var contentHeight = count == 0 ? EmptyStateHeight : Math.Min(count, MaxVisibleRows) * RowHeight;
+        var visibleRows = Math.Min(count, MaxVisibleRows);
+        // _listBorder wraps _list in a 1px frame on every side (see _listBorder's own comment), so
+        // sizing _listBorder to exactly visibleRows*RowHeight would leave _list itself 2px short of
+        // a whole multiple of RowHeight - ThemedListBox would still draw correctly (it just clips
+        // whatever height it's given, no native scrollbar to confuse), but the last row would show
+        // 2px shorter than every row above it. The +2 here keeps _list's own height an exact
+        // multiple of RowHeight so every visible row looks the same.
+        var contentHeight = count == 0 ? EmptyStateHeight : visibleRows * RowHeight + 2;
 
-        _list.Size = new Size(_model.Width - 24, contentHeight);
+        _listBorder.Size = new Size(_model.Width - 24, contentHeight);
         _emptyLabel.Size = new Size(_model.Width - 24, contentHeight);
 
-        var manageButtonY = HeaderHeight + 13 + contentHeight + 6;
+        // Configure first - it's what decides _scrollBar.Visible, which _list's own width then
+        // reads below to reclaim the reserved strip when nothing actually needs to scroll (the
+        // same "only take the space when it's needed" call FenceForm's own scrollbar makes for its
+        // fence's outer width - see its own comment at the ScrollbarWidth/ScrollbarMargin add).
+        _scrollBar.Configure(count, visibleRows);
+        var scrollBarReserve = _scrollBar.Visible ? ScrollBarWidth + ScrollBarGap : 0;
+        _list.Size = new Size(_listBorder.Width - 2 - scrollBarReserve, _listBorder.Height - 2);
+        _scrollBar.Location = new Point(_listBorder.Width - 1 - ScrollBarWidth, 1);
+        _scrollBar.Size = new Size(ScrollBarWidth, _listBorder.Height - 2);
+
+        var saveButtonY = HeaderHeight + 13 + contentHeight + 6;
+        _saveButton.Location = new Point(12, saveButtonY);
+
+        var manageButtonY = saveButtonY + 28 + 6;
         _manageButton.Location = new Point(12, manageButtonY);
 
         ClientSize = new Size(_model.Width, manageButtonY + 28 + 12);
@@ -474,7 +574,7 @@ internal sealed class LayoutLauncherWidget : Form
     private void DrawRow(object? sender, DrawItemEventArgs e)
     {
         var selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-        using (var background = new SolidBrush(selected ? AppTheme.Hover : EffectiveField))
+        using (var background = new SolidBrush(selected ? EffectiveHover : EffectiveField))
             e.Graphics.FillRectangle(background, e.Bounds);
 
         if (e.Index < 0 || e.Index >= _list.Items.Count)
@@ -484,11 +584,11 @@ internal sealed class LayoutLauncherWidget : Form
         var copyRect = GetCopyGlyphRect(e.Bounds);
         var textRect = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, copyRect.X - e.Bounds.X - 8, e.Bounds.Height);
 
-        TextRenderer.DrawText(e.Graphics, _list.Items[e.Index]!.ToString(), _list.Font, textRect, AppTheme.Text,
+        TextRenderer.DrawText(e.Graphics, _list.Items[e.Index], _list.Font, textRect, AppTheme.Text,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(e.Graphics, "Copy", _list.Font, copyRect, AppTheme.Accent,
+        TextRenderer.DrawText(e.Graphics, "Copy", _list.Font, copyRect, AppTheme.Text,
             TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
-        TextRenderer.DrawText(e.Graphics, "×", _list.Font, deleteRect, AppTheme.Accent,
+        TextRenderer.DrawText(e.Graphics, "×", _list.Font, deleteRect, AppTheme.Text,
             TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
     }
 
@@ -499,10 +599,9 @@ internal sealed class LayoutLauncherWidget : Form
         new(itemBounds.Right - 24 - 40, itemBounds.Top, 40, itemBounds.Height);
 
     /// <summary>Delete/Copy glyphs are hit-tested first (same right-to-left priority order they're
-    /// drawn in) - anything else on the row runs that layout immediately, no confirmation, matching
-    /// how clicking a layout in the tray's own "Layouts" submenu already works. Delete is the one
-    /// exception that does confirm (see ConfirmAndDelete) - unlike removing a program from inside
-    /// the editor, this throws away an entire saved layout.</summary>
+    /// drawn in) - anything else on the row runs that layout immediately, no confirmation. Delete
+    /// is the one exception that does confirm (see ConfirmAndDelete) - unlike removing a program
+    /// from inside the editor, this throws away an entire saved layout.</summary>
     private void OnListMouseDown(object? sender, MouseEventArgs e)
     {
         var index = _list.IndexFromPoint(e.Location);
@@ -570,7 +669,7 @@ internal sealed class LayoutLauncherWidget : Form
         // button in (X==8 means it's on the flipped-to-left corner) rather than re-deriving it here.
         var preferLeft = _settingsButton.Location.X == 8;
         var dropdown = new DropdownMenu(BuildSettingsRows(), buttonScreenRect, preferLeft, Font,
-            () => EffectiveField, () => AppTheme.Hover, () => AppTheme.Accent, () => AppTheme.Border, () => EffectiveField);
+            () => EffectiveField, () => EffectiveHover, () => EffectiveAccent, () => EffectiveBorder, () => EffectiveField);
         dropdown.ItemClicked += id =>
         {
             HandleCommand(id);
@@ -581,9 +680,49 @@ internal sealed class LayoutLauncherWidget : Form
         {
             _dropdownOpen = false;
             UpdateOpacity();
+            UpdateHeaderButtonsVisibility();
         };
         dropdown.Show(this);
         UpdateOpacity();
+    }
+
+    /// <summary>Same trigger set as FenceForm.ActivateFence - see _isActive's own comment for why
+    /// this is called explicitly from specific handlers instead of piggybacking on Activated, which
+    /// fires for any click that gives this window OS focus, including a plain click on a list row
+    /// just to run that layout.</summary>
+    private void ActivateWidget()
+    {
+        if (_isActive)
+            return;
+        _isActive = true;
+        UpdateHeaderButtonsVisibility();
+    }
+
+    /// <summary>_dropdownOpen ORs in separately from _isActive - see OnDeactivate's own comment for
+    /// why (opening the settings dropdown steals OS focus from this widget, which would otherwise
+    /// hide the very button that dropdown belongs to while it's still open).</summary>
+    private void UpdateHeaderButtonsVisibility()
+    {
+        var show = _isActive || _dropdownOpen;
+        _settingsButton.Visible = show;
+        _closeButton.Visible = show;
+    }
+
+    /// <summary>Right-click anywhere on the widget activates it (see _isActive's own comment) - a
+    /// title-bar click activates too, but that's wired directly into OnHeaderMouseDown instead of
+    /// here since it also has to fire for a left-click, which this recursive walk deliberately
+    /// leaves alone everywhere else (a left-click on a list row just runs that layout). Same
+    /// recursive-attach shape as AttachHoverTracking, for the same reason - each child control is
+    /// its own HWND, so there's no single event on the Form itself that would see every click.</summary>
+    private void AttachActivationTracking(Control control)
+    {
+        control.MouseDown += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right)
+                ActivateWidget();
+        };
+        foreach (Control child in control.Controls)
+            AttachActivationTracking(child);
     }
 
     private void HandleCommand(int id)
@@ -648,6 +787,15 @@ internal sealed class LayoutLauncherWidget : Form
 
     private Color EffectiveBody => StyleTint.Tint(AppTheme.Body, TintColorOrNull, TintFraction);
     private Color EffectiveField => StyleTint.Tint(AppTheme.Field, TintColorOrNull, TintFraction);
+    private Color EffectiveBorder => StyleTint.Tint(AppTheme.Border, TintColorOrNull, TintFraction);
+    private Color EffectiveHover => StyleTint.Tint(AppTheme.Hover, TintColorOrNull, TintFraction);
+
+    // Same "goes the exact chosen color, not just a diluted shift toward it" rule
+    // FenceForm.Accent uses for its own glyphs/pressed-button state - a blended-toward-grey accent
+    // reads muddy at small glyph sizes (the row's Copy/× text, a button's press flash), so this
+    // skips TintFraction and either is the tint outright or, with no tint picked, the same neutral
+    // gray AppTheme.Accent every other untinted control already uses.
+    private Color EffectiveAccent => TintColorOrNull ?? AppTheme.Accent;
 
     // Same relationship as FenceForm.HeaderBaseColor/ThemedTitle - darkened toward black by
     // HeaderDarkness first, and tint blends into what's left of that at a fraction that shrinks
@@ -661,6 +809,9 @@ internal sealed class LayoutLauncherWidget : Form
         var body = EffectiveBody;
         var field = EffectiveField;
         var header = EffectiveHeader;
+        var border = EffectiveBorder;
+        var hover = EffectiveHover;
+        var accent = EffectiveAccent;
 
         BackColor = body;
         ForeColor = AppTheme.Text;
@@ -674,11 +825,18 @@ internal sealed class LayoutLauncherWidget : Form
         _titleLabel.ForeColor = AppTheme.Text;
         _titleBox.BackColor = header;
         _titleBox.ForeColor = AppTheme.Text;
+        _headerSeparator.BackColor = border;
+        _listBorder.BackColor = border;
         _list.BackColor = field;
         _list.ForeColor = AppTheme.Text;
         _emptyLabel.BackColor = body;
-        foreach (var button in new[] { _settingsButton, _closeButton, _manageButton })
+        foreach (var button in new[] { _settingsButton, _closeButton, _saveButton, _manageButton })
+        {
             button.BackColor = field;
+            button.FlatAppearance.BorderColor = border;
+            button.FlatAppearance.MouseOverBackColor = hover;
+            button.FlatAppearance.MouseDownBackColor = accent;
+        }
 
         Invalidate(true);
     }

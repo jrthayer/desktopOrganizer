@@ -2,17 +2,37 @@ using System.Drawing.Drawing2D;
 
 namespace DesktopTool.UI;
 
-/// <summary>Paints the tray icon's own ContextMenuStrip in the same dark palette (AppTheme) as
-/// everything else - DropdownMenu's rows, the Snap Lines panel - instead of Windows' stock light
-/// system-menu look. Unlike ComboBox/NumericUpDown (see SnapLinePanel's own top-of-class comment),
-/// a ToolStripDropDownMenu's items are already painted through this exact Renderer hook rather than
+/// <summary>Paints a ContextMenuStrip in the same dark palette (AppTheme) as everything else -
+/// DropdownMenu's rows, the Snap Lines panel - instead of Windows' stock light system-menu look.
+/// Unlike ComboBox/NumericUpDown (see SnapLinePanel's own top-of-class comment), a
+/// ToolStripDropDownMenu's items are already painted through this exact Renderer hook rather than
 /// baked-in visual-styles chrome, so a full custom renderer is all that's needed here - no
-/// SetWindowTheme/DWM escape hatch required.</summary>
+/// SetWindowTheme/DWM escape hatch required.
+///
+/// Colors default to the plain, untinted AppTheme palette (what the tray icon's own menu -
+/// TrayApplicationContext, this renderer's original and still most common caller - wants, since
+/// there's no per-widget tint to reflect at the app-global tray level). A caller styling a specific
+/// tinted widget's own menu (LayoutLauncherWidget's header-rename ContextMenuStrip, so it actually
+/// matches the header it hangs off of, the same way FenceForm's native rename menu already tints
+/// itself via ChromeFill/DrawMenuItem) can instead pass live Func&lt;Color&gt; getters, the same
+/// "reads current state at paint time, not a snapshot from construction" approach DropdownMenu's
+/// own Func&lt;Color&gt; constructor params already use.</summary>
 internal sealed class TrayMenuRenderer : ToolStripRenderer
 {
+    private readonly Func<Color> _body;
+    private readonly Func<Color> _hover;
+    private readonly Func<Color> _text;
+
+    public TrayMenuRenderer(Func<Color>? body = null, Func<Color>? hover = null, Func<Color>? text = null)
+    {
+        _body = body ?? (() => AppTheme.Body);
+        _hover = hover ?? (() => AppTheme.Hover);
+        _text = text ?? (() => AppTheme.Text);
+    }
+
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
     {
-        using var background = new SolidBrush(AppTheme.Body);
+        using var background = new SolidBrush(_body());
         e.Graphics.FillRectangle(background, e.AffectedBounds);
     }
 
@@ -34,20 +54,20 @@ internal sealed class TrayMenuRenderer : ToolStripRenderer
 
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
     {
-        var color = e.Item.Selected ? AppTheme.Hover : AppTheme.Body;
+        var color = e.Item.Selected ? _hover() : _body();
         using var background = new SolidBrush(color);
         e.Graphics.FillRectangle(background, new Rectangle(Point.Empty, e.Item.Size));
     }
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
-        e.TextColor = AppTheme.Text;
+        e.TextColor = _text();
         base.OnRenderItemText(e);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
     {
-        using (var background = new SolidBrush(AppTheme.Body))
+        using (var background = new SolidBrush(_body()))
             e.Graphics.FillRectangle(background, new Rectangle(Point.Empty, e.Item.Size));
 
         // Same faint white-on-dark divider DropdownMenu draws for its own separator rows.

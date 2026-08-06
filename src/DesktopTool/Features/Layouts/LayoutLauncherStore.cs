@@ -35,6 +35,6 @@ public sealed class LayoutLauncherStore
     {
         Directory.CreateDirectory(DirectoryPath);
         var json = JsonSerializer.Serialize(model, SerializerOptions);
-        File.WriteAllText(FilePath, json);
+        AtomicFile.WriteAllText(FilePath, json);
     }
 }

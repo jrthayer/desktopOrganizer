@@ -32,6 +32,6 @@ public sealed class FenceStore
     {
         Directory.CreateDirectory(DirectoryPath);
         var json = JsonSerializer.Serialize(models, SerializerOptions);
-        File.WriteAllText(FilePath, json);
+        AtomicFile.WriteAllText(FilePath, json);
     }
 }

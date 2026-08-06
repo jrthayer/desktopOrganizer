@@ -30,7 +30,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var layoutLauncherModel = _layoutLauncherStore.Load();
         _layoutLauncher = new LayoutLauncherWidget(_layoutManager, _fenceManager, layoutLauncherModel, _layoutLauncherStore);
-        _layoutLauncher.ManageLayoutsRequested += (_, _) => OpenLayoutEditor(null);
+        _layoutLauncher.ManageLayoutsRequested += (_, profileId) => OpenLayoutEditor(profileId);
 
         var menu = new ContextMenuStrip
         {
@@ -74,16 +74,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Opening += (_, _) => addRecycleBinItem.Visible = !_fenceManager.HasRecycleBin;
         menu.Items.Add(addRecycleBinItem);
         menu.Items.Add(new ToolStripSeparator());
-        // Rebuilt fresh on every open (profile names/count can change from the editor while this
-        // menu is closed) rather than kept in sync incrementally - same "just re-derive from the
-        // live source of truth" approach the checked-state toggles above already use.
-        var layoutsItem = new ToolStripMenuItem("Layouts");
-        menu.Opening += (_, _) => RebuildLayoutsMenu(layoutsItem);
-        menu.Items.Add(layoutsItem);
-        menu.Items.Add(new ToolStripSeparator());
-        // Its own category, separate from "Layouts" above - that submenu is the no-window quick-run
-        // list; this one is for on-screen panels that stay open, currently just the launcher widget
+        // Its own category for on-screen panels that stay open, currently just the launcher widget
         // but named/grouped so a future widget has somewhere to go without another top-level entry.
+        // Layout quick-run/Save Current Layout/Manage Layouts... all live on the widget itself now
+        // (see LayoutLauncherWidget) rather than a separate tray submenu.
         // CheckOnClick would fight ToggleVisible's own idea of the current state (it flips Checked
         // itself before the Click handler runs, same as startupItem/hiddenFilesItem above already
         // avoid) - toggled and reflected explicitly instead, still "read fresh every open" like those.
@@ -130,34 +124,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnAddRecycleBin(object? sender, EventArgs e) =>
         _fenceManager.AddRecycleBin();
-
-    private void RebuildLayoutsMenu(ToolStripMenuItem layoutsItem)
-    {
-        layoutsItem.DropDownItems.Clear();
-        layoutsItem.DropDownItems.Add("Save Current Layout", null, OnSaveCurrentLayout);
-
-        if (_layoutManager.Profiles.Count > 0)
-            layoutsItem.DropDownItems.Add(new ToolStripSeparator());
-        foreach (var profile in _layoutManager.Profiles)
-        {
-            var item = new ToolStripMenuItem(profile.Name);
-            item.Click += async (_, _) => await _layoutManager.RunLayoutAsync(profile.Id);
-            layoutsItem.DropDownItems.Add(item);
-        }
-
-        layoutsItem.DropDownItems.Add(new ToolStripSeparator());
-        layoutsItem.DropDownItems.Add("Manage Layouts...", null, (_, _) => OpenLayoutEditor(null));
-    }
-
-    // "Save Current Layout" is the primary way to build a profile now - arrange windows the way
-    // you want them, then capture, instead of picking each program/monitor/placement by hand
-    // through the editor. Opens straight into the editor on the new profile so it's immediately
-    // visible (and renamable) rather than just silently appearing in the submenu next time it opens.
-    private void OnSaveCurrentLayout(object? sender, EventArgs e)
-    {
-        var profile = _layoutManager.CaptureCurrentLayout($"Layout {_layoutManager.Profiles.Count + 1}");
-        OpenLayoutEditor(profile.Id);
-    }
 
     private void OpenLayoutEditor(Guid? initialProfileId)
     {

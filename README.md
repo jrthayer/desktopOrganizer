@@ -38,7 +38,9 @@ Named profiles that relaunch (or reuse, if already running) a set of
 programs and place each one's window on a chosen monitor and position.
 **Save Current Layout** builds a profile straight from whatever's
 currently open and where it's sitting, instead of picking each program by
-hand through **Manage Layouts...**. All of its code lives under
+hand through **Manage Layouts...**. Both live on the **Layout Launcher**
+widget (tray menu > Widgets > Layout Launcher), which also lists every
+saved layout for one-click run. All of its code lives under
 [`src/DesktopTool/Features/Layouts`](src/DesktopTool/Features/Layouts).
 
 **Limitations:** Save Current Layout can end up including one of Desktop
@@ -71,8 +73,9 @@ deleting by hand via Manage Layouts if you notice it.
   [Fences: Recycle Bin](src/DesktopTool/Features/Fences/README.md#recycle-bin)) to a
   new, dedicated fence. Hidden once one already exists anywhere, since only
   one is allowed.
-- **Layouts** — submenu listing every saved layout profile (click to run
-  one), plus **Save Current Layout** and **Manage Layouts...** (see
+- **Widgets > Layout Launcher** — toggles the Layout Launcher widget, a
+  persistent on-screen panel that lists every saved layout (click to run
+  one) plus **Save Current Layout** and **Manage Layouts...** (see
   [Layouts](#layouts) above).
 
 **Limitations:** the Show Hidden Files setting itself takes effect
