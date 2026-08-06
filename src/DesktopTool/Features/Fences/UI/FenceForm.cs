@@ -231,8 +231,10 @@ public sealed class FenceForm : Form
     private int _scrollbarDragStartOffset;
 
     // The settings button only shows once the fence has been clicked (i.e. is the active window) -
-    // keeps the title bar quiet until you're actually interacting with that particular fence.
-    private bool _isActive;
+    // keeps the title bar quiet until you're actually interacting with that particular fence. Same
+    // shared state machine LayoutLauncherWidget's own gear/close buttons use now (see
+    // WidgetActivation's own doc comment) - Changed is wired to RenderAndPresent in the constructor.
+    private readonly WidgetActivation _activation = new();
 
     // A real child Button control was tried here first, but a window painted via UpdateLayeredWindow
     // (see RenderAndPresent/LayeredWindowPresenter) doesn't compose child windows on top of itself -
@@ -310,18 +312,19 @@ public sealed class FenceForm : Form
     private DropdownMenu? _dropdown;
 
     /// <summary>Whether the settings button should be visible/clickable/drawn as active right now -
-    /// _isActive alone used to be enough, but DropdownMenu is a real WinForms Form, and showing one
-    /// steals OS activation from this fence exactly like any other window would (a native
-    /// TrackPopupMenuEx menu never did that, which is why this wasn't needed before it). Without
-    /// this OR, the instant the dropdown opened, OnDeactivate would flip _isActive back to false and
-    /// the button/active border would vanish right out from under the menu that's still open. This
-    /// intentionally does NOT touch OnDeactivate itself to compensate (e.g. checking whether the
-    /// newly-active window is our own dropdown there) - an earlier version of this fence tried
-    /// exactly that kind of "inspect who's now active" fixup inside OnDeactivate for a similar
-    /// popup-vs-activation conflict and it was racy across multiple fences during activation
-    /// handoff. This is a plain OR'd flag instead, driven only by our own deterministic
-    /// open/close calls (ShowFenceOptionsMenu sets _dropdown; DropdownMenu.FormClosed clears it).</summary>
-    private bool ShowsSettingsButton => _isActive || _dropdown is not null;
+    /// _activation.IsActive alone used to be enough, but DropdownMenu is a real WinForms Form, and
+    /// showing one steals OS activation from this fence exactly like any other window would (a
+    /// native TrackPopupMenuEx menu never did that, which is why this wasn't needed before it).
+    /// Without WidgetActivation's own MenuOpen OR, the instant the dropdown opened, OnDeactivate
+    /// would flip activation back to false and the button/active border would vanish right out from
+    /// under the menu that's still open. This intentionally does NOT touch OnDeactivate itself to
+    /// compensate (e.g. checking whether the newly-active window is our own dropdown there) - an
+    /// earlier version of this fence tried exactly that kind of "inspect who's now active" fixup
+    /// inside OnDeactivate for a similar popup-vs-activation conflict and it was racy across
+    /// multiple fences during activation handoff. MenuOpen is a plain OR'd flag instead, driven only
+    /// by our own deterministic open/close calls (ShowFenceOptionsMenu sets it true alongside
+    /// _dropdown; DropdownMenu.FormClosed clears both).</summary>
+    private bool ShowsSettingsButton => _activation.ShouldShow;
 
     // Guards RenderAndPresent against a reentrant repaint triggered mid-teardown - see Dispose's
     // own comment on WM_ACTIVATE firing synchronously from within base.Dispose(disposing).
@@ -491,6 +494,7 @@ public sealed class FenceForm : Form
         StartPosition = FormStartPosition.Manual;
         AllowDrop = true;
         _toolTip.Draw += DrawTooltip;
+        _activation.Changed += RenderAndPresent;
 
         Reanchor();
         RenderAndPresent();
@@ -557,7 +561,7 @@ public sealed class FenceForm : Form
     /// normally directly above it, but below instead once _buttonRowAtBottom flips there (see its
     /// own comment) so the row stays reachable when the fence is flush with the top of the screen.
     /// Works the same whether or not FenceModel.HideTitle leaves a title bar underneath it. Only
-    /// meaningful while _isActive (the button isn't shown otherwise). Y is negative when above
+    /// meaningful while ShowsSettingsButton (the button isn't shown otherwise). Y is negative when above
     /// content-space y=0, which is fine everywhere this is used (hit-testing, painting via ToWindow,
     /// menu positioning) - painting the "below" case the same way just needs a positive Y past the
     /// content's own bottom instead. Flush with the top-right corner by default; flipped to the
@@ -665,28 +669,22 @@ public sealed class FenceForm : Form
         base.Dispose(disposing);
     }
 
-    // _isActive (settings button + drag-margin visibility) is intentionally NOT driven by OnActivated - that
-    // fires for any click that gives the window OS focus, including a plain click on a shortcut
-    // just to use it. It's set explicitly instead, only for right-click (anywhere) or a title-bar
-    // click (either button) - see WndProc's WM_NCLBUTTONDOWN/WM_NCRBUTTONDOWN handling and
-    // ShowContextMenu. Resizing deliberately does NOT activate the fence - HitTest turns the whole
-    // margin band into a move handle once already active, so resize and move never contend for the
-    // same pixels, but that also means resize has to stay unavailable to the (fence, click) pairs
-    // that would otherwise be ambiguous. Losing focus still deactivates unconditionally.
+    // Activation (settings button + drag-margin visibility, see WidgetActivation) is intentionally
+    // NOT driven by OnActivated - that fires for any click that gives the window OS focus, including
+    // a plain click on a shortcut just to use it. It's set explicitly instead, only for right-click
+    // (anywhere) or a title-bar click (either button) - see WndProc's WM_NCLBUTTONDOWN/
+    // WM_NCRBUTTONDOWN handling and ShowContextMenu. Resizing deliberately does NOT activate the
+    // fence - HitTest turns the whole margin band into a move handle once already active, so resize
+    // and move never contend for the same pixels, but that also means resize has to stay unavailable
+    // to the (fence, click) pairs that would otherwise be ambiguous. Losing focus still deactivates
+    // unconditionally.
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
-        _isActive = false;
-        RenderAndPresent();
+        _activation.Deactivate();
     }
 
-    private void ActivateFence()
-    {
-        if (_isActive)
-            return;
-        _isActive = true;
-        RenderAndPresent();
-    }
+    private void ActivateFence() => _activation.Activate();
 
     protected override void OnDragEnter(DragEventArgs e)
     {
@@ -1047,7 +1045,7 @@ public sealed class FenceForm : Form
 
     /// <summary>Tracks whether the cursor is over this fence's client area, for "Full Opacity On
     /// Hover" (see IsHovered/TargetOpacity) - not the same as _hoverIndex (which icon, if any, is
-    /// hovered) or ShowsSettingsButton's _isActive. Client-area only; the margin/resize band is
+    /// hovered) or ShowsSettingsButton's own _activation. Client-area only; the margin/resize band is
     /// covered separately by _isNonClientHovered (see WM_NCMOUSEMOVE/WM_NCMOUSELEAVE in WndProc).</summary>
     protected override void OnMouseEnter(EventArgs e)
     {
@@ -1460,12 +1458,13 @@ public sealed class FenceForm : Form
 
         if (ShowsSettingsButton)
         {
-            // ShowsSettingsButton, not just _isActive - opening the settings dropdown steals OS
-            // activation from the fence (it's a separate top-level Form), which flips _isActive false
-            // via OnDeactivate even though the button/active border deliberately stay showing (see
-            // ShowsSettingsButton's own comment). Gating on _isActive alone let the resize hit-test
-            // codes below fire while the dropdown was still open, so dragging an edge resized the
-            // fence out from under its own still-open menu.
+            // ShowsSettingsButton (IsActive || MenuOpen), not just whether this fence is the active
+            // window - opening the settings dropdown steals OS activation from the fence (it's a
+            // separate top-level Form), which deactivates it via OnDeactivate even though the
+            // button/active border deliberately stay showing (see ShowsSettingsButton's own
+            // comment). Gating on plain activation alone let the resize hit-test codes below fire
+            // while the dropdown was still open, so dragging an edge resized the fence out from
+            // under its own still-open menu.
             //
             // The margin band is a move handle instead of a resize band while active - the same
             // footprint resize used to claim, just reassigned rather than split into two adjacent
@@ -1566,7 +1565,7 @@ public sealed class FenceForm : Form
 
             // A brighter, thicker border signals the fence is active (or its settings dropdown is
             // still open, see ShowsSettingsButton) - the margin band around it is now a move handle
-            // while genuinely _isActive (see HitTest), and this highlight hugs the fence's actual
+            // while genuinely activated (see HitTest), and this highlight hugs the fence's actual
             // edge directly rather than a separate frame floating out in the margin.
             using var borderPen = new Pen(ShowsSettingsButton ? ThemedActiveBorder : ThemedBorder, ShowsSettingsButton ? ActiveBorderWidth : 1f);
             // Pen.LineJoin defaults to Miter, which squares off the outer edge of a thick stroke at
@@ -1969,6 +1968,11 @@ public sealed class FenceForm : Form
         // SafeChromeBlend, not TintAmount - same fixed-WhiteSmoke-text reasoning as ChromeFill.
         _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ChromeFill, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
             () => Tint(Color.Black, CurrentTint, SafeChromeBlend));
+        // _activation.MenuOpen mirrors _dropdown's own non-null state (see ShowsSettingsButton's own
+        // comment) - its Changed handler (wired to RenderAndPresent in the constructor) covers the
+        // repaint this used to do explicitly, both here and in FormClosed below. RenderAndPresent
+        // already no-ops via _disposing if the fence itself is going away too.
+        _activation.MenuOpen = true;
         _dropdown.ItemClicked += id =>
         {
             HandleCommand(id);
@@ -1977,11 +1981,7 @@ public sealed class FenceForm : Form
         _dropdown.FormClosed += (_, _) =>
         {
             _dropdown = null;
-            // ShowsSettingsButton depends on _dropdown - now that it's gone, the button/active
-            // border need to actually disappear if _isActive had already gone false while it was
-            // still open, instead of staying stuck looking active until some other render trigger.
-            // RenderAndPresent already no-ops via _disposing if the fence itself is going away too.
-            RenderAndPresent();
+            _activation.MenuOpen = false;
             // TargetOpacity depends on _dropdown being non-null - now that it's closing, ease back
             // down off Full Opacity if nothing else (hover, a drag) is still keeping it up.
             BeginOpacityAnimationIfNeeded();

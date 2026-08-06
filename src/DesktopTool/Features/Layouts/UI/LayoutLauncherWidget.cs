@@ -68,15 +68,13 @@ internal sealed class LayoutLauncherWidget : Form
     private readonly DarkButton _saveButton;
     private readonly DarkButton _manageButton;
 
-    private bool _dropdownOpen;
     private bool _dragging;
     private bool _allowClose;
 
-    // Same trigger set as FenceForm's own _isActive (see that class's own comment on
-    // ActivateFence/OnDeactivate): right-click anywhere on the widget, or a title-bar click with
-    // either button - never a plain left-click on a list row, which just runs that layout the same
-    // way clicking a fence's own shortcut icon doesn't activate the fence either.
-    private bool _isActive;
+    // Same shared state machine FenceForm's own settings/new/delete buttons use (see
+    // WidgetActivation's own doc comment) - Changed is wired in the constructor to keep the
+    // gear/close buttons and FullOpacityOnHover's own "active" check in sync with it.
+    private readonly WidgetActivation _activation = new();
 
     // Fixed anchor a drag measures against every WM_MOVING tick, instead of trusting the OS's own
     // incrementally-proposed rect - see FenceForm.WndProc's WM_MOVING case for why (drift/stickiness
@@ -250,6 +248,8 @@ internal sealed class LayoutLauncherWidget : Form
         Activated += (_, _) => RefreshList(); // profiles may have changed via the editor while this was in the background
         AttachHoverTracking(this);
         AttachActivationTracking(this);
+        _activation.Changed += UpdateHeaderButtonsVisibility;
+        _activation.Changed += UpdateOpacity;
 
         ApplyTint();
         UpdateOpacity();
@@ -314,16 +314,14 @@ internal sealed class LayoutLauncherWidget : Form
         base.OnFormClosing(e);
     }
 
-    /// <summary>Same "losing focus always deactivates" rule as FenceForm.OnDeactivate - clears
-    /// _isActive unconditionally, even though opening the settings dropdown (a separate top-level
-    /// Form) also fires this. UpdateHeaderButtonsVisibility ORs in _dropdownOpen separately for
-    /// exactly that case, so the buttons stay visible while the dropdown they belong to is still
-    /// open, the same way ShowsSettingsButton ORs in FenceForm's own _dropdown.</summary>
+    /// <summary>Same "losing focus always deactivates" rule as FenceForm.OnDeactivate - fires even
+    /// though opening the settings dropdown (a separate top-level Form) also triggers this; see
+    /// WidgetActivation's own doc comment for why MenuOpen has to stay tracked separately from
+    /// IsActive for that case.</summary>
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
-        _isActive = false;
-        UpdateHeaderButtonsVisibility();
+        _activation.Deactivate();
     }
 
     protected override void OnLocationChanged(EventArgs e)
@@ -449,7 +447,7 @@ internal sealed class LayoutLauncherWidget : Form
     // move loop (which WndProc's WM_MOVING case above then hooks for snapping) for free.
     private void OnHeaderMouseDown(object? sender, MouseEventArgs e)
     {
-        ActivateWidget();
+        _activation.Activate();
         if (e.Button != MouseButtons.Left)
             return;
 
@@ -491,6 +489,7 @@ internal sealed class LayoutLauncherWidget : Form
         _titleBox.Visible = false;
         if (!_model.HideTitle)
             _titleLabel.Visible = true;
+        DeactivateAfterRename();
     }
 
     private void CancelRename()
@@ -498,7 +497,19 @@ internal sealed class LayoutLauncherWidget : Form
         _titleBox.Visible = false;
         if (!_model.HideTitle)
             _titleLabel.Visible = true;
+        DeactivateAfterRename();
     }
+
+    /// <summary>FenceForm's own rename box (EditBox) is a separate top-level popup window, so
+    /// starting a rename there steals OS activation away from the fence, and OnDeactivate clears
+    /// _activation as a natural side effect - it stays cleared afterward too, since reactivating
+    /// isn't driven by OnActivated (see WidgetActivation's own doc comment). _titleBox here is an
+    /// ordinary WinForms child control instead (there's a real Controls collection to host it in,
+    /// unlike FenceForm), so focusing/unfocusing it never changes which top-level window has OS
+    /// focus - nothing would otherwise ever deactivate this widget after a rename, leaving the
+    /// gear/close buttons stuck visible until some unrelated window happens to steal focus. This
+    /// re-creates that same "renaming leaves it deactivated" outcome explicitly instead.</summary>
+    private void DeactivateAfterRename() => _activation.Deactivate();
 
     private void RefreshTitleLabel() => _titleLabel.Text = _model.Title;
 
@@ -675,51 +686,31 @@ internal sealed class LayoutLauncherWidget : Form
             HandleCommand(id);
             dropdown.RefreshChecks();
         };
-        _dropdownOpen = true;
-        dropdown.FormClosed += (_, _) =>
-        {
-            _dropdownOpen = false;
-            UpdateOpacity();
-            UpdateHeaderButtonsVisibility();
-        };
+        // Changed (wired in the constructor) handles UpdateOpacity/UpdateHeaderButtonsVisibility
+        // for both of these - no need to call either explicitly here.
+        _activation.MenuOpen = true;
+        dropdown.FormClosed += (_, _) => _activation.MenuOpen = false;
         dropdown.Show(this);
-        UpdateOpacity();
     }
 
-    /// <summary>Same trigger set as FenceForm.ActivateFence - see _isActive's own comment for why
-    /// this is called explicitly from specific handlers instead of piggybacking on Activated, which
-    /// fires for any click that gives this window OS focus, including a plain click on a list row
-    /// just to run that layout.</summary>
-    private void ActivateWidget()
-    {
-        if (_isActive)
-            return;
-        _isActive = true;
-        UpdateHeaderButtonsVisibility();
-    }
-
-    /// <summary>_dropdownOpen ORs in separately from _isActive - see OnDeactivate's own comment for
-    /// why (opening the settings dropdown steals OS focus from this widget, which would otherwise
-    /// hide the very button that dropdown belongs to while it's still open).</summary>
     private void UpdateHeaderButtonsVisibility()
     {
-        var show = _isActive || _dropdownOpen;
-        _settingsButton.Visible = show;
-        _closeButton.Visible = show;
+        _settingsButton.Visible = _activation.ShouldShow;
+        _closeButton.Visible = _activation.ShouldShow;
     }
 
-    /// <summary>Right-click anywhere on the widget activates it (see _isActive's own comment) - a
-    /// title-bar click activates too, but that's wired directly into OnHeaderMouseDown instead of
-    /// here since it also has to fire for a left-click, which this recursive walk deliberately
-    /// leaves alone everywhere else (a left-click on a list row just runs that layout). Same
-    /// recursive-attach shape as AttachHoverTracking, for the same reason - each child control is
-    /// its own HWND, so there's no single event on the Form itself that would see every click.</summary>
+    /// <summary>Right-click anywhere on the widget activates it (see WidgetActivation's own doc
+    /// comment) - a title-bar click activates too, but that's wired directly into OnHeaderMouseDown
+    /// instead of here since it also has to fire for a left-click, which this recursive walk
+    /// deliberately leaves alone everywhere else (a left-click on a list row just runs that layout).
+    /// Same recursive-attach shape as AttachHoverTracking, for the same reason - each child control
+    /// is its own HWND, so there's no single event on the Form itself that would see every click.</summary>
     private void AttachActivationTracking(Control control)
     {
         control.MouseDown += (_, e) =>
         {
             if (e.Button == MouseButtons.Right)
-                ActivateWidget();
+                _activation.Activate();
         };
         foreach (Control child in control.Controls)
             AttachActivationTracking(child);
@@ -852,7 +843,7 @@ internal sealed class LayoutLauncherWidget : Form
             return;
         }
 
-        var active = ClientRectangle.Contains(PointToClient(Cursor.Position)) || _dropdownOpen || _dragging;
+        var active = ClientRectangle.Contains(PointToClient(Cursor.Position)) || _activation.MenuOpen || _dragging;
         Opacity = active ? 1.0 : _model.Opacity / 100.0;
     }
 
