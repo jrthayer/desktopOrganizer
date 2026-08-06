@@ -1,5 +1,6 @@
 using DesktopTool.Features.Fences.Native;
 using DesktopTool.Features.Fences.UI;
+using DesktopTool.Native;
 
 namespace DesktopTool.Features.Fences;
 
@@ -61,11 +62,12 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
-    /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (color,
-    /// HideTitle/HideLabels, OCD sizing, Margin, and now size) instead of the defaults - see
-    /// FenceForm's "+" button next to Settings. Deliberately doesn't copy Files or Bounds' own
-    /// position: this is "another fence styled and sized the same way", not a clone of its contents
-    /// or a stack-on-top-of-the-original duplicate.</summary>
+    /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (every
+    /// IWidgetStyle knob - color/HeaderDarkness/Opacity/FullOpacityOnHover/TintStrength/Margin -
+    /// plus HideTitle/HideLabels/OCD sizing and size) instead of the defaults - see FenceForm's "+"
+    /// button next to Settings. Deliberately doesn't copy Files or Bounds' own position: this is
+    /// "another fence styled and sized the same way", not a clone of its contents or a
+    /// stack-on-top-of-the-original duplicate.</summary>
     public void CreateFenceLike(Guid sourceId)
     {
         var source = _models.Find(m => m.Id == sourceId);
@@ -80,6 +82,11 @@ public sealed class FenceManager : IDisposable
             HideTitle = source.HideTitle,
             OcdFenceSizing = source.OcdFenceSizing,
             TintColor = source.TintColor,
+            TintIsExact = source.TintIsExact,
+            HeaderDarkness = source.HeaderDarkness,
+            Opacity = source.Opacity,
+            FullOpacityOnHover = source.FullOpacityOnHover,
+            TintStrength = source.TintStrength,
             Margin = source.Margin,
         };
         _models.Add(model);
@@ -310,7 +317,7 @@ public sealed class FenceManager : IDisposable
     /// <summary>Finds the fence window (other than excludeId) whose window rect contains
     /// screenPoint - used when an item drag started in one fence is released over another one, to
     /// tell whether it landed on a fence at all and which.</summary>
-    public FenceForm? FindFenceAt(Point screenPoint, Guid excludeId)
+    internal FenceForm? FindFenceAt(Point screenPoint, Guid excludeId)
     {
         foreach (var (id, form) in _forms)
         {
@@ -318,6 +325,25 @@ public sealed class FenceManager : IDisposable
                 return form;
         }
         return null;
+    }
+
+    /// <summary>Restacks every OTHER tracked fence to the very bottom of the z-order, called right
+    /// after activeId's own fence pushes itself there too (see FenceForm.OnDragEnd) - SetWindowPos's
+    /// HWND_BOTTOM only ever repositions the one window it's called on, to underneath literally
+    /// everything currently in the z-order, so restacking the others afterward (each individually,
+    /// order among them doesn't matter) pushes every one of them below wherever activeId's own fence
+    /// already settled, without this ever touching - or being able to elevate a fence above - real
+    /// windows' own positions. Without this, a fence you just finished dragging would drop to the
+    /// bottom of EVERYTHING, including every other fence it overlaps, rather than just behind real
+    /// windows the way a fence is meant to.</summary>
+    internal void RestackOtherFencesBehind(Guid activeId)
+    {
+        foreach (var (id, form) in _forms)
+        {
+            if (id != activeId)
+                NativeMethods.SetWindowPos(form.Handle, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
     }
 
     /// <summary>Candidate snap positions from every other currently-tracked fence's edges - Left/

@@ -136,7 +136,7 @@ public sealed class SnapLineManager : IDisposable
         var monitor = Screen.FromRectangle(proposedBody).Bounds;
         var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates, includeCustomLines);
         var result = SnapEngine.SnapMove(proposedBody, vCandidates, hCandidates);
-        UpdateDragOverlay(result, monitor, includeCustomLines, verticalCandidates, horizontalCandidates);
+        UpdateDragOverlay(result, monitor, margin, includeCustomLines, verticalCandidates, horizontalCandidates);
         return result;
     }
 
@@ -145,7 +145,7 @@ public sealed class SnapLineManager : IDisposable
         var monitor = Screen.FromRectangle(proposedBody).Bounds;
         var (vCandidates, hCandidates) = MergeCandidates(monitor, margin, verticalCandidates, horizontalCandidates, includeCustomLines: true);
         var result = SnapEngine.SnapResize(proposedBody, activeEdges, vCandidates, hCandidates);
-        UpdateDragOverlay(result, monitor, includeCustomLines: true, verticalCandidates, horizontalCandidates);
+        UpdateDragOverlay(result, monitor, margin, includeCustomLines: true, verticalCandidates, horizontalCandidates);
         return result;
     }
 
@@ -247,8 +247,16 @@ public sealed class SnapLineManager : IDisposable
     /// happen to be snapped right now - same "shown the whole time, highlighted when matched"
     /// treatment BeginDrag already gives the custom lines in the includeCustomLines-true case, see
     /// its own comment), letting a right-button drag show every other fence's edge as a guide, not
-    /// just the one it's currently snapped to.</summary>
-    private void UpdateDragOverlay(SnapResult result, Rectangle monitor, bool includeCustomLines, IReadOnlyList<int> extraVertical, IReadOnlyList<int> extraHorizontal)
+    /// just the one it's currently snapped to.
+    ///
+    /// margin gets each custom line its own pair of extra guide-line entries at Position-margin/
+    /// Position+margin, mirroring GetOtherFenceEdges' own margin-offset entries in extraVertical/
+    /// extraHorizontal below (each shown and highlighted as its own line, not folded into the flush
+    /// one) - without this, a fence that snapped to one of MergeCandidates' own margin-offset
+    /// candidates (see its own comment - those candidates are real, already being offered) settled
+    /// margin pixels away from the line with no guide there and the line itself never highlighting,
+    /// reading as "the margin isn't doing anything" even though the snap itself was working.</summary>
+    private void UpdateDragOverlay(SnapResult result, Rectangle monitor, int margin, bool includeCustomLines, IReadOnlyList<int> extraVertical, IReadOnlyList<int> extraHorizontal)
     {
         _guideOverlay ??= new SnapGuideOverlay();
 
@@ -259,12 +267,21 @@ public sealed class SnapLineManager : IDisposable
         // that's combining both buttons' candidates (see FenceForm's own MouseButtons check in
         // WM_MOVING/UpdateRightDrag) shows both sets of guide lines together, not just whichever
         // one this call happened to lead with.
-        var lines = includeCustomLines
-            ? _lines.Select(l => (l.Orientation, l.Position,
-                Highlighted: l.Orientation == SnapOrientation.Horizontal ? hSnapped.Contains(l.Position) : vSnapped.Contains(l.Position),
-                Span: MonitorSpanOf(l)))
-                .ToList()
-            : new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
+        var lines = new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
+        if (includeCustomLines)
+        {
+            foreach (var l in _lines)
+            {
+                var span = MonitorSpanOf(l);
+                var snapped = l.Orientation == SnapOrientation.Horizontal ? hSnapped : vSnapped;
+                lines.Add((l.Orientation, l.Position, snapped.Contains(l.Position), span));
+                if (margin > 0)
+                {
+                    lines.Add((l.Orientation, l.Position - margin, snapped.Contains(l.Position - margin), span));
+                    lines.Add((l.Orientation, l.Position + margin, snapped.Contains(l.Position + margin), span));
+                }
+            }
+        }
 
         var customPositions = includeCustomLines
             ? _lines.Select(l => (l.Orientation, l.Position)).ToHashSet()
