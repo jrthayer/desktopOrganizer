@@ -1,19 +1,19 @@
 using System.Text;
 using DesktopTool.Native;
 
-namespace DesktopTool.Features.Fences.UI;
+namespace DesktopTool.UI;
 
 /// <summary>
 /// Thin wrapper around a native Win32 "Edit" control, subclassed (via NativeWindow.AssignHandle) to
-/// intercept Enter (commit) and Escape (cancel) - used for the fence rename textbox since FenceForm
-/// is a raw window with no WinForms Controls collection to host a real TextBox in.
+/// intercept Enter (commit) and Escape (cancel) - used for rename textboxes on layered/hand-painted
+/// windows (FenceForm, LayoutLauncherWidget) that have no WinForms Controls collection to host a
+/// real TextBox in.
 ///
-/// A top-level WS_POPUP window owned by the fence, positioned in screen coordinates - NOT a
-/// WS_CHILD of the fence, even though visually it sits "inside" it. FenceForm paints itself via
-/// UpdateLayeredWindow (see LayeredWindowPresenter), and a layered window updated that way does not
-/// reliably composite child windows on top of its surface - the child still exists and can take
-/// focus, but never visually appears. DragGhostWindow works around the same limitation the same way
-/// (a separate top-level window rather than a child).
+/// A top-level WS_POPUP window owned by the caller, positioned in screen coordinates - NOT a
+/// WS_CHILD, even though visually it sits "inside" the caller. A layered window updated via
+/// UpdateLayeredWindow does not reliably composite child windows on top of its surface - the child
+/// still exists and can take focus, but never visually appears. DragGhostWindow works around the
+/// same limitation the same way (a separate top-level window rather than a child).
 ///
 /// Character input is handled entirely off WM_KEYDOWN (see TranslateChar/InsertText/DeleteBackward),
 /// not the Edit control's normal WM_CHAR-driven insertion - confirmed via message tracing that in
@@ -65,8 +65,8 @@ internal sealed class EditBox : NativeWindow, IDisposable
 
     /// <summary>bounds is in SCREEN coordinates (not parent-client-relative) - this is a top-level
     /// window, not a child, so that's what CreateWindowEx's x/y expect. Callers position it via
-    /// Control.PointToScreen on whatever window-relative rect the fence itself would have used.
-    /// font is applied via WM_SETFONT so the box's text matches the fence's own font instead of the
+    /// Control.PointToScreen on whatever window-relative rect the caller itself would have used.
+    /// font is applied via WM_SETFONT so the box's text matches the caller's own font instead of the
     /// default system dialog font; colors are handled separately by the owner responding to
     /// WM_CTLCOLOREDIT (a plain Edit control has no owner-draw hook of its own for that).</summary>
     public EditBox(IntPtr owner, string initialText, Rectangle bounds, Font font)

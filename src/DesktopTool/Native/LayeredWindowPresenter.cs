@@ -1,8 +1,7 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
-using DesktopTool.Native;
 
-namespace DesktopTool.Features.Fences.Native;
+namespace DesktopTool.Native;
 
 /// <summary>
 /// Presents a GDI+ bitmap (with a real alpha channel, e.g. antialiased rounded corners) onto a

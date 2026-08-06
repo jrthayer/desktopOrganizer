@@ -26,13 +26,21 @@ public sealed class LayoutLauncherModel : IWidgetStyle
     /// and same "the row itself stays, just the label goes" meaning as FenceModel.HideTitle.</summary>
     public bool HideTitle { get; set; }
 
-    // IWidgetStyle - see that interface's own doc comments for what each one actually does. Same
-    // defaults as FenceModel's own DefaultHeaderDarkness/DefaultOpacity/DefaultTintStrength.
+    // Same values as FenceModel's own DefaultHeaderDarkness/DefaultOpacity/DefaultTintStrength -
+    // named here too (rather than left as bare property initializers) since LayoutLauncherWidget.
+    // SetTintColor needs to reset back to these same three whenever a preset/Custom... color is
+    // picked, mirroring FenceManager.SetTintColor's own reset-on-pick behavior.
+    public const int DefaultHeaderDarkness = 65;
+    public const int DefaultOpacity = 85;
+    public const int DefaultTintStrength = 55;
+
+    // IWidgetStyle - see that interface's own doc comments for what each one actually does.
     public int? TintColor { get; set; }
-    public int HeaderDarkness { get; set; } = 65;
-    public int Opacity { get; set; } = 85;
+    public bool TintIsExact { get; set; }
+    public int HeaderDarkness { get; set; } = DefaultHeaderDarkness;
+    public int Opacity { get; set; } = DefaultOpacity;
     public bool FullOpacityOnHover { get; set; }
-    public int TintStrength { get; set; } = 55;
+    public int TintStrength { get; set; } = DefaultTintStrength;
     public int Margin { get; set; }
 
     /// <summary>Whether the widget should currently be showing - persisted so the tray's "Layout

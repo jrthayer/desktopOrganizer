@@ -14,6 +14,15 @@ internal interface IWidgetStyle
     /// round-trip through plain System.Text.Json without a custom converter. Null means untinted.</summary>
     int? TintColor { get; set; }
 
+    /// <summary>True only when TintColor came from the Eyedropper (see StyleMenuRows.
+    /// TryHandleColorCommand/EyedropperOverlay) rather than a preset/Custom... pick - changes how
+    /// the element's own dominant fill colors blend it in (see each caller's own DilutedExact-style
+    /// property), starting from the exact sampled pixel and diluting it back toward the plain theme
+    /// by TintStrength instead of the usual "start plain, blend toward the pick" direction. A fresh
+    /// pick also resets Opacity to 100 and TintStrength to 0 (see the Eyedropper handling in each
+    /// caller's own HandleCommand) so it starts out pixel-exact - neither is forced to stay there.</summary>
+    bool TintIsExact { get; set; }
+
     /// <summary>0-100 - how much black is blended into the header/title band's own base color
     /// before tinting (see StyleTint.DarkenTowardBlack), independent of TintColor's own blend amount.</summary>
     int HeaderDarkness { get; set; }

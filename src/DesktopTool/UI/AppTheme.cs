@@ -10,6 +10,13 @@ internal static class AppTheme
 {
     public static readonly Color Body = Color.FromArgb(255, 32, 32, 36);
     public static readonly Color Field = Color.FromArgb(255, 45, 45, 50);
+
+    /// <summary>A recessed alternative to Field for a widget's own secondary panels (buttons, a
+    /// list's own row background) that want visible separation from Body - darker than Body itself
+    /// (not just a dimmer Field, which sits ABOVE Body and so still read as washed-out/blending into
+    /// it once LayoutLauncherWidget started blending it through StyleTint.SafeChromeBlend), so these
+    /// panels read as sunken/inset against Body instead of nearly the same tone as it.</summary>
+    public static readonly Color FieldDark = Color.FromArgb(255, 20, 20, 23);
     public static readonly Color Border = Color.FromArgb(255, 70, 70, 78);
     public static readonly Color Hover = Color.FromArgb(255, 55, 55, 62);
     public static readonly Color Accent = Color.FromArgb(255, 190, 190, 195);

@@ -26,6 +26,18 @@ internal static class StyleTint
 
     public static readonly string[] PresetNames = { "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink" };
 
+    /// <summary>A fixed blend amount, deliberately NOT tied to a widget's own adjustable Tint
+    /// Strength - for anywhere fixed WhiteSmoke/AppTheme.Text is drawn on top of a tinted fill (menu
+    /// chrome, tooltips, secondary button/panel fills), as opposed to a widget's own dominant body/
+    /// header fill, which blends at the user's own adjustable strength instead (see each caller's
+    /// own Effective*/Themed* properties). If a chrome fill moved with an adjustable strength, an
+    /// Eyedropper pick (which resets that strength to 0 so its dominant fill starts pixel-exact -
+    /// see IWidgetStyle.TintIsExact) would leave every OTHER surface - buttons, the settings menu,
+    /// a list's own row background - looking completely untinted, contradicting the very swatch that
+    /// was just picked. Pinning chrome to this fixed level instead keeps it visibly tinted
+    /// regardless of what the strength slider (or a fresh Eyedropper reset) currently reads.</summary>
+    public const double SafeChromeBlend = 0.55;
+
     public static Color GetPreset(int index) => index >= 0 && index < Presets.Length ? Presets[index] : Color.Empty;
     public static string GetPresetName(int index) => index >= 0 && index < PresetNames.Length ? PresetNames[index] : string.Empty;
 
@@ -40,6 +52,15 @@ internal static class StyleTint
                 (int)Math.Round(baseColor.R + (t.R - baseColor.R) * amount),
                 (int)Math.Round(baseColor.G + (t.G - baseColor.G) * amount),
                 (int)Math.Round(baseColor.B + (t.B - baseColor.B) * amount));
+
+    /// <summary>Only meaningful for an IWidgetStyle.TintIsExact pick (see that property's own doc
+    /// comment) - dilutes an exact Eyedropper sample back toward untinted by amount, the *reverse*
+    /// direction from the regular Tint(base, tint, amount) call above (there, amount=0 means "ignore
+    /// the pick"; here, amount=0 means "keep the pick exact"). Same underlying blend math as Tint,
+    /// just with the two colors swapped - named separately (not just called as Tint(exact, untinted,
+    /// amount) at each call site) so that reversal reads as a deliberate, distinct concept rather
+    /// than a same-looking call that happens to pass its arguments in the opposite order.</summary>
+    public static Color DilutedExact(Color exact, Color untinted, double amount) => Tint(exact, untinted, amount);
 
     /// <summary>Blends color toward black by amount (0-1) - the basis for a header/title band's own
     /// darker shade before Tint blends a pick into what's left of it (see FenceForm.HeaderBaseColor

@@ -1,9 +1,9 @@
 using DesktopTool.Native;
 
-namespace DesktopTool.Features.Fences.UI;
+namespace DesktopTool.UI;
 
 /// <summary>
-/// A full-virtual-screen click-catcher for "Fence Color > Eyedropper" - covers every monitor so a
+/// A full-virtual-screen click-catcher for a "Color > Eyedropper" pick - covers every monitor so a
 /// color can be sampled from anywhere on screen, not just inside this app's own windows. Made
 /// invisible via TransparencyKey (a WS_EX_LAYERED color-key, not WS_EX_TRANSPARENT) rather than
 /// Form.Opacity: Opacity blends this window's own rendered content against the desktop by a fixed
@@ -37,6 +37,17 @@ internal sealed class EyedropperOverlay : Form
         BackColor = KeyColor;
         TransparencyKey = KeyColor;
         KeyPreview = true;
+    }
+
+    /// <summary>Shows an overlay and wires up its own cleanup - the one-line entry point every
+    /// caller (FenceForm, LayoutLauncherWidget) uses instead of each managing an EyedropperOverlay
+    /// instance's lifetime by hand.</summary>
+    public static void Pick(Action<Color> onPicked)
+    {
+        var overlay = new EyedropperOverlay();
+        overlay.ColorPicked += onPicked;
+        overlay.FormClosed += (_, _) => overlay.Dispose();
+        overlay.Show();
     }
 
     protected override void OnShown(EventArgs e)

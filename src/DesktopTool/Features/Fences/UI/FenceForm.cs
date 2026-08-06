@@ -136,28 +136,19 @@ public sealed class FenceForm : Form
     private const int CmdColorCustom = 14;
     private const int CmdColorEyedrop = 15;
     private const int CmdToggleFullOpacityOnHover = 16;
-    // A contiguous block reserved for the preset swatches (see ColorPresets) - avoids one named
-    // const per swatch the way the other commands have, since these are looked up by index rather
-    // than individually referenced anywhere.
+    // A contiguous block reserved for the preset swatches StyleMenuRows.BuildColorGrid builds from
+    // StyleTint.Presets - avoids one named const per swatch the way the other commands have, since
+    // these are looked up by index rather than individually referenced anywhere.
     private const int CmdColorPresetBase = 20;
 
     // Not real WM_COMMAND ids - just Row.Id values for the non-clickable section headers in
     // ShowFenceOptionsMenu's dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command either
     // way, so these only need to be distinct from real command ids, never looked up).
-    private const int TagColorHeader = 1003;
     private const int TagFenceDimensionsHeader = 1004;
     private const int TagHeaderDarknessHeader = 1005;
     private const int TagFenceOpacityHeader = 1006;
     private const int TagTintStrengthHeader = 1007;
     private const int TagMarginHeader = 1008;
-
-    /// <summary>Themed presets offered in the "Fence Color" submenu, alongside "Default" (resets to
-    /// the plain dark gray) and "Custom..." (opens the system color picker). Muted rather than
-    /// fully saturated so the tinted body/title still read as a dark theme - see Tint. Now just this
-    /// file's own name for StyleTint.Presets (shared with LayoutLauncherWidget/StyleMenuRows) rather
-    /// than its own array, kept as a property so every existing ColorPresets[i]/.Length call site
-    /// below stays unchanged.</summary>
-    private static Color[] ColorPresets => StyleTint.Presets;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -354,13 +345,13 @@ public sealed class FenceForm : Form
     /// see SafeChromeBlend.</summary>
     private double TintAmount => _model.TintStrength / 100.0;
 
-    /// <summary>A fixed blend amount, deliberately NOT tied to TintAmount - used anywhere fixed
-    /// WhiteSmoke text or glyphs get drawn on top of a tinted fill (the settings dropdown, its
-    /// tooltips, and the Settings/"+"/"x" buttons - see ChromeFill/ThemedMenuSelected and both
-    /// DrawTooltip call sites). If this moved with TintAmount, dragging Tint Strength toward 100%
-    /// with a light color would make that fixed text unreadable, the exact bug ChromeFill was added
-    /// to fix in the first place - this pins it back to that same safe level regardless.</summary>
-    private const double SafeChromeBlend = 0.55;
+    // Thin wrapper kept under this file's own name/call sites rather than switching every one of
+    // them to StyleTint.SafeChromeBlend directly - same behavior, smaller diff (same reasoning as
+    // DarkenTowardBlack/Tint's own wrappers above). See StyleTint.SafeChromeBlend's own doc comment
+    // for what this actually protects against - used anywhere fixed WhiteSmoke text or glyphs get
+    // drawn on top of a tinted fill (the settings dropdown, its tooltips, and the Settings/"+"/"x"
+    // buttons - see ChromeFill/ThemedMenuSelected and both DrawTooltip call sites).
+    private const double SafeChromeBlend = StyleTint.SafeChromeBlend;
 
     /// <summary>Only meaningful when TintIsExact - dilutes an Eyedropper pick back toward
     /// DefaultBodyColor by TintAmount, the *reverse* direction from the regular Tint(base, tint,
@@ -2022,22 +2013,13 @@ public sealed class FenceForm : Form
                 IsChecked: () => _model.FullOpacityOnHover,
                 Tooltip: "Full opacity while hovered, dragged/resized, or this menu is open"),
             new(0, string.Empty, IsSeparator: true),
-            new(TagColorHeader, "Fence Color", IsHeader: true),
-            new(CmdColorDefault, string.Empty, IsGridItem: true, Swatch: DefaultBodyColor,
-                IsChecked: () => _model.TintColor is null, Tooltip: "Black"),
         };
-        for (var i = 0; i < ColorPresets.Length; i++)
-        {
-            var presetArgb = ColorPresets[i].ToArgb();
-            rows.Add(new DropdownMenu.Row(CmdColorPresetBase + i, string.Empty, IsGridItem: true, Swatch: ColorPresets[i],
-                IsChecked: () => _model.TintColor == presetArgb, Tooltip: GetColorPresetName(i)));
-        }
-        // Swatch left null - an empty (outline-only) circle, distinct from every real color, rather
-        // than a text row - see DropdownMenu.DrawGridItem.
-        rows.Add(new DropdownMenu.Row(CmdColorCustom, string.Empty, IsGridItem: true,
-            Glyph: DropdownMenu.GridGlyph.Plus, Tooltip: "Custom..."));
-        rows.Add(new DropdownMenu.Row(CmdColorEyedrop, string.Empty, IsGridItem: true,
-            Glyph: DropdownMenu.GridGlyph.Eyedropper, Tooltip: "Eyedropper"));
+        // The color grid (Default + presets + Custom... + Eyedropper) - shared with
+        // LayoutLauncherWidget's own options menu now (see StyleMenuRows.BuildColorGrid's own
+        // comment for why this fence's remaining rows below - sliders/margin/OCD sizing - still
+        // build separately instead of also going through Build's fixed shape). Only the header
+        // wording ("Fence Color" instead of "Color") is fence-specific.
+        rows.AddRange(StyleMenuRows.BuildColorGrid(_model, DefaultBodyColor, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase, "Fence Color"));
         // No separator before this header - it's still part of the "Fence Color" category (how the
         // fence's own colors look), just its own labeled control rather than lumped under that header.
         rows.Add(new DropdownMenu.Row(TagHeaderDarknessHeader, "Header Darkness", IsHeader: true));
@@ -2110,14 +2092,6 @@ public sealed class FenceForm : Form
         CmdRename => new MenuRowStyle("Rename", false, false),
         _ => new MenuRowStyle(string.Empty, false, false),
     };
-
-    /// <summary>Preset name shown next to its swatch (e.g. "Red") - index must line up with
-    /// ColorPresets, see ShowFenceOptionsMenu/CmdColorPresetBase. Same StyleTint.PresetNames rename
-    /// as ColorPresets above.</summary>
-    private static string[] ColorPresetNames => StyleTint.PresetNames;
-
-    private static Color GetColorPreset(int index) => StyleTint.GetPreset(index);
-    private static string GetColorPresetName(int index) => StyleTint.GetPresetName(index);
 
     private static uint ColorRef(Color c) => (uint)(c.R | (c.G << 8) | (c.B << 16));
 
@@ -2214,14 +2188,22 @@ public sealed class FenceForm : Form
             case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
             case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
             case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
-            case CmdColorDefault: SetTintColor(null); break;
-            case CmdColorCustom: PickCustomColor(); break;
-            case CmdColorEyedrop: PickEyedropperColor(); break;
             case CmdToggleFullOpacityOnHover: ToggleFullOpacityOnHover(); break;
+            case CmdColorDefault:
+            case CmdColorCustom:
+            case CmdColorEyedrop:
             case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
-                var presetColor = GetColorPreset(id - CmdColorPresetBase);
-                if (presetColor != Color.Empty)
-                    SetTintColor(presetColor);
+                // Default/preset/Custom.../Eyedropper - same shared handling
+                // LayoutLauncherWidget's own color rows use too (see StyleMenuRows' own doc
+                // comment). The Eyedropper pick also resets Opacity/Tint Strength so it starts out
+                // pixel-exact, same as this used to do inline via PickEyedropperColor.
+                StyleMenuRows.TryHandleColorCommand(id, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
+                    DefaultBodyColor, this, CurrentTint, color => SetTintColor(color), color =>
+                    {
+                        SetTintColor(color, exact: true);
+                        SetOpacity(100);
+                        SetTintStrength(0);
+                    });
                 break;
         }
     }
@@ -2281,42 +2263,6 @@ public sealed class FenceForm : Form
     {
         _manager.SetMargin(FenceId, margin);
         RenderAndPresent();
-    }
-
-    /// <summary>"Fence Color > Custom..." - the settings menu has already closed by the time this runs
-    /// (HandleCommand fires from WM_COMMAND after TrackPopupMenuEx returns), so a modal ColorDialog
-    /// here doesn't fight it for the message loop.</summary>
-    private void PickCustomColor()
-    {
-        using var dialog = new ColorDialog
-        {
-            Color = CurrentTint ?? DefaultBodyColor,
-            FullOpen = true,
-        };
-        if (dialog.ShowDialog(this) == DialogResult.OK)
-            SetTintColor(dialog.Color);
-    }
-
-    /// <summary>"Fence Color > Eyedropper" - shows a full-virtual-screen overlay (see
-    /// EyedropperOverlay) that lets the user click any pixel anywhere on screen, even outside this
-    /// app, to sample its color as this fence's new tint. Not modal like PickCustomColor's
-    /// ColorDialog, but showing it still steals activation from the settings dropdown the same way,
-    /// which closes it via DropdownMenu.OnDeactivate same as a modal dialog would. Also resets Opacity
-    /// to 100 and TintStrength to 0 (see EffectiveOpacity/DilutedExactTint) so the pick starts out
-    /// pixel-exact - neither is forced to stay there, just where a fresh pick starts; both sliders can
-    /// move it from there same as any other fence, trading exactness away deliberately rather than
-    /// never having the choice.</summary>
-    private void PickEyedropperColor()
-    {
-        var overlay = new EyedropperOverlay();
-        overlay.ColorPicked += color =>
-        {
-            SetTintColor(color, exact: true);
-            SetOpacity(100);
-            SetTintStrength(0);
-        };
-        overlay.FormClosed += (_, _) => overlay.Dispose();
-        overlay.Show();
     }
 
     private void OpenItem(string? path)
@@ -2527,26 +2473,10 @@ public sealed class FenceForm : Form
             _manager.DeleteFence(FenceId);
     }
 
-    private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
-    {
-        var path = new GraphicsPath();
-        int d = radius * 2;
-        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
-        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
-        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+    // Thin wrappers kept under this file's own name/call sites rather than switching every one of
+    // them to RoundedRectPath.Full/Top directly - same behavior, smaller diff (same reasoning as
+    // DarkenTowardBlack/Tint's own wrappers over StyleTint above).
+    private static GraphicsPath RoundedRect(Rectangle bounds, int radius) => RoundedRectPath.Full(bounds, radius);
 
-    private static GraphicsPath RoundedRectTop(Rectangle bounds, int radius)
-    {
-        var path = new GraphicsPath();
-        int d = radius * 2;
-        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
-        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
-        path.AddLine(bounds.Right, bounds.Bottom, bounds.X, bounds.Bottom);
-        path.CloseFigure();
-        return path;
-    }
+    private static GraphicsPath RoundedRectTop(Rectangle bounds, int radius) => RoundedRectPath.Top(bounds, radius);
 }
