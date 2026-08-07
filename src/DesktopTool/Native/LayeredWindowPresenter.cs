@@ -14,7 +14,8 @@ namespace DesktopTool.Native;
 /// </summary>
 internal static class LayeredWindowPresenter
 {
-    public static void Present(IntPtr hwnd, Bitmap bitmap, Point screenLocation, float opacity = 1f)
+    public static void Present(IntPtr hwnd, Bitmap bitmap, Point screenLocation, float opacity = 1f,
+        IReadOnlyList<Rectangle>? fullOpacityRegions = null)
     {
         var screenDc = NativeMethods.GetDC(IntPtr.Zero);
         var memDc = NativeMethods.CreateCompatibleDC(screenDc);
@@ -24,7 +25,7 @@ internal static class LayeredWindowPresenter
         try
         {
             dibBitmap = CreatePremultipliedDib(memDc, bitmap, out var scan0);
-            WritePremultipliedPixels(bitmap, scan0, opacity);
+            WritePremultipliedPixels(bitmap, scan0, opacity, fullOpacityRegions);
             previousBitmap = NativeMethods.SelectObject(memDc, dibBitmap);
 
             var size = new SIZE { cx = bitmap.Width, cy = bitmap.Height };
@@ -72,24 +73,50 @@ internal static class LayeredWindowPresenter
     /// converts while copying from the source bitmap into the DIB's pixel buffer. opacity applies
     /// an extra blanket scale on top of each pixel's own alpha, e.g. so a fully-opaque-drawn fence
     /// still ends up translucent overall the way the old whole-window SetLayeredWindowAttributes
-    /// alpha used to make it, while antialiased edge pixels stay correctly partial.</summary>
-    private static void WritePremultipliedPixels(Bitmap source, IntPtr scan0, float opacity)
+    /// alpha used to make it, while antialiased edge pixels stay correctly partial. A pixel inside
+    /// fullOpacityRegions (bitmap-space, e.g. LayeredWidgetForm's own Settings/ChromeButton rects)
+    /// ignores opacity entirely instead - the same "always fully visible no matter the widget's own
+    /// Opacity slider" treatment the Settings dropdown already gets for free by being a separate
+    /// window, just applied here since chrome buttons are drawn into this same bitmap.</summary>
+    private static void WritePremultipliedPixels(Bitmap source, IntPtr scan0, float opacity,
+        IReadOnlyList<Rectangle>? fullOpacityRegions)
     {
         var bounds = new Rectangle(0, 0, source.Width, source.Height);
         var data = source.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
         {
-            var bufferSize = data.Stride * source.Height;
+            var stride = data.Stride;
+            var bufferSize = stride * source.Height;
             var buffer = new byte[bufferSize];
             Marshal.Copy(data.Scan0, buffer, 0, bufferSize);
 
-            for (var i = 0; i < bufferSize; i += 4)
+            var hasRegions = fullOpacityRegions is { Count: > 0 };
+
+            for (var y = 0; y < source.Height; y++)
             {
-                var a = (byte)(buffer[i + 3] * opacity);
-                buffer[i] = (byte)(buffer[i] * a / 255);
-                buffer[i + 1] = (byte)(buffer[i + 1] * a / 255);
-                buffer[i + 2] = (byte)(buffer[i + 2] * a / 255);
-                buffer[i + 3] = a;
+                var rowOffset = y * stride;
+                for (var x = 0; x < source.Width; x++)
+                {
+                    var pixelOpacity = opacity;
+                    if (hasRegions)
+                    {
+                        for (var r = 0; r < fullOpacityRegions!.Count; r++)
+                        {
+                            if (fullOpacityRegions[r].Contains(x, y))
+                            {
+                                pixelOpacity = 1f;
+                                break;
+                            }
+                        }
+                    }
+
+                    var i = rowOffset + x * 4;
+                    var a = (byte)(buffer[i + 3] * pixelOpacity);
+                    buffer[i] = (byte)(buffer[i] * a / 255);
+                    buffer[i + 1] = (byte)(buffer[i + 1] * a / 255);
+                    buffer[i + 2] = (byte)(buffer[i + 2] * a / 255);
+                    buffer[i + 3] = a;
+                }
             }
 
             Marshal.Copy(buffer, 0, scan0, bufferSize);

@@ -59,6 +59,16 @@ internal sealed class DropdownMenu : Form
         int StepperMax = 100,
         int StepperStep = 1,
         string StepperSuffix = "",
+        // False dims a stepper row's own buttons/value (AppTheme.DisabledText, same as any other
+        // disabled-looking text in this app) and stops it responding to clicks entirely - for a
+        // stepper whose value is currently being driven by something else (Layout Launcher's own
+        // Rows Shown while its Always Max Rows toggle is on, say) rather than free for the user to
+        // adjust by hand right now. Read fresh on every paint/click, same live-callback pattern as
+        // StepperValue/IsChecked - a plain bool captured once at row-build time wouldn't reflect a
+        // checkbox toggled elsewhere in this same still-open menu until it was closed and reopened.
+        // Null means always enabled. So far only IsStepper rows check this; nothing stops a future
+        // row type from checking it too.
+        Func<bool>? IsEnabled = null,
         // IsAlignmentPicker turns this row into three side-by-side buttons (Left/Center/Right) - a
         // plain click on whichever one fires OnAlignmentChange immediately, same one-shot feel as
         // AdjustStepper. AlignmentValue is read fresh here every repaint, same live-callback pattern
@@ -438,7 +448,11 @@ internal sealed class DropdownMenu : Form
 
             if (isChecked)
             {
-                using var checkMarkPen = new Pen(_getAccent(), 2);
+                // WhiteSmoke (the same fixed color every row's own text already uses), not the live
+                // tint accent - a checkmark drawn in the widget's own tint can blend right into the
+                // similarly-tinted ChromeFill background behind it and become hard to see, especially
+                // for a tint close to this menu's own field color.
+                using var checkMarkPen = new Pen(Color.WhiteSmoke, 2);
                 g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
                 g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
             }
@@ -556,23 +570,45 @@ internal sealed class DropdownMenu : Form
 
     /// <summary>"- value +": a minus button flush left, a plus button flush right, the current value
     /// centered between them - StepperValue read fresh here every repaint, same live-callback
-    /// pattern as SliderValue/IsChecked.</summary>
+    /// pattern as SliderValue/IsChecked. Each button dims independently once the value's already at
+    /// that button's own end of the StepperMin/Max range (see StepperButtonEnabled) - clicking "+" at
+    /// StepperMax, or "-" at StepperMin, would be a no-op anyway (StepStepper already clamps), so it
+    /// reads that way rather than looking just as live as the button that'd actually do something.</summary>
     private void DrawStepper(Graphics g, Row row, Rectangle rect)
     {
         var (minusRect, plusRect) = StepperButtonRects(rect);
-        DrawStepperButton(g, minusRect, isPlus: false);
-        DrawStepperButton(g, plusRect, isPlus: true);
+        DrawStepperButton(g, minusRect, isPlus: false, StepperButtonEnabled(row, isPlus: false));
+        DrawStepperButton(g, plusRect, isPlus: true, StepperButtonEnabled(row, isPlus: true));
 
         var value = Math.Clamp(row.StepperValue?.Invoke() ?? 0, row.StepperMin, row.StepperMax);
         var textRect = new Rectangle(minusRect.Right, rect.Y, plusRect.Left - minusRect.Right, rect.Height);
-        TextRenderer.DrawText(g, $"{value}{row.StepperSuffix}", _font, textRect, Color.WhiteSmoke,
+        var rowEnabled = row.IsEnabled?.Invoke() ?? true;
+        TextRenderer.DrawText(g, $"{value}{row.StepperSuffix}", _font, textRect, rowEnabled ? Color.WhiteSmoke : AppTheme.DisabledText,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
+    /// <summary>Whether a specific stepper button (isPlus: true for "+", false for "-") should
+    /// currently respond to a click at all - false whenever the whole row is disabled (Row.IsEnabled),
+    /// or whenever the current value already sits at that button's own end of the StepperMin/Max
+    /// range. Shared by DrawStepper's own dimming and OnMouseDown/OnStepperRepeatTick's hit-testing,
+    /// so a dimmed button is never still secretly clickable.</summary>
+    private static bool StepperButtonEnabled(Row row, bool isPlus)
+    {
+        if (!(row.IsEnabled?.Invoke() ?? true))
+            return false;
+        var value = Math.Clamp(row.StepperValue?.Invoke() ?? 0, row.StepperMin, row.StepperMax);
+        return isPlus ? value < row.StepperMax : value > row.StepperMin;
+    }
+
     /// <summary>A small outlined square with a +/- glyph - same crossed-line construction as
-    /// DrawGridItem's Plus glyph, just without needing a whole circle around it.</summary>
-    private void DrawStepperButton(Graphics g, Rectangle rect, bool isPlus) =>
-        DrawPlusMinusGlyph(g, rect, isPlus, _getCheckboxBorder(), _getAccent(), 4.5f);
+    /// DrawGridItem's Plus glyph, just without needing a whole circle around it. WhiteSmoke for the
+    /// glyph itself (the same fixed color every row's own text already uses, not the live tint accent -
+    /// see the checkbox checkmark's own comment on why) when enabled; AppTheme.DisabledText for both
+    /// border and glyph when isEnabled is false - see Row.IsEnabled's own doc comment.</summary>
+    private void DrawStepperButton(Graphics g, Rectangle rect, bool isPlus, bool isEnabled) =>
+        DrawPlusMinusGlyph(g, rect, isPlus,
+            isEnabled ? _getCheckboxBorder() : AppTheme.DisabledText,
+            isEnabled ? Color.WhiteSmoke : AppTheme.DisabledText, 4.5f);
 
     /// <summary>Shared with SnapLinePanel's own numeric field spinner - same outlined-square-plus-glyph
     /// construction, just themed from different color sources (this menu's live getters vs.
@@ -688,7 +724,7 @@ internal sealed class DropdownMenu : Form
         }
         else if (_rows[index].IsStepper)
         {
-            if (HitTestStepperButton(_rowRects[index], e.Location) is { } isPlus)
+            if (HitTestStepperButton(_rowRects[index], e.Location) is { } isPlus && StepperButtonEnabled(_rows[index], isPlus))
             {
                 StepStepper(index, isPlus);
                 // Same capture reasoning as the slider drag above - keeps the repeat timer's own
@@ -770,7 +806,10 @@ internal sealed class DropdownMenu : Form
         // Stops repeating the moment the cursor drifts off the button being held, even without a
         // real mouse-up - matches a native spinner's own "release to stop" feel while still dragged
         // off it. Mouse is still captured (see OnMouseDown), so this keeps getting called either way.
-        if (HitTestStepperButton(_rowRects[_stepperRepeatRowIndex], PointToClient(Cursor.Position)) != _stepperRepeatIsPlus)
+        // Also stops the instant the held button hits its own end of the range, rather than
+        // continuing to tick uselessly (StepStepper would just keep clamping to the same value).
+        if (HitTestStepperButton(_rowRects[_stepperRepeatRowIndex], PointToClient(Cursor.Position)) != _stepperRepeatIsPlus
+            || !StepperButtonEnabled(_rows[_stepperRepeatRowIndex], _stepperRepeatIsPlus))
         {
             StopStepperRepeat();
             return;

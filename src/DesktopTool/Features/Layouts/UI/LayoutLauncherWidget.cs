@@ -49,6 +49,13 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     private RowAction _armedRowAction = RowAction.None;
     private int _armedRowIndex = -1;
 
+    // Row hover feedback - "Run \"{name}\""/"Copy \"{name}\""/"Delete \"{name}\"" over the row's
+    // name text/its two buttons. PaintedTooltip (DesktopTool.UI) rather than a native System.Windows.
+    // Forms.ToolTip - that control's own fade-in animation kept painting its default (non-owner-drawn,
+    // white) look for a frame before OwnerDraw's themed content replaced it, not fully suppressible
+    // even with ShowAlways/UseAnimation/UseFading all set.
+    private readonly PaintedTooltip _rowTooltip = new();
+
     /// <summary>Close (× - hides, same as the "x" a Fence's own delete button uses, but this widget
     /// is hidden rather than destroyed - see HideAndPersist) - LayeredWidgetForm's own ChromeButton
     /// mechanism instead of hand-rolled rect-chaining/paint/hit-test/arm-fire code. Built once rather
@@ -176,7 +183,8 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
 
     protected override void DisposeOwnedResources()
     {
-        // Nothing owned yet - no icon cache, no drag ghost (both come back with the layout list).
+        // Nothing owned - no icon cache, no drag ghost (both come back with the layout list), and
+        // the row tooltip is hand-painted now, not a native control needing disposal.
     }
 
     protected override Rectangle GetCurrentBody() => new(
@@ -201,6 +209,11 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             _model.Width = rect.Right - rect.Left - OuterMargin * 2;
             _model.Height = rect.Bottom - rect.Top - TopBand - BottomBand;
             Persist();
+
+            // A manual resize (or even just a move, harmlessly) can leave the body a height Rows
+            // Shown no longer implies, without ever touching Rows Shown itself - see SyncRowsShownToMax's
+            // own comment on why this always re-applies rather than only reacting to a value change.
+            SyncRowsShownToMax();
         }
 
         RenderOpacity.BeginIfNeeded();
@@ -289,6 +302,17 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     {
         base.OnMouseMove(e);
         UpdateListScrollDrag(ToContent(e.Location));
+        UpdateRowTooltips(e.Location);
+    }
+
+    // OnMouseEnter needs no override of its own - LayeredWidgetForm's own already covers hover
+    // tracking. OnMouseLeave still needs one, to hide a row tooltip left showing right as the cursor
+    // leaves - same reasoning/shape as FenceForm's own OnMouseLeave override.
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        if (_rowTooltip.Hide())
+            RenderAndPresent();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -363,24 +387,106 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // its own for any of them, just this one persistence hook.
     protected override void PersistStyle() => Persist();
 
+    private const int CmdToggleAlwaysMaxRows = 1;
+
     /// <summary>The only thing genuinely specific to this widget beyond the base's own default rows -
-    /// Rows Shown only means anything for a widget with a row list, so it doesn't belong in
-    /// LayeredWidgetForm's own shared "Base" flyout. A stepper (same interface as Margin/Corner
-    /// Radius/Font Size) rather than a checkbox - see LayoutLauncherModel.RowsShown's own doc comment
-    /// for why this replaced the resize-drag row-snapping it used to be.</summary>
-    protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => new List<DropdownMenu.Row>
+    /// Rows Shown/Always Max Rows only mean anything for a widget with a row list, so they don't
+    /// belong in LayeredWidgetForm's own shared "Base" flyout. Rows Shown is a stepper (same interface
+    /// as Margin/Corner Radius/Font Size) rather than a checkbox - see LayoutLauncherModel.RowsShown's
+    /// own doc comment for why this replaced the resize-drag row-snapping it used to be. StepperMax is
+    /// the current saved-profile count (min 1, so it's never 0 even with nothing saved yet) rather
+    /// than a fixed number - showing more rows than exist would just be blank space.</summary>
+    protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows()
     {
-        new(0, "Rows Shown", IsHeader: true),
-        new(0, string.Empty, IsStepper: true,
-            StepperValue: () => _model.RowsShown,
-            OnStepperChange: rows =>
-            {
-                _model.RowsShown = Math.Clamp(rows, 1, 20);
+        var maxRows = Math.Max(1, ListRowCount);
+        return new List<DropdownMenu.Row>
+        {
+            new(0, "Rows Shown", IsHeader: true),
+            new(0, string.Empty, IsStepper: true,
+                StepperValue: () => _model.RowsShown,
+                OnStepperChange: rows => SetRowsShown(Math.Clamp(rows, 1, maxRows)),
+                StepperMin: 1, StepperMax: maxRows, StepperStep: 1, StepperSuffix: "",
+                IsEnabled: () => !_model.AlwaysMaxRows),
+            new(CmdToggleAlwaysMaxRows, "Always Max Rows", HasCheckbox: true,
+                IsChecked: () => _model.AlwaysMaxRows,
+                Tooltip: "Rows Shown always tracks the current number of saved layouts"),
+        };
+    }
+
+    protected override void HandleSettingsCommand(int id)
+    {
+        switch (id)
+        {
+            case CmdToggleAlwaysMaxRows:
+                _model.AlwaysMaxRows = !_model.AlwaysMaxRows;
                 Persist();
-                RenderAndPresent();
-            },
-            StepperMin: 1, StepperMax: 20, StepperStep: 1, StepperSuffix: ""),
-    };
+                SyncRowsShownToMax();
+                break;
+            default:
+                base.HandleSettingsCommand(id);
+                break;
+        }
+    }
+
+    /// <summary>Applies a Rows Shown change - a no-op if it didn't actually change (the stepper's own
+    /// min/max already keep it in range, this is just the same redundant-but-safe re-clamp every
+    /// other stepper handler on this base already does). Resizes the widget itself to exactly the
+    /// height that fits the new row count (see SetBodyHeight/HeightForRows) - "have shown rows shrink
+    /// or grow the launcher by the size of a row when the shown rows get adjusted" - rather than just
+    /// changing what GetListArea reports and leaving the body's own size alone. An *absolute* target
+    /// height, not the old height plus a delta - a delta assumes the body is already exactly the
+    /// height RowsShown implies, which a manual drag-resize in between (nothing here tracks those)
+    /// would silently break, applying the right-sized nudge on top of the wrong starting point.</summary>
+    private void SetRowsShown(int rows)
+    {
+        if (rows == _model.RowsShown)
+            return;
+        _model.RowsShown = rows;
+        Persist();
+        SetBodyHeight(HeightForRows(rows));
+    }
+
+    /// <summary>The body height that fits exactly n rows, at this widget's own current width - the
+    /// same overhead formula GetListArea itself measures against, just solved for total height
+    /// instead of the list's own remaining space.</summary>
+    private int HeightForRows(int rows) => NonListOverhead(_model.Width) + rows * ListRowHeight;
+
+    /// <summary>Keeps Rows Shown, and the widget's own actual size, pinned to the current saved-layout
+    /// count while AlwaysMaxRows is on - a no-op otherwise. Unlike SetRowsShown, this always
+    /// re-applies the height even when RowsShown's own value didn't change, since the widget's actual
+    /// size can drift away from what RowsShown implies without RowsShown itself ever changing - a
+    /// manual drag-resize (see OnDragEnd's own call to this) moves the window directly, bypassing
+    /// RowsShown entirely, which SetRowsShown's early-exit-when-unchanged guard would otherwise leave
+    /// uncorrected. Called once when the toggle is first turned on, again anywhere this widget itself
+    /// adds/removes a layout (Save Current Layout, a row's own Copy/Delete), and after every drag
+    /// (move or resize) ends.</summary>
+    private void SyncRowsShownToMax()
+    {
+        if (!_model.AlwaysMaxRows)
+            return;
+        _model.RowsShown = Math.Max(1, ListRowCount);
+        Persist();
+        SetBodyHeight(HeightForRows(_model.RowsShown));
+    }
+
+    /// <summary>Sets the widget's own persisted+actual body height directly, keeping its top edge
+    /// fixed (only the bottom edge moves) - the same body-to-window math CreateParams/GetCurrentBody
+    /// already use, just applied outside of a drag via SetWindowPos instead of through a live
+    /// WM_SIZING/OnDragEnd cycle.</summary>
+    private void SetBodyHeight(int height)
+    {
+        var bodyX = _model.X ?? (Screen.PrimaryScreen!.WorkingArea.Width - _model.Width) / 2;
+        var bodyY = _model.Y ?? (Screen.PrimaryScreen!.WorkingArea.Height - DefaultBodyHeight) / 2;
+        var newHeight = Math.Max(1, height);
+        _model.Height = newHeight;
+        Persist();
+
+        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, bodyX - OuterMargin, bodyY - TopBand,
+            _model.Width + OuterMargin * 2, newHeight + TopBand + BottomBand,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+
+        RenderAndPresent();
+    }
 
     /// <summary>Manage Layouts.../Save Current Layout sit inside the body itself, pinned to its bottom
     /// edge, rather than chained off Settings in the margin band - they're this widget's own primary
@@ -417,6 +523,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     private void SaveCurrentLayout()
     {
         var profile = _manager.CaptureCurrentLayout($"Layout {_manager.Profiles.Count + 1}");
+        SyncRowsShownToMax();
         ManageLayoutsRequested?.Invoke(this, profile.Id);
     }
 
@@ -435,13 +542,15 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     /// LayoutLauncherModel.RowsShown), so it neither wastes space showing fewer profiles than that nor
     /// grows past the user's own chosen viewport size; a taller body than that just leaves blank space
     /// below the list rather than stretching it, and more profiles than RowsShown scrolls instead of
-    /// growing further.</summary>
+    /// growing further. Never shorter than one row, though, even if the body itself has been dragged
+    /// too short to fit that - the list would rather overlap neighboring content a little than
+    /// disappear to nothing.</summary>
     protected override Rectangle GetListArea(int contentWidth, int contentHeight)
     {
         var top = (_model.HideTitle ? 0 : HeaderHeight) + ListVerticalPadding;
         var available = contentHeight - NonListOverhead(contentWidth);
         var wanted = Math.Min(_model.RowsShown, ListRowCount) * ListRowHeight;
-        var height = Math.Max(0, Math.Min(available, wanted));
+        var height = Math.Max(ListRowHeight, Math.Min(available, wanted));
         return new Rectangle(ListHorizontalPadding, top, contentWidth - ListHorizontalPadding * 2, height);
     }
 
@@ -497,7 +606,8 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     }
 
     /// <summary>What clicking contentPoint would do right now - RowAction.None if it doesn't land on
-    /// a row at all.</summary>
+    /// a row at all. The row body counts as Run everywhere except its two buttons - clicking still
+    /// works from anywhere in the row, unlike the Run tooltip below, which is deliberately narrower.</summary>
     private (RowAction Action, int Index) GetRowActionAt(Point contentPoint)
     {
         if (!TryGetRowAt(contentPoint, out var index, out var rowRect))
@@ -511,11 +621,85 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         return (RowAction.Run, index);
     }
 
+    /// <summary>The row's own name-label area - full reserved width (up to where the Copy button
+    /// starts), regardless of how much of it the name text actually fills. Used both for
+    /// PaintListRow's own drawing rect (so a long name still ellipsis-trims against the full
+    /// available width) and as the outer clamp for GetRowTextHitRect below.</summary>
+    private static Rectangle GetRowTextArea(Rectangle rowRect)
+    {
+        var (copyRect, _) = GetRowButtonRects(rowRect);
+        var x = rowRect.X + 8;
+        var width = Math.Max(0, copyRect.X - 4 - x);
+        return new Rectangle(x, rowRect.Y, width, rowRect.Height);
+    }
+
+    /// <summary>Just the name text's own actual rendered extent - narrower than GetRowTextArea
+    /// whenever the name doesn't fill it, so "hovering the text" for the Run tooltip (see
+    /// GetRowTooltipTarget) means the glyphs themselves, not the row's own blank space around them.</summary>
+    private Rectangle GetRowTextHitRect(Rectangle rowRect, int index)
+    {
+        var area = GetRowTextArea(rowRect);
+        var textWidth = TextRenderer.MeasureText(_manager.Profiles[index].Name, Font, Size.Empty,
+            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+        return new Rectangle(area.X, area.Y, Math.Min(area.Width, textWidth), area.Height);
+    }
+
+    /// <summary>What the tooltip should show for contentPoint, if anything - Copy/Delete cover their
+    /// whole button same as click does, but Run only counts while actually over the name text (see
+    /// GetRowTextHitRect), not the row's own blank space, unlike GetRowActionAt's click handling
+    /// (which stays whole-row for Run).</summary>
+    private (RowAction Action, int Index, Rectangle TargetRect)? GetRowTooltipTarget(Point contentPoint)
+    {
+        if (!TryGetRowAt(contentPoint, out var index, out var rowRect))
+            return null;
+
+        var (copyRect, deleteRect) = GetRowButtonRects(rowRect);
+        if (copyRect.Contains(contentPoint))
+            return (RowAction.Copy, index, copyRect);
+        if (deleteRect.Contains(contentPoint))
+            return (RowAction.Delete, index, deleteRect);
+
+        var textHitRect = GetRowTextHitRect(rowRect, index);
+        return textHitRect.Contains(contentPoint) ? (RowAction.Run, index, textHitRect) : null;
+    }
+
+    private string RowActionTooltipText(RowAction action, int index)
+    {
+        var name = _manager.Profiles[index].Name;
+        return action switch
+        {
+            RowAction.Copy => $"Copy \"{name}\"",
+            RowAction.Delete => $"Delete \"{name}\"",
+            _ => $"Run \"{name}\"",
+        };
+    }
+
+    /// <summary>Shows/hides "Run \"{name}\""/"Copy \"{name}\""/"Delete \"{name}\"" over a row's name
+    /// text/its two buttons via the shared PaintedTooltip - the only feedback that a row is clickable
+    /// at all otherwise, since (unlike Settings/ChromeButton/ContentButton) rows don't get the base's
+    /// own hover tint. PaintedTooltip.Show/Hide already report whether anything actually changed, so
+    /// this only repaints when it did, same restraint as everywhere else that avoids a full repaint on
+    /// every single mouse-move message. Target rects are converted to window-space (via ToWindow)
+    /// before reaching PaintedTooltip, since that class does no space conversion of its own.</summary>
+    private void UpdateRowTooltips(Point windowLocation)
+    {
+        var contentPoint = ToContent(windowLocation);
+        var target = GetRowTooltipTarget(contentPoint);
+
+        var changed = target is { } t
+            ? _rowTooltip.Show(RowActionTooltipText(t.Action, t.Index), ToWindow(t.TargetRect))
+            : _rowTooltip.Hide();
+
+        if (changed)
+            RenderAndPresent();
+    }
+
     /// <summary>Run just launches it (fire-and-forget - see LayoutManager.RunLayoutAsync's own doc
     /// comment on why that's fine from a plain click handler); Copy duplicates it in place (see
     /// LayoutManager.DuplicateLayout); Delete confirms first, same wording/icon as LayoutEditorForm's
-    /// own DeleteSelectedProfile. Copy/Delete repaint since the list's own row count just changed;
-    /// Run doesn't need to.</summary>
+    /// own DeleteSelectedProfile. Copy/Delete sync Rows Shown to the new count when AlwaysMaxRows is
+    /// on (a no-op otherwise - see SyncRowsShownToMax) and repaint either way, since the list's own
+    /// row count just changed; Run doesn't need either.</summary>
     private void FireRowAction(RowAction action, int index)
     {
         if (index < 0 || index >= _manager.Profiles.Count)
@@ -529,6 +713,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
                 break;
             case RowAction.Copy:
                 _manager.DuplicateLayout(profile.Id);
+                SyncRowsShownToMax();
                 RenderAndPresent();
                 break;
             case RowAction.Delete:
@@ -537,6 +722,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
                 if (result == DialogResult.Yes)
                 {
                     _manager.DeleteLayout(profile.Id);
+                    SyncRowsShownToMax();
                     RenderAndPresent();
                 }
                 break;
@@ -560,8 +746,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         using (var textBrush = new SolidBrush(Color.WhiteSmoke))
         using (var textFormat = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
         {
-            var textRect = new RectangleF(rowRect.X + 8, rowRect.Y, copyRect.X - 4 - (rowRect.X + 8), rowRect.Height);
-            g.DrawString(_manager.Profiles[index].Name, Font, textBrush, textRect, textFormat);
+            g.DrawString(_manager.Profiles[index].Name, Font, textBrush, GetRowTextArea(rowRect), textFormat);
         }
         g.TextRenderingHint = previousTextHint;
 
@@ -605,9 +790,14 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         g.DrawLine(xPen, cx - half, cy + half, cx + half, cy - half);
     }
 
-    /// <summary>Nothing genuinely specific to this widget left to paint on top - body/title/border/
-    /// Settings/Close/Manage Layouts.../Save Current Layout/the list itself are all LayeredWidgetForm's
-    /// own PaintChrome now (see ExtraButtons/GetContentButtons/GetListArea).</summary>
-    protected override void PaintContent(Graphics g, int contentWidth, int contentHeight) =>
+    /// <summary>Body/title/border/Settings/Close/Manage Layouts.../Save Current Layout/the list
+    /// itself are all LayeredWidgetForm's own PaintChrome now (see ExtraButtons/GetContentButtons/
+    /// GetListArea) - the row tooltip (see _rowTooltip/UpdateRowTooltips) is the only thing genuinely
+    /// specific to this widget still painted here, last, so it sits on top of everything else.</summary>
+    protected override void PaintContent(Graphics g, int contentWidth, int contentHeight)
+    {
         PaintChrome(g, contentWidth, contentHeight);
+        _rowTooltip.Paint(g, Font, SettingsMenuTooltipColor, ToWindow(new Rectangle(0, 0, contentWidth, contentHeight)),
+            Style.HeaderBorderMode ? ThemedTitle : null);
+    }
 }

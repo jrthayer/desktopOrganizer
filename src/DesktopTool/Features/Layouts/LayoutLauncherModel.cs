@@ -56,4 +56,10 @@ public sealed class LayoutLauncherModel : IWidgetStyle
     /// is taller. A direct +/- setting instead of the resize-drag-snapping this replaced, since sizing
     /// the list by row count is the actual thing being asked for, not a resize-interaction nicety.</summary>
     public int RowsShown { get; set; } = 5;
+
+    /// <summary>While on, RowsShown is kept pinned to the current saved-layout count at all times
+    /// (see LayoutLauncherWidget.SyncRowsShownToMax) - turning it on, and every layout this widget
+    /// itself adds or removes afterward (Save Current Layout, a row's own Copy/Delete), re-syncs
+    /// RowsShown (and so the widget's own size - see SetRowsShown/ResizeBodyHeight) to match.</summary>
+    public bool AlwaysMaxRows { get; set; }
 }

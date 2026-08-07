@@ -157,14 +157,12 @@ internal sealed class FenceForm : LayeredWidgetForm
     // Same arm-then-fire pattern as _settingsButtonArmed above, for the "+"/"x" buttons next to it.
     private bool _newFenceButtonArmed;
     private bool _deleteButtonArmed;
-    // OwnerDraw, not just BackColor/ForeColor - same reasoning as DropdownMenu's own _toolTip field
-    // comment: a themed (UxTheme) system draws a plain ToolTip natively and ignores those properties
-    // entirely.
-    private readonly ToolTip _toolTip = new() { OwnerDraw = true };
-    // Whichever of the "+"/"x" buttons' tooltip text is currently shown, or null - compared against
-    // on every mouse-move (see UpdateButtonTooltips) so ToolTip.Show isn't re-issued (and
-    // re-timed/re-flickered) for every pixel of movement while already hovering the same button.
-    private string? _visibleButtonTooltip;
+    // "Copy Fence"/"Delete Fence" over the "+"/"x" buttons - PaintedTooltip (DesktopTool.UI), hand-
+    // painted directly into this same bitmap rather than a native System.Windows.Forms.ToolTip (that
+    // control's own fade-in animation kept painting its default, non-themed look for a frame before
+    // OwnerDraw's content replaced it - not fully suppressible even with ShowAlways/UseAnimation/
+    // UseFading all set, see Layout Launcher's own history with it).
+    private readonly PaintedTooltip _buttonTooltip = new();
 
     // Whether the drag that's about to start is a resize (as opposed to a move) - LayeredWidgetForm's
     // own IsResizing now (set from OnNcLButtonDown's own base default); read back on OnDragEnd to
@@ -246,7 +244,6 @@ internal sealed class FenceForm : LayeredWidgetForm
         // no need to create (and remember to dispose) a private copy of a font every other themed
         // window in the app already shares.
         Font = AppTheme.Font;
-        _toolTip.Draw += DrawTooltip;
 
         Reanchor();
         RenderAndPresent();
@@ -316,6 +313,16 @@ internal sealed class FenceForm : LayeredWidgetForm
         return new Rectangle(x, newFenceRect.Y, SmallButtonSize, SettingsButtonHeight);
     }
 
+    /// <summary>Copy Fence/Delete Fence aren't ChromeButtons (they need their own hand-drawn glyphs -
+    /// see PaintChrome's own comment on why), so they need their own opt-in here to get the same
+    /// "always fully visible regardless of Style.Opacity" treatment Settings already gets for free.</summary>
+    protected override IEnumerable<Rectangle> AdditionalFullOpacityRegions(int contentWidth)
+    {
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        yield return ToWindow(GetNewFenceButtonRect(contentWidth, onLeft));
+        yield return ToWindow(GetDeleteButtonRect(contentWidth, onLeft));
+    }
+
     /// <summary>The scrollbar's own viewport - Scrollbar.GetGeometry only reads Right/Top/Height off
     /// this (a scrollbar always hugs the right edge of whatever it's given), so Left/Width beyond
     /// contentWidth itself don't matter here.</summary>
@@ -339,7 +346,6 @@ internal sealed class FenceForm : LayeredWidgetForm
         _itemRenameBox?.Dispose();
         _itemContextMenu?.Dispose();
         _dragGhost?.Dispose();
-        _toolTip.Dispose();
         foreach (var icon in _iconCache.Values)
             icon?.Dispose();
     }
@@ -482,11 +488,12 @@ internal sealed class FenceForm : LayeredWidgetForm
         UpdateButtonTooltips(e.Location);
     }
 
-    /// <summary>Shows/hides the "Copy Fence"/"Delete Fence" tooltip over the "+"/"x" buttons - only
-    /// meaningful while they're actually visible (ShowsButtons), and only re-issued on an
-    /// actual change of which button (if any) is hovered, rather than on every mouse-move, so
-    /// ToolTip.Show isn't re-triggered (and re-timed/re-flickered) for every pixel of movement while
-    /// already hovering the same one.</summary>
+    /// <summary>Shows/hides the "Copy Fence"/"Delete Fence" tooltip over the "+"/"x" buttons via the
+    /// shared PaintedTooltip - only meaningful while they're actually visible (ShowsButtons).
+    /// PaintedTooltip.Show/Hide already report whether anything actually changed, so this only
+    /// repaints when it did, rather than on every mouse-move. Target rects are converted to window-
+    /// space (via ToWindow) before reaching PaintedTooltip, since that class does no space conversion
+    /// of its own.</summary>
     private void UpdateButtonTooltips(Point windowLocation)
     {
         var contentSize = GetContentSize();
@@ -509,52 +516,12 @@ internal sealed class FenceForm : LayeredWidgetForm
             }
         }
 
-        if (text == _visibleButtonTooltip)
-            return;
-        _visibleButtonTooltip = text;
+        var changed = text is not null
+            ? _buttonTooltip.Show(text, ToWindow(buttonRect))
+            : _buttonTooltip.Hide();
 
-        if (text is not null)
-        {
-            var windowRect = ToWindow(buttonRect);
-
-            // Anchoring the tooltip's left edge to the button's left edge, as below, is fine almost
-            // everywhere - but for a fence sitting close enough to the right edge of its monitor,
-            // the tooltip (extending further right from there, past the button itself) could
-            // overflow off-screen. Left to the native tooltip control's own automatic "keep me on
-            // screen" repositioning, the relocated tooltip ended up landing right on top of the
-            // cursor - this window's own hover-tracking then saw a different top-level window now
-            // covering that exact point, treated it as the cursor having left, hid the tooltip,
-            // immediately saw the cursor was still right there and showed it again - a tight
-            // show/hide flicker loop. Computing a safe position ourselves up front (right-aligning
-            // to the button's right edge instead, only when actually needed) avoids that native
-            // reposition ever having a reason to kick in.
-            var formScreenOrigin = PointToScreen(Point.Empty);
-            var workingArea = Screen.FromControl(this).WorkingArea;
-            var tooltipWidth = TextRenderer.MeasureText(text, Font).Width + 16;
-            var x = formScreenOrigin.X + windowRect.Left + tooltipWidth > workingArea.Right
-                ? windowRect.Right - tooltipWidth
-                : windowRect.Left;
-
-            _toolTip.Show(text, this, x, windowRect.Bottom + 4);
-        }
-        else
-        {
-            _toolTip.Hide(this);
-        }
-    }
-
-    /// <summary>OwnerDraw's paint hook (see _toolTip's own field comment for why this is needed at
-    /// all) - dark background/border matching the rest of this fence's theme instead of a native
-    /// tooltip's white/light default. SettingsMenuTooltipColor (LayeredWidgetForm's own), not
-    /// ThemedBody - same fixed-WhiteSmoke-text reasoning as ChromeFill.</summary>
-    private void DrawTooltip(object? sender, DrawToolTipEventArgs e)
-    {
-        using (var background = new SolidBrush(SettingsMenuTooltipColor))
-            e.Graphics.FillRectangle(background, e.Bounds);
-        using (var borderPen = new Pen(Color.FromArgb(255, 20, 20, 24)))
-            e.Graphics.DrawRectangle(borderPen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
-        TextRenderer.DrawText(e.Graphics, e.ToolTipText, Font, e.Bounds, Color.WhiteSmoke,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        if (changed)
+            RenderAndPresent();
     }
 
     /// <summary>Live drop-target hint for an in-app item drag (see _draggingIndex), shown in the
@@ -696,11 +663,8 @@ internal sealed class FenceForm : LayeredWidgetForm
     {
         base.OnMouseLeave(e);
         SetHoverIndex(-1);
-        if (_visibleButtonTooltip is not null)
-        {
-            _visibleButtonTooltip = null;
-            _toolTip.Hide(this);
-        }
+        if (_buttonTooltip.Hide())
+            RenderAndPresent();
     }
 
     private void SetHoverIndex(int index)
@@ -863,8 +827,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             using var newFencePath = RoundedRect(newFenceRect, 6);
             using var newFenceFill = new SolidBrush(ChromeFill);
             g.FillPath(newFenceFill, newFencePath);
-            using var newFenceBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
-            g.DrawPath(newFenceBorderPen, newFencePath);
+            PaintHeaderBorderModeOutline(g, newFencePath);
 
             // The classic two-overlapping-squares "duplicate" glyph, hand-drawn like everything
             // else here rather than pulled from an icon font - this app has no icon asset library
@@ -890,8 +853,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             var deleteRect = ToWindow(GetDeleteButtonRect(contentWidth, onLeft));
             using var deletePath = RoundedRect(deleteRect, 6);
             g.FillPath(newFenceFill, deletePath);
-            using var deleteBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
-            g.DrawPath(deleteBorderPen, deletePath);
+            PaintHeaderBorderModeOutline(g, deletePath);
 
             using var xPen = new Pen(Color.WhiteSmoke, 1.6f);
             var xCenterX = deleteRect.X + deleteRect.Width / 2f;
@@ -902,6 +864,10 @@ internal sealed class FenceForm : LayeredWidgetForm
         }
 
         PaintItems(g, contentWidth, contentHeight);
+
+        // Drawn last so it sits on top of everything else already painted into this same bitmap.
+        _buttonTooltip.Paint(g, Font, SettingsMenuTooltipColor, ToWindow(new Rectangle(0, 0, contentWidth, contentHeight)),
+            Style.HeaderBorderMode ? ThemedTitle : null);
     }
 
     /// <summary>

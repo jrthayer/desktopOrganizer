@@ -684,8 +684,13 @@ internal abstract class LayeredWidgetForm : Form
 
     /// <summary>Header Border Mode's own outline (see IWidgetStyle.HeaderBorderMode) - a no-op unless
     /// it's on, shared by Settings/ChromeButton/ContentButton/PaintList so every element borders
-    /// itself in ThemedTitle the same way.</summary>
-    private void PaintHeaderBorderModeOutline(Graphics g, GraphicsPath path)
+    /// itself in ThemedTitle the same way, and draws NO border at all otherwise (not a fixed default
+    /// color swapped for a themed one - these elements are borderless by default, full stop, same as
+    /// Settings/ChromeButton/ContentButton already are). Protected so a subclass's own hand-drawn
+    /// buttons that aren't ChromeButtons (a Fence's own New/Delete squares - see
+    /// AdditionalFullOpacityRegions' own doc comment on why those stay separate) can opt into the
+    /// exact same all-or-nothing behavior instead of always drawing some border.</summary>
+    protected void PaintHeaderBorderModeOutline(Graphics g, GraphicsPath path)
     {
         if (!Style.HeaderBorderMode)
             return;
@@ -1622,8 +1627,39 @@ internal abstract class LayeredWidgetForm : Form
             PaintContent(g, contentWidth, contentHeight);
         }
 
-        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), RenderOpacity.Value);
+        LayeredWindowPresenter.Present(Handle, buffer, new Point(windowRect.Left, windowRect.Top), RenderOpacity.Value,
+            GetFullOpacityRegions(contentWidth));
     }
+
+    /// <summary>Window-space rects (see ToWindow) that should render at full opacity regardless of
+    /// Style.Opacity - the Settings button, its chained ChromeButtons (Layout Launcher's Close), and
+    /// whatever a subclass's own AdditionalFullOpacityRegions contributes (a Fence's own hand-drawn
+    /// New/Delete squares) - the same "always fully visible" treatment the Settings dropdown already
+    /// gets for free just by being a separate window. Null while ShowsButtons is false (nothing to
+    /// exempt - none of these are even painted then).</summary>
+    private List<Rectangle>? GetFullOpacityRegions(int contentWidth)
+    {
+        if (!ShowsButtons)
+            return null;
+
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        var regions = new List<Rectangle> { ToWindow(GetSettingsButtonRect(contentWidth, onLeft)) };
+
+        var buttons = ExtraButtons;
+        for (var i = 0; i < buttons.Count; i++)
+            regions.Add(ToWindow(GetExtraButtonRect(contentWidth, onLeft, i)));
+
+        regions.AddRange(AdditionalFullOpacityRegions(contentWidth));
+
+        return regions;
+    }
+
+    /// <summary>A subclass's own hand-drawn buttons that aren't ChromeButtons (a Fence's own New/
+    /// Delete squares, which need custom glyphs rather than a plain text label - see ChromeButton's
+    /// own doc comment on why those stay separate) but still want the same "always fully visible"
+    /// treatment as Settings/ChromeButton above. Only ever called while ShowsButtons is already true,
+    /// since that's the only time these are painted at all. Empty by default.</summary>
+    protected virtual IEnumerable<Rectangle> AdditionalFullOpacityRegions(int contentWidth) => Array.Empty<Rectangle>();
 
     /// <summary>Intercepts the OS's own non-client/interactive-move/resize handling. WM_MOVING/
     /// WM_SIZING are handled directly here now (see ComputeMovedBody/ComputeResizedBody) - DefWindowProc
