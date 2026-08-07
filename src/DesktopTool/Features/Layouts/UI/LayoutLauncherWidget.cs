@@ -27,7 +27,6 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // LayoutLauncherModel.Height's own "null until moved/resized once" comment) - a real resize
     // persists over this immediately, the same way a real move persists over the centered X/Y default.
     private const int DefaultBodyHeight = 120;
-    private const int CornerRadius = 10;
     private const int CloseButtonSize = 22;
     private const int ButtonSpacing = 4;
 
@@ -345,6 +344,27 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         RenderAndPresent();
     }
 
+    protected override void SetCornerRadius(int radius)
+    {
+        _model.CornerRadius = radius;
+        Persist();
+        RenderAndPresent();
+    }
+
+    protected override void SetTitleFontSize(int size)
+    {
+        _model.TitleFontSize = size;
+        Persist();
+        RenderAndPresent();
+    }
+
+    protected override void SetTitleAlignment(TitleAlignment alignment)
+    {
+        _model.TitleAlignment = alignment;
+        Persist();
+        RenderAndPresent();
+    }
+
     protected override void SetFullOpacityOnHover(bool enabled)
     {
         _model.FullOpacityOnHover = enabled;
@@ -356,7 +376,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     /// off it - the layout list itself comes back in a later step.</summary>
     protected override void PaintContent(Graphics g, int contentWidth, int contentHeight)
     {
-        PaintChrome(g, contentWidth, contentHeight, CornerRadius);
+        PaintChrome(g, contentWidth, contentHeight);
 
         if (!ShowsButtons)
             return;

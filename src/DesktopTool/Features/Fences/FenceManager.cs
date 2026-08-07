@@ -1,6 +1,7 @@
 using DesktopTool.Features.Fences.Native;
 using DesktopTool.Features.Fences.UI;
 using DesktopTool.Native;
+using DesktopTool.UI;
 
 namespace DesktopTool.Features.Fences;
 
@@ -557,6 +558,37 @@ public sealed class FenceManager : IDisposable
         if (model is null || model.Margin == clamped)
             return;
         model.Margin = clamped;
+        Save();
+    }
+
+    public void SetCornerRadius(Guid id, int radius)
+    {
+        var model = _models.Find(m => m.Id == id);
+        var clamped = Math.Clamp(radius, 0, 50);
+        if (model is null || model.CornerRadius == clamped)
+            return;
+        model.CornerRadius = clamped;
+        Save();
+    }
+
+    public void SetTitleFontSize(Guid id, int size)
+    {
+        var model = _models.Find(m => m.Id == id);
+        // Same range as the "Font Size" stepper itself (see LayeredWidgetForm.BuildHeaderSettingsRows)
+        // - kept in sync as a defensive clamp, not the primary enforcement.
+        var clamped = Math.Clamp(size, 7, 14);
+        if (model is null || model.TitleFontSize == clamped)
+            return;
+        model.TitleFontSize = clamped;
+        Save();
+    }
+
+    public void SetTitleAlignment(Guid id, TitleAlignment alignment)
+    {
+        var model = _models.Find(m => m.Id == id);
+        if (model is null || model.TitleAlignment == alignment)
+            return;
+        model.TitleAlignment = alignment;
         Save();
     }
 

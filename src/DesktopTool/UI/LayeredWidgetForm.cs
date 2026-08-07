@@ -104,6 +104,12 @@ internal abstract class LayeredWidgetForm : Form
     private IntPtr _themeBrush = IntPtr.Zero;
     private Color _themeBrushColor;
 
+    // Backs TitleFont - recreated only when Style.TitleFontSize actually changes, same reasoning as
+    // _themeBrush/_themeBrushColor above (a fresh Font/GDI handle on every single repaint would be
+    // both wasteful and, left undisposed between repaints, a real handle leak).
+    private Font? _titleFont;
+    private int _titleFontSize = -1;
+
     // True when the button row currently belongs on the bottom band instead of the top - see
     // ComputeButtonRowAtBottom. Kept in sync wherever a subclass's own position is computed/changed
     // (its own CreateParams, and every tick of a live drag) rather than read fresh on every use.
@@ -341,19 +347,55 @@ internal abstract class LayeredWidgetForm : Form
     protected abstract void SetOpacity(int opacity);
     protected abstract void SetTintStrength(int strength);
     protected abstract void SetMargin(int margin);
+    protected abstract void SetCornerRadius(int radius);
+    protected abstract void SetTitleFontSize(int size);
+    protected abstract void SetTitleAlignment(TitleAlignment alignment);
     protected abstract void SetTintColor(Color? color, bool exact);
     protected abstract void SetFullOpacityOnHover(bool enabled);
 
-    /// <summary>The Settings dropdown's default row list - Hide Title, Full Opacity When Active, then
-    /// the shared color grid/Header Darkness/Opacity/Tint Strength sliders/Margin stepper
-    /// (StyleMenuRows.Build). A subclass with nothing further to add (Layout Launcher) uses this
-    /// as-is; one that needs a different shape/order/extra rows (a Fence's own Hide Shortcut
-    /// Names/OCD Sizing) overrides this entirely instead of patching it, reusing the Cmd* ids/mutator
-    /// hooks above for whichever of these rows it keeps.</summary>
-    protected virtual List<DropdownMenu.Row> BuildSettingsRows()
+    /// <summary>Rows specific to a subclass's own feature - shown in a flyout labeled "Additional"
+    /// below "Base" (see BuildSettingsRows). Kept separate from the shared rows in BuildBaseSettingsRows
+    /// rather than folded into one combined list, so a subclass with nothing of its own (Layout
+    /// Launcher, so far) doesn't get a pointless empty flyout, and so what's genuinely feature-specific
+    /// (a Fence's own Hide Shortcut Names/OCD Sizing) never has to duplicate the shared rows around it
+    /// just to add a couple more. Null or empty means no flyout. Command ids used here are the
+    /// subclass's own (positive, in FenceForm's case) - route them in HandleSettingsCommand the same
+    /// way, falling through to base.HandleSettingsCommand for anything not recognized (the shared ids
+    /// these additional rows didn't add).</summary>
+    protected virtual IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => null;
+
+    /// <summary>Font Size (a stepper, same interface as Margin/Corner Radius) and Align (Left/Center/
+    /// Right, see DropdownMenu.Row.IsAlignmentPicker) - both affect the title text specifically (see
+    /// TitleFont/PaintChrome's title draw), nested in their own "Header" flyout at the top of "Base"
+    /// rather than inline, so they read as a distinct group from the fill/tint-driven rows below
+    /// them.</summary>
+    private List<DropdownMenu.Row> BuildHeaderSettingsRows() => new()
+    {
+        new(0, "Font Size", IsHeader: true),
+        new(0, string.Empty, IsStepper: true,
+            StepperValue: () => Style.TitleFontSize, OnStepperChange: SetTitleFontSize,
+            // Max of 14, not some rounder-looking number like 20 - TitleRowHeight is a fixed
+            // ~26-28px, and a much larger point size than this renders taller than that (vertically
+            // clipped by the row itself) rather than actually fitting.
+            StepperMin: 7, StepperMax: 14, StepperStep: 1, StepperSuffix: ""),
+        new(0, string.Empty, IsSeparator: true),
+        new(0, "Align", IsHeader: true),
+        new(0, string.Empty, IsAlignmentPicker: true,
+            AlignmentValue: () => Style.TitleAlignment, OnAlignmentChange: SetTitleAlignment),
+    };
+
+    /// <summary>The "Header" flyout (see BuildHeaderSettingsRows), then Hide Title, Full Opacity When
+    /// Active, and the shared color grid/Header Darkness/Opacity/Tint Strength sliders/Corner Radius/
+    /// Margin steppers (StyleMenuRows.Build) - every setting LayeredWidgetForm itself owns, regardless
+    /// of subclass. Shown in its own "Base" flyout (see BuildSettingsRows) rather than inline, so it
+    /// reads as a distinct group from whatever a subclass's own BuildAdditionalSettingsRows
+    /// contributes below it.</summary>
+    private List<DropdownMenu.Row> BuildBaseSettingsRows()
     {
         var rows = new List<DropdownMenu.Row>
         {
+            new(0, "Header", Submenu: BuildHeaderSettingsRows()),
+            new(0, string.Empty, IsSeparator: true),
             new(CmdToggleHideTitle, "Hide Title", HasCheckbox: true, IsChecked: () => HideTitle),
             new(CmdToggleFullOpacityOnHover, "Full Opacity When Active", HasCheckbox: true,
                 IsChecked: () => Style.FullOpacityOnHover,
@@ -361,14 +403,29 @@ internal abstract class LayeredWidgetForm : Form
             new(0, string.Empty, IsSeparator: true),
         };
         rows.AddRange(StyleMenuRows.Build(Style, DefaultBodyColor, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
-            SetHeaderDarkness, SetOpacity, SetTintStrength, SetMargin));
+            SetHeaderDarkness, SetOpacity, SetTintStrength, SetCornerRadius, SetMargin));
         return rows;
     }
 
-    /// <summary>Dispatches BuildSettingsRows' own default row ids - a subclass that overrides
-    /// BuildSettingsRows entirely typically overrides this too (rather than calling base first), since
-    /// its own row set rarely matches this shape exactly, but can still route its Hide Title/Full
-    /// Opacity/color rows through these same Cmd* ids/mutator hooks.</summary>
+    /// <summary>The Settings dropdown's default row list - just two flyouts: "Base" (see
+    /// BuildBaseSettingsRows, always present) and "Additional" (see BuildAdditionalSettingsRows, only
+    /// when a subclass has something of its own to add). Virtual, not sealed, in case a subclass ever
+    /// needs a genuinely different shape rather than just extra rows - but BuildAdditionalSettingsRows
+    /// should cover that need first.</summary>
+    protected virtual List<DropdownMenu.Row> BuildSettingsRows()
+    {
+        var rows = new List<DropdownMenu.Row>
+        {
+            new(0, "Base", Submenu: BuildBaseSettingsRows()),
+        };
+        if (BuildAdditionalSettingsRows() is { Count: > 0 } additional)
+            rows.Add(new DropdownMenu.Row(0, "Additional", Submenu: additional));
+        return rows;
+    }
+
+    /// <summary>Dispatches BuildSettingsRows' own default row ids - a subclass with its own additional
+    /// rows (see BuildAdditionalSettingsRows) handles its own command ids first and falls through to
+    /// base.HandleSettingsCommand(id) for anything else, rather than overriding this entirely.</summary>
     protected virtual void HandleSettingsCommand(int id)
     {
         switch (id)
@@ -405,9 +462,12 @@ internal abstract class LayeredWidgetForm : Form
     /// title text, and the Settings button - the chrome every widget on this base shares. A
     /// subclass's own PaintContent calls this first, then draws whatever's unique to it (a Fence's
     /// item grid and its own extra buttons chained off the Settings button - see
-    /// GetSettingsButtonRect) on top.</summary>
-    protected void PaintChrome(Graphics g, int contentWidth, int contentHeight, int cornerRadius)
+    /// GetSettingsButtonRect) on top. Corner rounding comes from Style.CornerRadius (see
+    /// IWidgetStyle) rather than a parameter, now that it's a user-adjustable per-element setting
+    /// same as Margin, not a fixed per-subclass constant.</summary>
+    protected void PaintChrome(Graphics g, int contentWidth, int contentHeight)
     {
+        var cornerRadius = Style.CornerRadius;
         using var body = RoundedRectPath.Full(ToWindow(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1)), cornerRadius);
         using (var bodyFill = new SolidBrush(ThemedBody))
             g.FillPath(bodyFill, body);
@@ -434,8 +494,14 @@ internal abstract class LayeredWidgetForm : Form
 
         if (TitleVisible && !IsRenaming)
         {
-            TextRenderer.DrawText(g, Title, Font, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleRowHeight)),
-                Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            var alignFlag = Style.TitleAlignment switch
+            {
+                TitleAlignment.Center => TextFormatFlags.HorizontalCenter,
+                TitleAlignment.Right => TextFormatFlags.Right,
+                _ => TextFormatFlags.Left,
+            };
+            TextRenderer.DrawText(g, Title, TitleFont, ToWindow(new Rectangle(8, 0, contentWidth - 16, TitleRowHeight)),
+                Color.WhiteSmoke, TextFormatFlags.VerticalCenter | alignFlag | TextFormatFlags.EndEllipsis);
         }
 
         if (ShowsButtons)
@@ -657,19 +723,54 @@ internal abstract class LayeredWidgetForm : Form
     /// <summary>Content-space height of the title row.</summary>
     protected abstract int TitleRowHeight { get; }
 
+    /// <summary>Same family as Control.Font, sized to Style.TitleFontSize (see the "Header" flyout,
+    /// BuildHeaderSettingsRows) - only the title text itself, its rename hit-test measurement, and
+    /// its rename EditBox use this instead of the plain Font property, since title font size is
+    /// title-only, not a whole-window setting (every other themed element - the rename box's own
+    /// chrome aside, the Settings dropdown, item labels - still uses Font unchanged).</summary>
+    protected Font TitleFont
+    {
+        get
+        {
+            var size = Style.TitleFontSize;
+            if (_titleFont is null || _titleFontSize != size)
+            {
+                _titleFont?.Dispose();
+                _titleFont = new Font(Font.FontFamily, size);
+                _titleFontSize = size;
+            }
+            return _titleFont;
+        }
+    }
+
+    /// <summary>The exact rect the title text renders into, content-relative - shifted per
+    /// Style.TitleAlignment (Left/Center/Right) to match PaintChrome's own TextFormatFlags-driven
+    /// placement, so hit-testing (IsOverTitleRow) always agrees with what's actually drawn - a click
+    /// past the end of a short/off-center title doesn't count as "on" it.</summary>
+    private Rectangle TitleTextRect(int contentWidth)
+    {
+        var available = Math.Max(0, contentWidth - 16);
+        var textWidth = Math.Min(available, TextRenderer.MeasureText(Title, TitleFont).Width);
+        var x = Style.TitleAlignment switch
+        {
+            TitleAlignment.Center => 8 + (available - textWidth) / 2,
+            TitleAlignment.Right => 8 + available - textWidth,
+            _ => 8,
+        };
+        return new Rectangle(x, 0, textWidth, TitleRowHeight);
+    }
+
     /// <summary>Whether lParam lands specifically on the rendered title text - not just anywhere in
-    /// the header row - gating right-click-to-rename/double-click-to-rename to the text itself (a
-    /// click past the end of a short title doesn't count as "on" it). Mirrors the actual title-text
-    /// paint position (see PaintContent's own title-drawing call, which should match this rect).</summary>
+    /// the header row - gating right-click-to-rename/double-click-to-rename to the text itself.
+    /// Mirrors the actual title-text paint position (see PaintContent's own title-drawing call, which
+    /// should match this rect).</summary>
     protected virtual bool IsOverTitleRow(IntPtr lParam)
     {
         if (!TitleVisible || !NativeMethods.GetWindowRect(Handle, out var rect))
             return false;
 
         var content = ToContent(ScreenLParamToWindowPoint(lParam, rect));
-        var maxWidth = Math.Max(0, GetContentSize().Width - 16);
-        var textWidth = Math.Min(maxWidth, TextRenderer.MeasureText(Title, Font).Width);
-        return new Rectangle(8, 0, textWidth, TitleRowHeight).Contains(content);
+        return TitleTextRect(GetContentSize().Width).Contains(content);
     }
 
     protected virtual void BeginRename()
@@ -679,7 +780,7 @@ internal abstract class LayeredWidgetForm : Form
 
         var maxWidth = Math.Max(0, GetContentSize().Width - 16);
         var rect = ToWindow(new Rectangle(6, 3, maxWidth, Math.Max(0, TitleRowHeight - 6)));
-        _renameBox = new EditBox(Handle, Title, ToScreen(rect), Font);
+        _renameBox = new EditBox(Handle, Title, ToScreen(rect), TitleFont);
         _renameBox.Commit += OnRenameCommit;
         _renameBox.Cancel += OnRenameCancel;
     }
@@ -825,6 +926,7 @@ internal abstract class LayeredWidgetForm : Form
             _renameBox?.Dispose();
             _titleContextMenu?.Dispose();
             SettingsDropdown?.Dispose();
+            _titleFont?.Dispose();
             DisposeOwnedResources();
             RenderOpacity.Dispose();
             if (_themeBrush != IntPtr.Zero)

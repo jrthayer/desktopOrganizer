@@ -1,5 +1,15 @@
 namespace DesktopTool.UI;
 
+/// <summary>How the title text sits within its own row - see IWidgetStyle.TitleAlignment,
+/// LayeredWidgetForm.PaintChrome's title draw. Public, not internal like IWidgetStyle itself -
+/// FenceModel/LayoutLauncherModel expose it through their own public TitleAlignment properties.</summary>
+public enum TitleAlignment
+{
+    Left,
+    Center,
+    Right,
+}
+
 /// <summary>The six Fence-style per-element styling knobs (tint color, header darkness, opacity,
 /// full-opacity-on-hover, tint strength, snap margin) - FenceModel and LayoutLauncherModel both
 /// implement this, and StyleMenuRows.Build/SettingsButtonOverflow operate against it instead of a
@@ -40,4 +50,16 @@ internal interface IWidgetStyle
     /// <summary>0-100 physical pixels - how far this element wants to sit from another snap
     /// target's edge instead of landing flush, like a CSS margin. 0 means flush.</summary>
     int Margin { get; set; }
+
+    /// <summary>Physical pixels - how rounded the element's own body/title corners are (see
+    /// LayeredWidgetForm.PaintChrome). 0 means square corners.</summary>
+    int CornerRadius { get; set; }
+
+    /// <summary>Point size of the title text specifically (see LayeredWidgetForm.TitleFont) -
+    /// independent of Control.Font, which every other themed element (rename box, dropdown, item
+    /// labels) still uses unchanged.</summary>
+    int TitleFontSize { get; set; }
+
+    /// <summary>How the title text sits within its own row - see LayeredWidgetForm.PaintChrome.</summary>
+    TitleAlignment TitleAlignment { get; set; }
 }

@@ -57,7 +57,9 @@ internal sealed class FenceForm : LayeredWidgetForm
     // before that gap grew.
     private const int SettingsButtonOverhang = 19;
     private const int TopMargin = OuterMarginPx + SettingsButtonOverhang;
-    private const int CornerRadius = 22;
+    // CornerRadius is a user-adjustable per-fence setting now (FenceModel.CornerRadius, via the
+    // "Corner Radius" stepper - see BuildSettingsRows), not a fixed constant - LayeredWidgetForm's
+    // own PaintChrome reads it directly off Style.
 
     // LayeredWidgetForm's own OuterMargin/TopBand/BottomBand/MaxTopBand contract, left entirely to
     // this override rather than generalized in the base - this fence's own split is asymmetric
@@ -97,14 +99,12 @@ internal sealed class FenceForm : LayeredWidgetForm
     private const int CmdResizeTopDown = 11;
     private const int CmdToggleOcdSizing = 12;
 
-    // Not real WM_COMMAND ids - just Row.Id values for the non-clickable section headers in
-    // BuildSettingsRows' dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command either
-    // way, so these only need to be distinct from real command ids, never looked up).
+    // Not a real WM_COMMAND id - just this row's own Row.Id value for the non-clickable "Fence
+    // Dimensions" section header inside the OCD flyout (see BuildAdditionalSettingsRows;
+    // DropdownMenu.Row.IsHeader rows don't dispatch a command either way, so this only needs to be
+    // distinct from real command ids, never looked up). Header Darkness/Opacity/Tint Strength/Corner
+    // Radius/Margin's own header tags are LayeredWidgetForm's own now (StyleMenuRows.Build).
     private const int TagFenceDimensionsHeader = 1004;
-    private const int TagHeaderDarknessHeader = 1005;
-    private const int TagFenceOpacityHeader = 1006;
-    private const int TagTintStrengthHeader = 1007;
-    private const int TagMarginHeader = 1008;
 
     private const int IconSize = 48;
     private const int GridPadding = 8;
@@ -889,7 +889,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         // Body/title fill, border, title text, and the Settings button itself are all
         // LayeredWidgetForm's own now - this only draws what's genuinely fence-specific: the "+"/"x"
         // buttons chained off Settings, and the item grid (see PaintItems).
-        PaintChrome(g, contentWidth, contentHeight, CornerRadius);
+        PaintChrome(g, contentWidth, contentHeight);
 
         if (ShowsButtons)
         {
@@ -1199,70 +1199,31 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     protected override int TitleRowHeight => TitleBarHeight;
 
-    /// <summary>Per-fence settings, opened via LayeredWidgetForm's own OpenSettingsMenu once this
-    /// fence is active (see OnDeactivate and the settings-button hit-test carve-out). "Fence Color"
-    /// is inlined directly as a flat group (its own header already says what it is, without needing
-    /// an outer flyout-anchor row to name it too), while "Fence Dimensions" is nested behind an
-    /// "OCD" flyout (see DropdownMenu.Row.Submenu) instead. "Delete Fence" isn't a row here - it's
-    /// the "x" button next to Settings (see GetDeleteButtonRect/ConfirmDelete), same as "Rename"
-    /// lives in the header's own context menu rather than here.</summary>
-    protected override List<DropdownMenu.Row> BuildSettingsRows()
+    /// <summary>Everything genuinely unique to a fence, not shared with any other widget on this
+    /// base - shown in the "Additional" flyout LayeredWidgetForm's own default BuildSettingsRows adds
+    /// at the top of the menu when this returns non-empty. Hide Title/Full Opacity When Active/the
+    /// color grid/sliders/Corner Radius/Margin are all the base's own default rows now - this fence
+    /// doesn't need to (and no longer does) rebuild the whole row list just to add these three.
+    /// "Delete Fence" isn't a row here either way - it's the "x" button next to Settings (see
+    /// GetDeleteButtonRect/ConfirmDelete), same as "Rename" lives in the header's own context menu.</summary>
+    protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => new List<DropdownMenu.Row>
     {
-        var rows = new List<DropdownMenu.Row>
-        {
-            new(CmdToggleHideLabels, "Hide Shortcut Names", HasCheckbox: true, IsChecked: () => _model.HideLabels),
-            new(CmdToggleHideTitle, "Hide Title", HasCheckbox: true, IsChecked: () => _model.HideTitle),
-            new(CmdToggleOcdSizing, "OCD Fence Sizing", HasCheckbox: true, IsChecked: () => _model.OcdFenceSizing,
-                Tooltip: GetMenuTooltipText(CmdToggleOcdSizing)),
-            new(CmdToggleFullOpacityOnHover, "Full Opacity When Active", HasCheckbox: true,
-                IsChecked: () => _model.FullOpacityOnHover,
-                Tooltip: "Full opacity while hovered, dragged/resized, or this menu is open"),
-            new(0, string.Empty, IsSeparator: true),
-        };
-        // The color grid (Default + presets + Custom... + Eyedropper) - shared with
-        // LayoutLauncherWidget's own options menu now (see StyleMenuRows.BuildColorGrid's own
-        // comment for why this fence's remaining rows below - sliders/margin/OCD sizing - still
-        // build separately instead of also going through Build's fixed shape). Only the header
-        // wording ("Fence Color" instead of "Color") is fence-specific.
-        rows.AddRange(StyleMenuRows.BuildColorGrid(_model, DefaultBodyColor, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase, "Fence Color"));
-        // No separator before this header - it's still part of the "Fence Color" category (how the
-        // fence's own colors look), just its own labeled control rather than lumped under that header.
-        rows.Add(new DropdownMenu.Row(TagHeaderDarknessHeader, "Header Darkness", IsHeader: true));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
-            SliderValue: () => _model.HeaderDarkness / 100.0,
-            OnSliderChange: value => SetHeaderDarkness((int)Math.Round(value * 100))));
-        rows.Add(new DropdownMenu.Row(TagFenceOpacityHeader, "Fence Opacity", IsHeader: true));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
-            SliderValue: () => _model.Opacity / 100.0,
-            OnSliderChange: value => SetOpacity((int)Math.Round(value * 100))));
-        rows.Add(new DropdownMenu.Row(TagTintStrengthHeader, "Tint Strength", IsHeader: true));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
-            SliderValue: () => _model.TintStrength / 100.0,
-            OnSliderChange: value => SetTintStrength((int)Math.Round(value * 100))));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
-        // How far this fence wants to sit from another fence's edge when it snaps against one (see
-        // FenceManager.GetOtherFenceEdges) - this fence's own value, not the other one's, the same
-        // way OcdFenceSizing/HeaderDarkness/etc. above are all per-fence rather than app-wide. A
-        // typed number with +/- steppers rather than a slider like the others above - a pixel count
-        // is exact-value-driven (you want e.g. "10", not "whatever a slider drag landed near").
-        rows.Add(new DropdownMenu.Row(TagMarginHeader, "Fence Margin", IsHeader: true));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsStepper: true,
-            StepperValue: () => _model.Margin, OnStepperChange: SetMargin,
-            StepperMin: 0, StepperMax: 100, StepperStep: 5, StepperSuffix: "px"));
-        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
-        // A flyout instead of an inline "Fence Dimensions" header/group (see DropdownMenu.Row.Submenu)
-        // - one fewer always-visible row, and "OCD" doubles as a nod to "OCD Fence Sizing" above. The
-        // header now lives inside the flyout itself instead, same as "Fence Color" above.
-        rows.Add(new DropdownMenu.Row(0, "OCD", Submenu: new List<DropdownMenu.Row>
+        new(CmdToggleHideLabels, "Hide Shortcut Names", HasCheckbox: true, IsChecked: () => _model.HideLabels),
+        new(CmdToggleOcdSizing, "OCD Fence Sizing", HasCheckbox: true, IsChecked: () => _model.OcdFenceSizing,
+            Tooltip: GetMenuTooltipText(CmdToggleOcdSizing)),
+        new(0, string.Empty, IsSeparator: true),
+        // A nested flyout instead of an inline "Fence Dimensions" header/group (see
+        // DropdownMenu.Row.Submenu) - one fewer always-visible row, and "OCD" doubles as a nod to
+        // "OCD Fence Sizing" just above it.
+        new(0, "OCD", Submenu: new List<DropdownMenu.Row>
         {
             new(TagFenceDimensionsHeader, "Fence Dimensions", IsHeader: true),
             new(0, string.Empty, IsSeparator: true),
             new(CmdResizeBoth, "Both"),
             new(CmdResizeLeftRight, "Left/Right"),
             new(CmdResizeTopDown, "Top/Down"),
-        }));
-        return rows;
-    }
+        }),
+    };
 
     // SettingsMenuFieldColor/HoverColor/AccentColor/BorderColor/TooltipColor and the dropdown's own
     // reposition-on-resize are all LayeredWidgetForm's own defaults now (ChromeFill/ThemedMenuSelected/
@@ -1279,38 +1240,22 @@ internal sealed class FenceForm : LayeredWidgetForm
         _ => null,
     };
 
-    /// <summary>Dispatches a clicked Settings-dropdown row id - see LayeredWidgetForm.OpenSettingsMenu,
-    /// which calls this directly (not via WM_COMMAND).</summary>
+    /// <summary>Dispatches a clicked Settings-dropdown row id - only this fence's own additional-rows
+    /// ids (see BuildAdditionalSettingsRows) need handling here; everything else (Hide Title, Full
+    /// Opacity, the color/sliders/Corner Radius/Margin rows) is LayeredWidgetForm's own default
+    /// row set, so falls through to its own HandleSettingsCommand - which still ends up calling this
+    /// fence's own SetTintColor/SetOpacity/etc. overrides via ordinary virtual dispatch.</summary>
     protected override void HandleSettingsCommand(int id)
     {
         switch (id)
         {
             case CmdToggleHideLabels: ToggleHideLabels(); break;
-            case CmdToggleHideTitle: HideTitle = !HideTitle; break;
             case CmdResizeBoth: FormatDimensions(adjustWidth: true, adjustHeight: true); break;
             case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
             case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
             case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
-            case CmdToggleFullOpacityOnHover:
-                SetFullOpacityOnHover(!_model.FullOpacityOnHover);
-                RenderOpacity.SnapToTarget();
-                RenderAndPresent();
-                break;
-            case CmdColorDefault:
-            case CmdColorCustom:
-            case CmdColorEyedrop:
-            case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
-                // Default/preset/Custom.../Eyedropper - same shared handling
-                // LayoutLauncherWidget's own color rows use too (see StyleMenuRows' own doc
-                // comment). The Eyedropper pick also resets Opacity/Tint Strength so it starts out
-                // pixel-exact, same as this used to do inline via PickEyedropperColor.
-                StyleMenuRows.TryHandleColorCommand(id, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
-                    DefaultBodyColor, this, CurrentTint, color => SetTintColor(color, exact: false), color =>
-                    {
-                        SetTintColor(color, exact: true);
-                        SetOpacity(100);
-                        SetTintStrength(0);
-                    });
+            default:
+                base.HandleSettingsCommand(id);
                 break;
         }
     }
@@ -1367,6 +1312,30 @@ internal sealed class FenceForm : LayeredWidgetForm
     protected override void SetMargin(int margin)
     {
         _manager.SetMargin(FenceId, margin);
+        RenderAndPresent();
+    }
+
+    /// <summary>"Fence Corner Radius" stepper - same live-drag pattern as SetMargin above.
+    /// PaintChrome (LayeredWidgetForm's own) reads Style.CornerRadius directly, so a repaint is all
+    /// that's needed here for the new value to actually show.</summary>
+    protected override void SetCornerRadius(int radius)
+    {
+        _manager.SetCornerRadius(FenceId, radius);
+        RenderAndPresent();
+    }
+
+    /// <summary>"Font Size" stepper (inside the "Header" flyout) - same live-drag pattern as
+    /// SetMargin/SetCornerRadius above.</summary>
+    protected override void SetTitleFontSize(int size)
+    {
+        _manager.SetTitleFontSize(FenceId, size);
+        RenderAndPresent();
+    }
+
+    /// <summary>"Align" Left/Center/Right picker (inside the "Header" flyout).</summary>
+    protected override void SetTitleAlignment(TitleAlignment alignment)
+    {
+        _manager.SetTitleAlignment(FenceId, alignment);
         RenderAndPresent();
     }
 

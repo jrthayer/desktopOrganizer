@@ -2,7 +2,8 @@ namespace DesktopTool.UI;
 
 /// <summary>The Fence-style settings-dropdown block shared by anything styled via IWidgetStyle -
 /// the color grid (Default + 8 presets + Custom... + Eyedropper, see BuildColorGrid) and the
-/// Header Darkness/Opacity/Tint Strength sliders plus the Margin stepper, in that order. A caller
+/// Header Darkness/Opacity/Tint Strength sliders plus the Corner Radius/Margin steppers, in that
+/// order. A caller
 /// (FenceForm, LayoutLauncherWidget, or a future widget) builds its own full row list by
 /// prepending/appending whatever extra rows are specific to it (Hide Title, OCD Sizing, etc.)
 /// around what Build (or, for a caller with its own differently-shaped slider/margin block,
@@ -61,6 +62,7 @@ internal static class StyleMenuRows
         Action<int> onHeaderDarknessChange,
         Action<int> onOpacityChange,
         Action<int> onTintStrengthChange,
+        Action<int> onCornerRadiusChange,
         Action<int> onMarginChange)
     {
         var rows = BuildColorGrid(style, defaultSwatch, colorDefaultId, colorCustomId, colorEyedropId, colorPresetBaseId);
@@ -78,6 +80,12 @@ internal static class StyleMenuRows
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSlider: true,
             SliderValue: () => style.TintStrength / 100.0,
             OnSliderChange: value => onTintStrengthChange((int)Math.Round(value * 100))));
+
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
+        rows.Add(new DropdownMenu.Row(0, "Corner Radius", IsHeader: true));
+        rows.Add(new DropdownMenu.Row(0, string.Empty, IsStepper: true,
+            StepperValue: () => style.CornerRadius, OnStepperChange: onCornerRadiusChange,
+            StepperMin: 0, StepperMax: 50, StepperStep: 1, StepperSuffix: "px"));
 
         rows.Add(new DropdownMenu.Row(0, string.Empty, IsSeparator: true));
         rows.Add(new DropdownMenu.Row(0, "Margin", IsHeader: true));

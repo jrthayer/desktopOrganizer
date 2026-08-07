@@ -131,6 +131,17 @@ public sealed class FenceModel : IWidgetStyle
     /// flush edge-to-edge, the original behavior. Doesn't affect snapping to a custom snap line.</summary>
     public int Margin { get; set; }
 
+    /// <summary>Physical pixels - how rounded this fence's own body/title corners are (see
+    /// LayeredWidgetForm.PaintChrome). 22 matches the fixed radius this used to be before it became
+    /// adjustable.</summary>
+    public int CornerRadius { get; set; } = 22;
+
+    /// <summary>Point size of the title text - 9 matches AppTheme.Font, the fixed size every fence
+    /// used before this became adjustable.</summary>
+    public int TitleFontSize { get; set; } = 9;
+
+    public TitleAlignment TitleAlignment { get; set; } = TitleAlignment.Left;
+
     [JsonIgnore]
     public Rectangle Bounds
     {

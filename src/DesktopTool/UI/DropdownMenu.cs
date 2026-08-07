@@ -58,7 +58,15 @@ internal sealed class DropdownMenu : Form
         int StepperMin = 0,
         int StepperMax = 100,
         int StepperStep = 1,
-        string StepperSuffix = "");
+        string StepperSuffix = "",
+        // IsAlignmentPicker turns this row into three side-by-side buttons (Left/Center/Right) - a
+        // plain click on whichever one fires OnAlignmentChange immediately, same one-shot feel as
+        // AdjustStepper. AlignmentValue is read fresh here every repaint, same live-callback pattern
+        // as StepperValue/SliderValue/IsChecked. Id/Text are unused for these rows; the label lives
+        // in a preceding IsHeader row instead.
+        bool IsAlignmentPicker = false,
+        Func<TitleAlignment>? AlignmentValue = null,
+        Action<TitleAlignment>? OnAlignmentChange = null);
 
     private const int RowPadding = 8;
     private const int CheckboxSize = 12;
@@ -354,7 +362,7 @@ internal sealed class DropdownMenu : Form
 
             var row = rows[i];
             var height = row.IsSeparator ? SeparatorHeight
-                : row.IsSlider || row.IsStepper ? SliderRowHeight
+                : row.IsSlider || row.IsStepper || row.IsAlignmentPicker ? SliderRowHeight
                 : Math.Max(TextRenderer.MeasureText(row.Text, font).Height + 8, MinRowHeight);
             rowRects.Add(new Rectangle(1, y, width - 2, height));
             y += height;
@@ -400,6 +408,12 @@ internal sealed class DropdownMenu : Form
         if (row.IsStepper)
         {
             DrawStepper(g, row, rect);
+            return;
+        }
+
+        if (row.IsAlignmentPicker)
+        {
+            DrawAlignmentPicker(g, row, rect);
             return;
         }
 
@@ -585,6 +599,65 @@ internal sealed class DropdownMenu : Form
         return (minus, plus);
     }
 
+    private static readonly TitleAlignment[] AlignmentValues = { TitleAlignment.Left, TitleAlignment.Center, TitleAlignment.Right };
+    private static readonly string[] AlignmentLabels = { "Left", "Center", "Right" };
+
+    /// <summary>Three equal-width buttons (Left/Center/Right) filling the row, with a small gap
+    /// between each - shared between DrawAlignmentPicker and the click hit-testing in OnMouseDown, so
+    /// the painted buttons and the clickable area are always the exact same rectangles.</summary>
+    private static Rectangle[] AlignmentButtonRects(Rectangle rowRect)
+    {
+        const int gap = 4;
+        var inner = new Rectangle(rowRect.X + RowPadding, rowRect.Y + 3, rowRect.Width - RowPadding * 2, rowRect.Height - 6);
+        var segmentWidth = (inner.Width - gap * 2) / 3;
+        var first = new Rectangle(inner.X, inner.Y, segmentWidth, inner.Height);
+        var second = new Rectangle(first.Right + gap, inner.Y, segmentWidth, inner.Height);
+        // The third segment absorbs the width lost to integer division above, rather than a possible
+        // 1-2px gap at the row's own right edge.
+        var third = new Rectangle(second.Right + gap, inner.Y, Math.Max(0, inner.Right - (second.Right + gap)), inner.Height);
+        return new[] { first, second, third };
+    }
+
+    /// <summary>Left/Center/Right, each its own outlined button - the current one filled/outlined in
+    /// Accent, same "selected" language as a swatch's own ring (DrawGridItem). AlignmentValue is read
+    /// fresh here every repaint, same live-callback pattern as StepperValue/SliderValue/IsChecked.</summary>
+    private void DrawAlignmentPicker(Graphics g, Row row, Rectangle rect)
+    {
+        var current = row.AlignmentValue?.Invoke() ?? TitleAlignment.Left;
+        var buttonRects = AlignmentButtonRects(rect);
+
+        for (var i = 0; i < buttonRects.Length; i++)
+        {
+            var selected = AlignmentValues[i] == current;
+            using (var path = RoundedRectPath.Full(buttonRects[i], 4))
+            {
+                if (selected)
+                    using (var fillBrush = new SolidBrush(Color.FromArgb(50, _getAccent())))
+                        g.FillPath(fillBrush, path);
+                using var borderPen = new Pen(selected ? _getAccent() : _getCheckboxBorder(), selected ? 2 : 1);
+                g.DrawPath(borderPen, path);
+            }
+            TextRenderer.DrawText(g, AlignmentLabels[i], _font, buttonRects[i], Color.WhiteSmoke,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    /// <summary>A plain click on whichever button (if any) the click landed on - same one-shot feel
+    /// as AdjustStepper, no press-and-hold.</summary>
+    private void AdjustAlignment(int index, Point clientPoint)
+    {
+        var row = _rows[index];
+        var buttonRects = AlignmentButtonRects(_rowRects[index]);
+        for (var i = 0; i < buttonRects.Length; i++)
+        {
+            if (!buttonRects[i].Contains(clientPoint))
+                continue;
+            row.OnAlignmentChange?.Invoke(AlignmentValues[i]);
+            Invalidate();
+            return;
+        }
+    }
+
     private int RowAt(Point clientPoint)
     {
         for (var i = 0; i < _rowRects.Count; i++)
@@ -615,6 +688,10 @@ internal sealed class DropdownMenu : Form
         else if (_rows[index].IsStepper)
         {
             AdjustStepper(index, e.Location);
+        }
+        else if (_rows[index].IsAlignmentPicker)
+        {
+            AdjustAlignment(index, e.Location);
         }
     }
 
@@ -786,7 +863,7 @@ internal sealed class DropdownMenu : Form
         if (index < 0)
             return;
 
-        if (_rows[index].IsSlider || _rows[index].IsStepper)
+        if (_rows[index].IsSlider || _rows[index].IsStepper || _rows[index].IsAlignmentPicker)
             return;
 
         if (_rows[index].Submenu is { } submenuRows)

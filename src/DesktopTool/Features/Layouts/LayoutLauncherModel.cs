@@ -41,6 +41,9 @@ public sealed class LayoutLauncherModel : IWidgetStyle
     public bool FullOpacityOnHover { get; set; }
     public int TintStrength { get; set; } = DefaultTintStrength;
     public int Margin { get; set; }
+    public int CornerRadius { get; set; } = 10;
+    public int TitleFontSize { get; set; } = 9;
+    public TitleAlignment TitleAlignment { get; set; } = TitleAlignment.Left;
 
     /// <summary>Whether the widget should currently be showing - persisted so the tray's "Layout
     /// Launcher" toggle survives a restart instead of always defaulting back to shown.</summary>

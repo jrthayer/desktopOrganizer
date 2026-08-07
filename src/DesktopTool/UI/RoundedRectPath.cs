@@ -10,6 +10,15 @@ internal static class RoundedRectPath
     public static GraphicsPath Full(Rectangle bounds, int radius)
     {
         var path = new GraphicsPath();
+        // AddArc throws for a zero (or negative) width/height bounding box - a plain square-cornered
+        // rectangle instead, now that Corner Radius (see IWidgetStyle) is a user-adjustable setting
+        // whose floor is legitimately 0, not just a fixed positive constant like this used to always
+        // be called with.
+        if (radius <= 0)
+        {
+            path.AddRectangle(bounds);
+            return path;
+        }
         int d = radius * 2;
         path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
         path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
@@ -24,6 +33,11 @@ internal static class RoundedRectPath
     public static GraphicsPath Top(Rectangle bounds, int radius)
     {
         var path = new GraphicsPath();
+        if (radius <= 0)
+        {
+            path.AddRectangle(bounds);
+            return path;
+        }
         int d = radius * 2;
         path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
         path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
