@@ -65,6 +65,17 @@ See [`src/DesktopTool/Features/Snapping/README.md`](src/DesktopTool/Features/Sna
 for what it does and how the two features above use it. All of its code
 lives under [`src/DesktopTool/Features/Snapping`](src/DesktopTool/Features/Snapping).
 
+## Shared UI foundation
+
+Every draggable on-screen widget (a fence, the Layout Launcher) is built on
+the same [`LayeredWidgetForm`](src/DesktopTool/UI/LayeredWidgetForm.cs) base
+class - move/resize/snap, rename, a Settings menu, and theming all work the
+same way for both rather than each feature reinventing them.
+
+See [`src/DesktopTool/UI/README.md`](src/DesktopTool/UI/README.md) for that
+base class and the rest of the shared dark-themed controls it's built from.
+All of its code lives under [`src/DesktopTool/UI`](src/DesktopTool/UI).
+
 ## Tray menu
 
 - **New Fence** — creates a new, empty fence.
