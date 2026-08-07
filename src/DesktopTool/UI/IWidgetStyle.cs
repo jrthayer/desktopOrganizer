@@ -62,4 +62,11 @@ internal interface IWidgetStyle
 
     /// <summary>How the title text sits within its own row - see LayeredWidgetForm.PaintChrome.</summary>
     TitleAlignment TitleAlignment { get; set; }
+
+    /// <summary>While on, every element this widget draws - its own outer border, its buttons (see
+    /// LayeredWidgetForm.PaintSettingsButton/PaintExtraButtons/PaintContentButtons), and its list
+    /// container (see PaintList) - is bordered in the header/title band's own color (ThemedTitle)
+    /// instead of each one's usual border color, tying the whole widget together as one visibly
+    /// matched set.</summary>
+    bool HeaderBorderMode { get; set; }
 }

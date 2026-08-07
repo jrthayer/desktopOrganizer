@@ -771,12 +771,12 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// against - _model.Bounds itself, same as always.</summary>
     protected override Rectangle GetCurrentBody() => _model.Bounds;
 
-    protected override Guid SnapExcludeId => FenceId;
     protected override int SnapMargin => _model.Margin;
 
     // ComputeMovedBody/ComputeResizedBody/BeginSnapDrag all use LayeredWidgetForm's own defaults
-    // unchanged - this fence's own snapping (against other fences' edges and custom snap lines) is
-    // exactly what those defaults already do via SnapExcludeId/SnapMargin/Fences above.
+    // unchanged - this fence's own snapping (against every other live widget's edges - other fences,
+    // the Layout Launcher, any future widget - and custom snap lines) is exactly what those defaults
+    // already do via GetOtherWidgetEdges/SnapMargin/Fences above.
 
     protected override void OnDragEnd()
     {

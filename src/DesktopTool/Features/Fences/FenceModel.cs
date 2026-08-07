@@ -142,6 +142,8 @@ public sealed class FenceModel : IWidgetStyle
 
     public TitleAlignment TitleAlignment { get; set; } = TitleAlignment.Left;
 
+    public bool HeaderBorderMode { get; set; }
+
     [JsonIgnore]
     public Rectangle Bounds
     {

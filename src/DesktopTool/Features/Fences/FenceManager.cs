@@ -91,6 +91,7 @@ public sealed class FenceManager : IDisposable
             CornerRadius = source.CornerRadius,
             TitleFontSize = source.TitleFontSize,
             TitleAlignment = source.TitleAlignment,
+            HeaderBorderMode = source.HeaderBorderMode,
         };
         _models.Add(model);
         ShowFence(model);
@@ -338,52 +339,6 @@ public sealed class FenceManager : IDisposable
                 NativeMethods.SetWindowPos(form.Handle, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
                     NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         }
-    }
-
-    /// <summary>Candidate snap positions from every other currently-tracked fence's edges - Left/
-    /// Right (vertical, for X-axis snapping) and Top/Bottom (horizontal, for Y-axis snapping) - for
-    /// SnapLineManager.SnapMove/SnapResize. Not filtered by visibility: FenceForm.Show/SetVisible
-    /// change visibility via a raw ShowWindow call that bypasses Control.Visible, so a reliable
-    /// check would need IsWindowVisible; not worth that plumbing just to avoid snapping to a
-    /// currently-hidden ("Show/Hide All") fence's edges.
-    ///
-    /// When excludeId's own fence has FenceModel.Margin set - it's the dragged fence's own value
-    /// that applies, like a CSS margin, not each candidate fence's own - every other fence's edge
-    /// also contributes a second candidate offset outward by that amount (their Left minus margin,
-    /// their Right plus margin, etc.) alongside the flush one, not replacing it: flush alignment
-    /// (lining an edge up exactly with another fence's same-side edge, e.g. two Lefts) is still just
-    /// as valid a thing to snap to as resting adjacent to it with a gap. SnapEngine's own
-    /// nearest-candidate-wins logic picks whichever of the two is actually closest.
-    ///
-    /// marginOverride lets a non-fence caller (LayoutLauncherWidget - not a FenceModel, so it has no
-    /// entry in _models for excludeId to ever match) supply its own margin directly instead of it
-    /// silently resolving to 0 via the _models lookup below. Null (every FenceForm call site) keeps
-    /// the original lookup-by-excludeId behavior unchanged.</summary>
-    public (IReadOnlyList<int> Vertical, IReadOnlyList<int> Horizontal) GetOtherFenceEdges(Guid excludeId, int? marginOverride = null)
-    {
-        var margin = marginOverride ?? _models.Find(m => m.Id == excludeId)?.Margin ?? 0;
-        var vertical = new List<int>();
-        var horizontal = new List<int>();
-
-        foreach (var model in _models)
-        {
-            if (model.Id == excludeId)
-                continue;
-            vertical.Add(model.Bounds.Left);
-            vertical.Add(model.Bounds.Right);
-            horizontal.Add(model.Bounds.Top);
-            horizontal.Add(model.Bounds.Bottom);
-
-            if (margin > 0)
-            {
-                vertical.Add(model.Bounds.Left - margin);
-                vertical.Add(model.Bounds.Right + margin);
-                horizontal.Add(model.Bounds.Top - margin);
-                horizontal.Add(model.Bounds.Bottom + margin);
-            }
-        }
-
-        return (vertical, horizontal);
     }
 
     /// <summary>Moves an item from one fence to another - unlike MoveFile (reorder within a single

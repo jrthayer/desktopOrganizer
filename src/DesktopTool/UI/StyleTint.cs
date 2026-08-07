@@ -69,4 +69,13 @@ internal static class StyleTint
         (int)Math.Round(color.R * (1 - amount)),
         (int)Math.Round(color.G * (1 - amount)),
         (int)Math.Round(color.B * (1 - amount)));
+
+    /// <summary>Blends color toward white by amount (0-1) - the mirror image of DarkenTowardBlack,
+    /// for a shade that needs to read as raised against a base color rather than sunken (see
+    /// LayeredWidgetForm.ThemedField, lightened off DefaultBodyColor itself rather than off a fixed
+    /// AppTheme gray, so it stays lighter than whatever body color a widget actually has).</summary>
+    public static Color LightenTowardWhite(Color color, double amount) => Color.FromArgb(255,
+        (int)Math.Round(color.R + (255 - color.R) * amount),
+        (int)Math.Round(color.G + (255 - color.G) * amount),
+        (int)Math.Round(color.B + (255 - color.B) * amount));
 }

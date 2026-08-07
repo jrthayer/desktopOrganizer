@@ -86,6 +86,14 @@ internal abstract class LayeredWidgetForm : Form
     private bool _isNonClientHovered;
     protected bool IsHovered => _isClientHovered || _isNonClientHovered;
 
+    // Which of the base's own buttons (if any) the cursor currently sits over - drives the same
+    // translucent-white hover tint a Fence's own icon-grid cells use (see PaintButtonHoverTint),
+    // just for Settings/ChromeButton/ContentButton instead. Recomputed on every OnMouseMove/
+    // OnMouseLeave (see UpdateButtonHover), repainting only on an actual change.
+    private enum HoveredButtonKind { None, Settings, Extra, Content }
+    private HoveredButtonKind _hoveredButtonKind = HoveredButtonKind.None;
+    private int _hoveredButtonIndex = -1;
+
     // Fixed anchor a drag/resize measures against every tick, instead of trusting the OS's own
     // incrementally-proposed rect (drift/stickiness otherwise) - captured once, from GetCurrentBody,
     // right as WM_ENTERSIZEMOVE fires.
@@ -134,11 +142,19 @@ internal abstract class LayeredWidgetForm : Form
     // The currently-open Settings dropdown, or null - see OpenSettingsMenu.
     protected DropdownMenu? SettingsDropdown { get; private set; }
 
+    // Every live LayeredWidgetForm on screen right now - a fence, the Layout Launcher, any future
+    // widget built on this base - registered/unregistered in the constructor/Dispose below. Lets
+    // GetOtherWidgetEdges gather snap candidates from every OTHER widget generically, without any
+    // one widget type (FenceManager, say) needing to know the others exist or hold a bolted-on
+    // bounds-tracking property per widget type.
+    private static readonly List<LayeredWidgetForm> _liveWidgets = new();
+
     protected LayeredWidgetForm(float initialOpacity, FenceManager fences)
     {
         Fences = fences;
         RenderOpacity = new OpacityAnimator(initialOpacity, () => TargetOpacity, RenderAndPresent);
         Activation.Changed += RenderAndPresent;
+        _liveWidgets.Add(this);
     }
 
     /// <summary>Lazily (re)creates the shared native brush only when color has actually changed since
@@ -273,6 +289,20 @@ internal abstract class LayeredWidgetForm : Form
     /// stay readable no matter how light/bright the element's own picked color is.</summary>
     protected Color ChromeFill => StyleTint.Tint(DefaultBodyColor, CurrentTint, StyleTint.SafeChromeBlend);
 
+    /// <summary>A widget's own secondary panels (a list's alternating row background - see Layout
+    /// Launcher's PaintListRow - or anything else that wants visible separation from the plain body
+    /// fill) alternate between this and ThemedFieldDark. Tinted at the same fixed SafeChromeBlend as
+    /// ChromeFill rather than the user's adjustable Tint Strength, so the two stay visibly distinct
+    /// from each other and from the body even under an Eyedropper-exact pick. Lightened off
+    /// DefaultBodyColor itself (see StyleTint.LightenTowardWhite), not a fixed AppTheme gray, so it's
+    /// guaranteed lighter than whatever this widget's own body color actually is rather than just
+    /// happening to be lighter than one particular default. Expected to be reused by any future list/
+    /// secondary-panel content on any LayeredWidgetForm, not just this one list.</summary>
+    protected Color ThemedField => StyleTint.Tint(StyleTint.LightenTowardWhite(DefaultBodyColor, 0.15), CurrentTint, StyleTint.SafeChromeBlend);
+
+    /// <summary>The darker half of the ThemedField pair - see its own doc comment.</summary>
+    protected Color ThemedFieldDark => StyleTint.Tint(AppTheme.FieldDark, CurrentTint, StyleTint.SafeChromeBlend);
+
     private Color HeaderBaseColor => StyleTint.DarkenTowardBlack(DefaultBodyColor, Style.HeaderDarkness / 100.0);
 
     /// <summary>Tints HeaderBaseColor same as every other Themed* color, but with TintAmount's own
@@ -337,6 +367,7 @@ internal abstract class LayeredWidgetForm : Form
     protected const int CmdColorDefault = -3;
     protected const int CmdColorCustom = -4;
     protected const int CmdColorEyedrop = -5;
+    protected const int CmdToggleHeaderBorderMode = -6;
     // Reserves -1000..-901 (100 ids) for the color-preset grid.
     protected const int CmdColorPresetBase = -1000;
 
@@ -457,6 +488,9 @@ internal abstract class LayeredWidgetForm : Form
             new(CmdToggleFullOpacityOnHover, "Full Opacity When Active", HasCheckbox: true,
                 IsChecked: () => Style.FullOpacityOnHover,
                 Tooltip: "Full opacity while hovered, dragged/resized, or this menu is open"),
+            new(CmdToggleHeaderBorderMode, "Header Border Mode", HasCheckbox: true,
+                IsChecked: () => Style.HeaderBorderMode,
+                Tooltip: "Border every element (the widget itself, its buttons, its list) in the header's own color"),
             new(0, string.Empty, IsSeparator: true),
         };
         rows.AddRange(StyleMenuRows.Build(Style, DefaultBodyColor, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
@@ -530,6 +564,11 @@ internal abstract class LayeredWidgetForm : Form
                 RenderOpacity.SnapToTarget();
                 RenderAndPresent();
                 break;
+            case CmdToggleHeaderBorderMode:
+                Style.HeaderBorderMode = !Style.HeaderBorderMode;
+                PersistStyle();
+                RenderAndPresent();
+                break;
             case CmdColorDefault:
             case CmdColorCustom:
             case CmdColorEyedrop:
@@ -563,7 +602,11 @@ internal abstract class LayeredWidgetForm : Form
             g.FillPath(titleFill, titlePath);
         }
 
-        using (var borderPen = new Pen(ShowsButtons ? ThemedActiveBorder : ThemedBorder, ShowsButtons ? ActiveBorderWidth : 1f))
+        // ShowsButtons (right-click activation) always wins over Header Border Mode here - the bright
+        // ThemedActiveBorder is how an activated widget reads at all, so Header Border Mode only
+        // replaces the plain inactive-state ThemedBorder, never this.
+        var borderColor = ShowsButtons ? ThemedActiveBorder : (Style.HeaderBorderMode ? ThemedTitle : ThemedBorder);
+        using (var borderPen = new Pen(borderColor, ShowsButtons ? ActiveBorderWidth : 1f))
         {
             borderPen.LineJoin = LineJoin.Round;
             // Inset, not the default Center - a centered stroke needs half its own width to bleed
@@ -589,7 +632,13 @@ internal abstract class LayeredWidgetForm : Form
         }
 
         if (ShowsButtons)
+        {
             PaintSettingsButton(g, contentWidth);
+            PaintExtraButtons(g, contentWidth);
+        }
+
+        PaintList(g, contentWidth, contentHeight);
+        PaintContentButtons(g, contentWidth, contentHeight);
     }
 
     private void PaintSettingsButton(Graphics g, int contentWidth)
@@ -602,12 +651,14 @@ internal abstract class LayeredWidgetForm : Form
         // RGB, never alpha, so without an opaque backing shape under it the label would inherit the
         // margin's near-zero alpha and vanish once RenderAndPresent's own alpha-scaling runs.
         using (var buttonPath = RoundedRectPath.Full(buttonRect, 6))
-        using (var buttonFill = new SolidBrush(ChromeFill))
         {
-            g.FillPath(buttonFill, buttonPath);
-            using var buttonBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
-            g.DrawPath(buttonBorderPen, buttonPath);
+            using (var buttonFill = new SolidBrush(ThemedField))
+                g.FillPath(buttonFill, buttonPath);
+            PaintHeaderBorderModeOutline(g, buttonPath);
         }
+
+        if (_hoveredButtonKind == HoveredButtonKind.Settings)
+            PaintButtonHoverTint(g, buttonRect);
 
         // GDI+'s DrawString instead of the GDI TextRenderer.DrawText used for the title above - GDI's
         // own ClearType antialiasing assumes a neutral/opaque background and fringes with visible
@@ -619,6 +670,484 @@ internal abstract class LayeredWidgetForm : Form
         using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             g.DrawString("Settings", Font, textBrush, buttonRect, textFormat);
         g.TextRenderingHint = previousTextHint;
+    }
+
+    /// <summary>The same translucent-white tint a Fence's own icon-grid hover uses (see FenceForm.
+    /// PaintContent's _hoverIndex check), shared by Settings/ChromeButton/ContentButton so all three
+    /// read as one consistent hover language across every LayeredWidgetForm.</summary>
+    private static void PaintButtonHoverTint(Graphics g, Rectangle windowRect)
+    {
+        using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
+        using var hoverPath = RoundedRectPath.Full(windowRect, 6);
+        g.FillPath(hoverBrush, hoverPath);
+    }
+
+    /// <summary>Header Border Mode's own outline (see IWidgetStyle.HeaderBorderMode) - a no-op unless
+    /// it's on, shared by Settings/ChromeButton/ContentButton/PaintList so every element borders
+    /// itself in ThemedTitle the same way.</summary>
+    private void PaintHeaderBorderModeOutline(Graphics g, GraphicsPath path)
+    {
+        if (!Style.HeaderBorderMode)
+            return;
+        using var borderPen = new Pen(ThemedTitle, 1f);
+        g.DrawPath(borderPen, path);
+    }
+
+    /// <summary>A simple text-labeled button chained off the Settings button - same rounded-rect-plus-
+    /// centered-text chrome as Settings itself, just for whatever extra actions a subclass wants there
+    /// (Layout Launcher's Close/Manage Layouts...) instead of hand-rolling the same rect-chaining/
+    /// paint/hit-test/arm-fire plumbing per button. A subclass with hand-drawn icon buttons of its own
+    /// (a Fence's copy/delete squares, which need custom glyphs rather than a plain text label) can
+    /// keep drawing those separately - this is only for the common "just a short label" case.</summary>
+    protected readonly record struct ChromeButton(string Label, int Width, Action OnClick);
+
+    /// <summary>Extra buttons chained immediately outward from the Settings button, in declared order -
+    /// none by default, only shown/hit-testable while ShowsButtons is true (same as Settings itself).</summary>
+    protected virtual IReadOnlyList<ChromeButton> ExtraButtons => Array.Empty<ChromeButton>();
+
+    // Armed on a subclass's own OnMouseDown (see TryArmExtraButton), fired on the matching OnMouseUp
+    // only if the cursor is still over the same button (see FireArmedExtraButton) - the same
+    // arm-then-fire pattern FenceForm's own Settings/New/Delete buttons already use, just centralized
+    // here instead of each subclass keeping its own "which button is currently armed" field.
+    private int? _armedExtraButtonIndex;
+
+    /// <summary>Chains outward from the Settings button the same way a Fence's own New/Delete buttons
+    /// do - index 0 sits immediately next to Settings, index 1 next to that, and so on. Each button
+    /// uses its own declared Width (see ChromeButton) rather than a fixed size, so a short Close
+    /// glyph and a much wider "Manage Layouts..." label can both chain correctly.</summary>
+    protected Rectangle GetExtraButtonRect(int contentWidth, bool onLeft, int index)
+    {
+        var buttons = ExtraButtons;
+        var previous = GetSettingsButtonRect(contentWidth, onLeft);
+        var current = previous;
+        for (var i = 0; i <= index; i++)
+        {
+            var width = buttons[i].Width;
+            var x = onLeft ? previous.Right + SettingsButtonGap : previous.X - SettingsButtonGap - width;
+            current = new Rectangle(x, previous.Y, width, SettingsButtonHeight);
+            previous = current;
+        }
+        return current;
+    }
+
+    /// <summary>Which extra button (if any) contentPoint lands on - used both for a subclass's own
+    /// HitTest (to route a click there to HTCLIENT instead of the margin's move/resize handling) and
+    /// internally by TryArmExtraButton.</summary>
+    protected bool TryGetExtraButtonAt(int contentWidth, bool onLeft, Point contentPoint, out int index)
+    {
+        var buttons = ExtraButtons;
+        for (var i = 0; i < buttons.Count; i++)
+        {
+            if (GetExtraButtonRect(contentWidth, onLeft, i).Contains(contentPoint))
+            {
+                index = i;
+                return true;
+            }
+        }
+        index = -1;
+        return false;
+    }
+
+    /// <summary>Arms whichever extra button contentPoint lands on, if any - a subclass's own
+    /// OnMouseDown calls this (typically as the fallback once its own Settings-button check misses),
+    /// mirroring the same arm-then-fire pattern as the Settings button itself.</summary>
+    protected bool TryArmExtraButton(Point contentPoint)
+    {
+        var contentWidth = GetContentSize().Width;
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        if (!TryGetExtraButtonAt(contentWidth, onLeft, contentPoint, out var index))
+            return false;
+        _armedExtraButtonIndex = index;
+        return true;
+    }
+
+    /// <summary>Fires whichever extra button was armed (see TryArmExtraButton), but only if the mouse
+    /// is still over that same button on release - a subclass's own OnMouseUp calls this.</summary>
+    protected void FireArmedExtraButton(Point contentPoint)
+    {
+        if (_armedExtraButtonIndex is not int index)
+            return;
+        _armedExtraButtonIndex = null;
+
+        var buttons = ExtraButtons;
+        if (index >= buttons.Count)
+            return;
+        var contentWidth = GetContentSize().Width;
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        if (GetExtraButtonRect(contentWidth, onLeft, index).Contains(contentPoint))
+            buttons[index].OnClick();
+    }
+
+    private void PaintExtraButtons(Graphics g, int contentWidth)
+    {
+        var buttons = ExtraButtons;
+        if (buttons.Count == 0)
+            return;
+
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        for (var i = 0; i < buttons.Count; i++)
+        {
+            var buttonRect = ToWindow(GetExtraButtonRect(contentWidth, onLeft, i));
+            // Same opaque-backing/GDI+-AntiAlias reasoning as PaintSettingsButton's own two comments.
+            using (var buttonPath = RoundedRectPath.Full(buttonRect, 6))
+            {
+                using (var buttonFill = new SolidBrush(ThemedField))
+                    g.FillPath(buttonFill, buttonPath);
+                PaintHeaderBorderModeOutline(g, buttonPath);
+            }
+
+            if (_hoveredButtonKind == HoveredButtonKind.Extra && _hoveredButtonIndex == i)
+                PaintButtonHoverTint(g, buttonRect);
+
+            var previousTextHint = g.TextRenderingHint;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
+            using (var textBrush = new SolidBrush(Color.WhiteSmoke))
+            using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                g.DrawString(buttons[i].Label, Font, textBrush, buttonRect, textFormat);
+            g.TextRenderingHint = previousTextHint;
+        }
+    }
+
+    /// <summary>A simple text-labeled button drawn inside the widget's own visible content area -
+    /// unlike ChromeButton (chained off Settings in the margin band, only shown/hit-testable once
+    /// ShowsButtons is true), this reads as part of the widget's own surface, the same way a Fence's
+    /// icon grid is always visible/clickable regardless of activation state. ContentRect is
+    /// content-relative (see ToWindow) - a subclass picks its own placement since, unlike the
+    /// universal Settings-button chain, in-body layout is inherently subclass-specific.</summary>
+    protected readonly record struct ContentButton(string Label, Rectangle ContentRect, Action OnClick);
+
+    /// <summary>A subclass's own in-body buttons (Layout Launcher's Manage Layouts.../Save Current
+    /// Layout) - none by default. Recomputed on demand from the current content size rather than
+    /// cached, since a resizable widget's own layout can change contentWidth/contentHeight between
+    /// calls.</summary>
+    protected virtual IReadOnlyList<ContentButton> GetContentButtons(int contentWidth, int contentHeight) => Array.Empty<ContentButton>();
+
+    /// <summary>Total height LayoutRow will occupy for the same contentWidth/height/gap/widths - a
+    /// single row's height when everything fits side by side, or every item stacked with gap between
+    /// when it doesn't (see LayoutRow's own doc comment for the fits-or-stacks rule itself). A caller
+    /// anchoring the row's bottom rather than its top (Layout Launcher's own row, pinned to the bottom
+    /// of the body) uses this to know how tall the block will actually turn out before calling
+    /// LayoutRow itself.</summary>
+    protected static int RowHeight(int contentWidth, int height, int gap, IReadOnlyList<int> widths) =>
+        RowFits(contentWidth, gap, widths) ? height : height * widths.Count + gap * (widths.Count - 1);
+
+    private static bool RowFits(int contentWidth, int gap, IReadOnlyList<int> widths)
+    {
+        var totalWidth = 0;
+        for (var i = 0; i < widths.Count; i++)
+            totalWidth += widths[i];
+        totalWidth += gap * (widths.Count - 1);
+        return totalWidth <= contentWidth;
+    }
+
+    /// <summary>The standard layout rule for a row of same-height in-body elements (see
+    /// GetContentButtons): laid out left-to-right and centered as one group when they all fit within
+    /// contentWidth, or each centered on its own stacked row (top-to-bottom from top) when they don't -
+    /// rather than shrinking or letting them overflow. widths.Count must equal the returned array's
+    /// length; each rect shares the same width its own widths entry declared.</summary>
+    protected static Rectangle[] LayoutRow(int contentWidth, int top, int height, int gap, IReadOnlyList<int> widths)
+    {
+        var rects = new Rectangle[widths.Count];
+
+        if (RowFits(contentWidth, gap, widths))
+        {
+            var totalWidth = 0;
+            for (var i = 0; i < widths.Count; i++)
+                totalWidth += widths[i];
+            totalWidth += gap * (widths.Count - 1);
+            var x = (contentWidth - totalWidth) / 2;
+            for (var i = 0; i < widths.Count; i++)
+            {
+                rects[i] = new Rectangle(x, top, widths[i], height);
+                x += widths[i] + gap;
+            }
+        }
+        else
+        {
+            var y = top;
+            for (var i = 0; i < widths.Count; i++)
+            {
+                rects[i] = new Rectangle((contentWidth - widths[i]) / 2, y, widths[i], height);
+                y += height + gap;
+            }
+        }
+
+        return rects;
+    }
+
+    // Same arm-then-fire pattern as _armedExtraButtonIndex, kept as a separate field since a content
+    // button and an extra button could theoretically be armed independently across two mouse-downs.
+    private int? _armedContentButtonIndex;
+
+    /// <summary>Which content button (if any) contentPoint lands on - shared by TryArmContentButton
+    /// and UpdateButtonHover's own hover-tint tracking.</summary>
+    protected bool TryGetContentButtonAt(int contentWidth, int contentHeight, Point contentPoint, out int index)
+    {
+        var buttons = GetContentButtons(contentWidth, contentHeight);
+        for (var i = 0; i < buttons.Count; i++)
+        {
+            if (buttons[i].ContentRect.Contains(contentPoint))
+            {
+                index = i;
+                return true;
+            }
+        }
+        index = -1;
+        return false;
+    }
+
+    /// <summary>Arms whichever content button contentPoint lands on, if any - a subclass's own
+    /// OnMouseDown calls this, typically as the final fallback once Settings/extra-button checks miss.</summary>
+    protected bool TryArmContentButton(Point contentPoint)
+    {
+        var size = GetContentSize();
+        if (!TryGetContentButtonAt(size.Width, size.Height, contentPoint, out var index))
+            return false;
+        _armedContentButtonIndex = index;
+        return true;
+    }
+
+    /// <summary>Fires whichever content button was armed (see TryArmContentButton), but only if the
+    /// mouse is still over that same button on release - a subclass's own OnMouseUp calls this.</summary>
+    protected void FireArmedContentButton(Point contentPoint)
+    {
+        if (_armedContentButtonIndex is not int index)
+            return;
+        _armedContentButtonIndex = null;
+
+        var size = GetContentSize();
+        var buttons = GetContentButtons(size.Width, size.Height);
+        if (index < buttons.Count && buttons[index].ContentRect.Contains(contentPoint))
+            buttons[index].OnClick();
+    }
+
+    /// <summary>Painted unconditionally (unlike PaintExtraButtons/PaintSettingsButton, which only show
+    /// while ShowsButtons is true) - content buttons are part of the widget's own always-visible body.</summary>
+    private void PaintContentButtons(Graphics g, int contentWidth, int contentHeight)
+    {
+        var buttons = GetContentButtons(contentWidth, contentHeight);
+        if (buttons.Count == 0)
+            return;
+
+        for (var i = 0; i < buttons.Count; i++)
+        {
+            var button = buttons[i];
+            var buttonRect = ToWindow(button.ContentRect);
+            // Same opaque-backing/GDI+-AntiAlias reasoning as PaintSettingsButton's own two comments.
+            using (var buttonPath = RoundedRectPath.Full(buttonRect, 6))
+            {
+                using (var buttonFill = new SolidBrush(ThemedField))
+                    g.FillPath(buttonFill, buttonPath);
+                PaintHeaderBorderModeOutline(g, buttonPath);
+            }
+
+            if (_hoveredButtonKind == HoveredButtonKind.Content && _hoveredButtonIndex == i)
+                PaintButtonHoverTint(g, buttonRect);
+
+            var previousTextHint = g.TextRenderingHint;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
+            using (var textBrush = new SolidBrush(Color.WhiteSmoke))
+            using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                g.DrawString(button.Label, Font, textBrush, buttonRect, textFormat);
+            g.TextRenderingHint = previousTextHint;
+        }
+    }
+
+    // ---- Generic in-body list (Layout Launcher's saved-layout rows) ----
+    //
+    // Same split as ContentButton/ChromeButton: the base owns the shared scrolling/layout/paint
+    // machinery, a subclass owns what a row actually shows (GetListArea/ListRowCount/ListRowHeight/
+    // PaintListRow) since that's inherently subclass-specific, the same way FenceForm's own icon grid
+    // owns its own column/cell math and hand-rolled scrollbar (see FenceForm.GetScrollbarGeometry) -
+    // this is that same pattern generalized so a second (and future) subclass doesn't re-derive it.
+
+    /// <summary>Content-relative rect the list occupies - Rectangle.Empty (the default) means "no
+    /// list" and none of the machinery below paints/scrolls/hit-tests anything. A subclass computes
+    /// this from whatever else shares its body (Layout Launcher: everything between its header and
+    /// its own bottom button row).</summary>
+    protected virtual Rectangle GetListArea(int contentWidth, int contentHeight) => Rectangle.Empty;
+
+    /// <summary>How many rows the list has right now - 0 means nothing to scroll/paint.</summary>
+    protected virtual int ListRowCount => 0;
+
+    /// <summary>Every row's fixed height - the whole mechanism assumes uniform rows, the same way
+    /// FenceForm's own icon grid assumes a uniform cell size.</summary>
+    protected virtual int ListRowHeight => 24;
+
+    /// <summary>Paints one row's own content - rowRect is already window-space (see ToWindow), already
+    /// narrowed to leave room for the scrollbar gutter (only when a scrollbar is actually showing - no
+    /// reserved gap when every row already fits), and already GDI+-clipped to the list area (so a
+    /// partially-scrolled-off row at the top/bottom edge cuts off cleanly) - a subclass just draws
+    /// directly into it with ordinary GDI+ calls (DrawString, not GDI's TextRenderer.DrawText, which
+    /// ignores Graphics.Clip - see FenceForm.PaintContent's own comment on that same quirk).</summary>
+    protected virtual void PaintListRow(Graphics g, int index, Rectangle rowRect) { }
+
+    private const int ListScrollbarWidth = 6;
+    private const int ListScrollbarMargin = 3;
+    private int _listScrollOffset;
+    private bool _listScrollbarDragging;
+    private int _listScrollbarDragStartY;
+    private int _listScrollbarDragStartOffset;
+
+    private int GetListMaxScroll(Rectangle area)
+    {
+        if (area.IsEmpty || ListRowCount == 0)
+            return 0;
+        return Math.Max(0, ListRowCount * ListRowHeight - area.Height);
+    }
+
+    private readonly record struct ListScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
+
+    /// <summary>Null when the list doesn't need to scroll (no scrollbar to draw or hit-test) - same
+    /// track/thumb math as FenceForm's own GetScrollbarGeometry, just against the list's own area
+    /// instead of the whole fence body.</summary>
+    private ListScrollbarGeometry? GetListScrollbarGeometry(Rectangle area)
+    {
+        var maxScroll = GetListMaxScroll(area);
+        if (maxScroll <= 0)
+            return null;
+
+        var trackX = area.Right - ListScrollbarWidth - ListScrollbarMargin;
+        var totalHeight = area.Height + maxScroll;
+        var thumbHeight = Math.Min(area.Height, Math.Max(20, (int)((long)area.Height * area.Height / Math.Max(1, totalHeight))));
+        var maxThumbTravel = Math.Max(0, area.Height - thumbHeight);
+        var thumbY = area.Top + (maxThumbTravel > 0 ? (int)((long)_listScrollOffset * maxThumbTravel / maxScroll) : 0);
+
+        return new ListScrollbarGeometry(trackX, area.Top, area.Height, thumbY, thumbHeight);
+    }
+
+    /// <summary>A subclass's own OnMouseDown calls this, typically as the final fallback once
+    /// Settings/Extra/Content-button checks miss - arms scrollbar-thumb dragging, or pages the track
+    /// toward a click, exactly like FenceForm's own hand-rolled scrollbar already does (see its own
+    /// OnMouseDown). Returns true if the click landed on the scrollbar at all.</summary>
+    protected bool TryHandleListMouseDown(Point contentPoint)
+    {
+        var size = GetContentSize();
+        var area = GetListArea(size.Width, size.Height);
+        if (GetListScrollbarGeometry(area) is not { } sb)
+            return false;
+
+        // A little horizontal slack around the thin thumb/track makes it easier to grab.
+        var thumbRect = new Rectangle(sb.TrackX - 2, sb.ThumbY, ListScrollbarWidth + 4, sb.ThumbHeight);
+        if (thumbRect.Contains(contentPoint))
+        {
+            _listScrollbarDragging = true;
+            _listScrollbarDragStartY = contentPoint.Y;
+            _listScrollbarDragStartOffset = _listScrollOffset;
+            Capture = true;
+            return true;
+        }
+
+        var trackRect = new Rectangle(sb.TrackX - 2, sb.TrackTop, ListScrollbarWidth + 4, sb.TrackHeight);
+        if (trackRect.Contains(contentPoint))
+        {
+            // Clicking the track outside the thumb pages toward the click, like a normal scrollbar.
+            var page = Math.Max(ListRowHeight, sb.TrackHeight - ListRowHeight);
+            var maxScroll = GetListMaxScroll(area);
+            _listScrollOffset = Math.Clamp(_listScrollOffset + (contentPoint.Y < sb.ThumbY ? -page : page), 0, maxScroll);
+            RenderAndPresent();
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>A subclass's own OnMouseMove calls this every tick - a no-op unless
+    /// TryHandleListMouseDown just armed the thumb.</summary>
+    protected void UpdateListScrollDrag(Point contentPoint)
+    {
+        if (!_listScrollbarDragging)
+            return;
+
+        var size = GetContentSize();
+        var area = GetListArea(size.Width, size.Height);
+        if (GetListScrollbarGeometry(area) is not { } sb || sb.TrackHeight <= sb.ThumbHeight)
+            return;
+
+        var maxScroll = GetListMaxScroll(area);
+        var maxThumbTravel = sb.TrackHeight - sb.ThumbHeight;
+        var dy = contentPoint.Y - _listScrollbarDragStartY;
+        var newOffset = _listScrollbarDragStartOffset + (int)((long)dy * maxScroll / maxThumbTravel);
+        _listScrollOffset = Math.Clamp(newOffset, 0, maxScroll);
+        RenderAndPresent();
+    }
+
+    /// <summary>A subclass's own OnMouseUp calls this unconditionally - a no-op unless a scrollbar
+    /// drag was actually in progress.</summary>
+    protected void EndListScrollDrag()
+    {
+        if (!_listScrollbarDragging)
+            return;
+        _listScrollbarDragging = false;
+        Capture = false;
+    }
+
+    /// <summary>A subclass's own OnMouseWheel calls this with e.Delta - a no-op if the list has
+    /// nothing to scroll.</summary>
+    protected void HandleListMouseWheel(int delta)
+    {
+        var size = GetContentSize();
+        var area = GetListArea(size.Width, size.Height);
+        var maxScroll = GetListMaxScroll(area);
+        if (maxScroll <= 0)
+            return;
+
+        _listScrollOffset = Math.Clamp(_listScrollOffset - delta / 120 * ListRowHeight, 0, maxScroll);
+        RenderAndPresent();
+    }
+
+    /// <summary>Painted unconditionally (unlike PaintExtraButtons/PaintSettingsButton, which only show
+    /// while ShowsButtons is true) - the list, like ContentButtons, is part of the widget's own
+    /// always-visible body.</summary>
+    private void PaintList(Graphics g, int contentWidth, int contentHeight)
+    {
+        var area = GetListArea(contentWidth, contentHeight);
+        if (area.IsEmpty)
+            return;
+
+        // Re-clamped on every paint (same reasoning as FenceForm.PaintContent's own _scrollOffset
+        // clamp) - a resize changes GetListArea's own height (and so GetListMaxScroll) without going
+        // through TryHandleListMouseDown/UpdateListScrollDrag/HandleListMouseWheel, so a scroll offset
+        // set before the resize could otherwise sit past the new, smaller max - drawing every row's
+        // rowTop from a stale offset that no longer corresponds to a valid scroll position at all.
+        _listScrollOffset = Math.Clamp(_listScrollOffset, 0, GetListMaxScroll(area));
+
+        var hasScrollbar = GetListMaxScroll(area) > 0;
+        var rowWidth = hasScrollbar ? area.Width - (ListScrollbarWidth + ListScrollbarMargin * 2) : area.Width;
+
+        var previousClip = g.Clip;
+        g.SetClip(ToWindow(area));
+        for (var i = 0; i < ListRowCount; i++)
+        {
+            var rowTop = area.Top + i * ListRowHeight - _listScrollOffset;
+            if (rowTop + ListRowHeight <= area.Top || rowTop >= area.Bottom)
+                continue;
+            PaintListRow(g, i, ToWindow(new Rectangle(area.Left, rowTop, rowWidth, ListRowHeight)));
+        }
+        g.Clip = previousClip;
+        previousClip.Dispose();
+
+        if (Style.HeaderBorderMode)
+        {
+            using var borderPen = new Pen(ThemedTitle, 1f);
+            g.DrawRectangle(borderPen, ToWindow(area));
+        }
+
+        if (hasScrollbar)
+            PaintListScrollbar(g, area);
+    }
+
+    private void PaintListScrollbar(Graphics g, Rectangle area)
+    {
+        if (GetListScrollbarGeometry(area) is not { } sb)
+            return;
+
+        using var trackBrush = new SolidBrush(Color.FromArgb(30, 255, 255, 255));
+        g.FillRectangle(trackBrush, ToWindow(new Rectangle(sb.TrackX, sb.TrackTop, ListScrollbarWidth, sb.TrackHeight)));
+
+        using var thumbBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
+        using var thumbPath = RoundedRectPath.Full(ToWindow(new Rectangle(sb.TrackX, sb.ThumbY, ListScrollbarWidth, sb.ThumbHeight)), ListScrollbarWidth / 2);
+        g.FillPath(thumbBrush, thumbPath);
     }
 
     /// <summary>Keeps an already-open Settings dropdown anchored to its button after a resize moves
@@ -650,11 +1179,6 @@ internal abstract class LayeredWidgetForm : Form
     /// of every drag/resize (see DragStartBody) - the fixed anchor everything that tick measures
     /// against instead of the OS's own incrementally-drifting proposed rect.</summary>
     protected abstract Rectangle GetCurrentBody();
-
-    /// <summary>Guid to exclude from "other fence" snap candidates - a real fence passes its own
-    /// FenceId; anything that isn't a fence itself (and so never appears in that candidate list
-    /// anyway) passes Guid.Empty.</summary>
-    protected abstract Guid SnapExcludeId { get; }
 
     /// <summary>This widget's own margin setting (IWidgetStyle.Margin) - how far it prefers to keep
     /// from another fence's edge or a custom snap line while dragging/resizing.</summary>
@@ -719,30 +1243,70 @@ internal abstract class LayeredWidgetForm : Form
         Marshal.StructureToPtr(rect, lParam, false);
     }
 
-    /// <summary>Snaps a proposed move against every other fence's edges and this app's custom snap
-    /// lines - the default every subclass gets for free. Holding the right mouse button down at the
-    /// same time hides the fence-edge candidates for as long as it's held, leaving just the custom
-    /// lines (checked live via Control.MouseButtons, not any button-down message, since DefWindowProc's
-    /// own modal move loop may never route one to this WndProc at all while it's running).</summary>
+    /// <summary>Candidate snap positions from every other currently-live LayeredWidgetForm's own edges
+    /// (any fence, the Layout Launcher, any future widget built on this base) - Left/Right (vertical,
+    /// for X-axis snapping) and Top/Bottom (horizontal, for Y-axis snapping) - for SnapLineManager.
+    /// SnapMove/SnapResize. This widget's own SnapMargin (not each candidate's own) applies, like a
+    /// CSS margin: every other widget's edge also contributes a second candidate offset outward by
+    /// that amount alongside the flush one - SnapEngine's own nearest-candidate-wins logic picks
+    /// whichever of the two is actually closest. Not filtered by Visible - a hidden widget ("Show/Hide
+    /// All") is still a valid snap target the same way FenceForm's own predecessor of this method
+    /// never bothered filtering for that either. GetCurrentBody() is read fresh per candidate (not
+    /// cached anywhere) so a widget still mid-drag itself contributes its own latest position.</summary>
+    private (IReadOnlyList<int> Vertical, IReadOnlyList<int> Horizontal) GetOtherWidgetEdges()
+    {
+        var margin = SnapMargin;
+        var vertical = new List<int>();
+        var horizontal = new List<int>();
+
+        foreach (var widget in _liveWidgets)
+        {
+            if (ReferenceEquals(widget, this))
+                continue;
+
+            var bounds = widget.GetCurrentBody();
+            vertical.Add(bounds.Left);
+            vertical.Add(bounds.Right);
+            horizontal.Add(bounds.Top);
+            horizontal.Add(bounds.Bottom);
+
+            if (margin > 0)
+            {
+                vertical.Add(bounds.Left - margin);
+                vertical.Add(bounds.Right + margin);
+                horizontal.Add(bounds.Top - margin);
+                horizontal.Add(bounds.Bottom + margin);
+            }
+        }
+
+        return (vertical, horizontal);
+    }
+
+    /// <summary>Snaps a proposed move against every other widget's edges (see GetOtherWidgetEdges) and
+    /// this app's custom snap lines - the default every subclass gets for free. Holding the right
+    /// mouse button down at the same time hides the widget-edge candidates for as long as it's held,
+    /// leaving just the custom lines (checked live via Control.MouseButtons, not any button-down
+    /// message, since DefWindowProc's own modal move loop may never route one to this WndProc at all
+    /// while it's running).</summary>
     protected virtual Rectangle ComputeMovedBody(Rectangle proposedBody)
     {
         IReadOnlyList<int> vCandidates = Array.Empty<int>();
         IReadOnlyList<int> hCandidates = Array.Empty<int>();
         if ((MouseButtons & MouseButtons.Right) == 0)
-            (vCandidates, hCandidates) = Fences.GetOtherFenceEdges(SnapExcludeId, SnapMargin);
+            (vCandidates, hCandidates) = GetOtherWidgetEdges();
         return Fences.SnapLines.SnapMove(proposedBody, vCandidates, hCandidates, SnapMargin).Rect;
     }
 
     /// <summary>Same idea as ComputeMovedBody, for a resize - always shows both custom lines and
-    /// fence edges (WM_SIZING has no right-click modifier the way a move does).</summary>
+    /// widget edges (WM_SIZING has no right-click modifier the way a move does).</summary>
     protected virtual Rectangle ComputeResizedBody(Rectangle proposedBody, SnapEdges activeEdges)
     {
-        var (vCandidates, hCandidates) = Fences.GetOtherFenceEdges(SnapExcludeId, SnapMargin);
+        var (vCandidates, hCandidates) = GetOtherWidgetEdges();
         return Fences.SnapLines.SnapResize(proposedBody, activeEdges, vCandidates, hCandidates, SnapMargin).Rect;
     }
 
     /// <summary>WM_ENTERSIZEMOVE's own snap-guide setup, shown for the guide overlay's whole
-    /// lifetime - a resize (see IsResizing) always shows both custom lines and fence edges; a move
+    /// lifetime - a resize (see IsResizing) always shows both custom lines and widget edges; a move
     /// shows both too unless right is already held right at the start of the drag (the common case
     /// is checked live every tick inside ComputeMovedBody instead; this is only for the very first
     /// frame, before any movement has happened yet, so the guides don't lag one tick behind).</summary>
@@ -750,7 +1314,7 @@ internal abstract class LayeredWidgetForm : Form
     {
         if (IsResizing || (MouseButtons & MouseButtons.Right) == 0)
         {
-            var (vGuides, hGuides) = Fences.GetOtherFenceEdges(SnapExcludeId, SnapMargin);
+            var (vGuides, hGuides) = GetOtherWidgetEdges();
             var monitor = Screen.FromRectangle(DragStartBody).Bounds;
             Fences.SnapLines.BeginDrag(includeCustomLines: true, vGuides, hGuides, monitor);
         }
@@ -999,6 +1563,54 @@ internal abstract class LayeredWidgetForm : Form
         base.OnMouseLeave(e);
         _isClientHovered = false;
         RenderOpacity.BeginIfNeeded();
+        UpdateButtonHover(null);
+    }
+
+    /// <summary>Base-owned so every subclass's Settings/ChromeButton/ContentButton get the same hover
+    /// tint (see PaintButtonHoverTint) for free - a subclass overriding OnMouseMove for its own
+    /// purposes (FenceForm's icon-grid hover, drag-arming) already calls base.OnMouseMove(e) first,
+    /// same as every other override in this class.</summary>
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        UpdateButtonHover(ToContent(e.Location));
+    }
+
+    /// <summary>Recomputes which button (if any) contentPoint sits over, repainting only on an actual
+    /// change - null means "not hovering the client area at all" (see OnMouseLeave). Settings/Extra
+    /// take priority over Content since they can visually overlap in a very small/narrow widget.</summary>
+    private void UpdateButtonHover(Point? contentPoint)
+    {
+        var kind = HoveredButtonKind.None;
+        var index = -1;
+
+        if (contentPoint is Point point)
+        {
+            var size = GetContentSize();
+            var onLeft = ShouldSettingsButtonOpenLeft(size.Width);
+
+            if (ShowsButtons && GetSettingsButtonRect(size.Width, onLeft).Contains(point))
+            {
+                kind = HoveredButtonKind.Settings;
+            }
+            else if (ShowsButtons && TryGetExtraButtonAt(size.Width, onLeft, point, out var extraIndex))
+            {
+                kind = HoveredButtonKind.Extra;
+                index = extraIndex;
+            }
+            else if (TryGetContentButtonAt(size.Width, size.Height, point, out var contentIndex))
+            {
+                kind = HoveredButtonKind.Content;
+                index = contentIndex;
+            }
+        }
+
+        if (kind == _hoveredButtonKind && index == _hoveredButtonIndex)
+            return;
+
+        _hoveredButtonKind = kind;
+        _hoveredButtonIndex = index;
+        RenderAndPresent();
     }
 
     protected override void Dispose(bool disposing)
@@ -1007,6 +1619,7 @@ internal abstract class LayeredWidgetForm : Form
         {
             // Set before anything below runs - see IsDisposing's own field comment.
             IsDisposing = true;
+            _liveWidgets.Remove(this);
             _renameBox?.Dispose();
             _titleContextMenu?.Dispose();
             SettingsDropdown?.Dispose();

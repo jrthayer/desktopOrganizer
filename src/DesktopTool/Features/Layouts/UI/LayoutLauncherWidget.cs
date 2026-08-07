@@ -1,3 +1,4 @@
+using System.Drawing.Text;
 using DesktopTool.Features.Fences;
 using DesktopTool.Native;
 using DesktopTool.UI;
@@ -6,13 +7,15 @@ namespace DesktopTool.Features.Layouts.UI;
 
 /// <summary>
 /// "Layout Launcher" widget, rebuilt on LayeredWidgetForm - a second, independent proof that the
-/// base's own move/resize/snap/rename/title-menu/Settings-button/theme chrome works for something
-/// that isn't a Fence. Chrome only for now (header with a rename-able title, full unrestricted
-/// resize, drag-to-snap, the base's own default Settings dropdown, and a Close button next to it) -
-/// the saved-layout list itself (Run/Copy/Delete rows, Save Current Layout, Manage Layouts...) comes
-/// back in its own later step, verified on its own rather than bundled into this one. Everything not
-/// genuinely specific to this widget (theme derivation, the Settings dropdown's default rows,
-/// button/border/title painting) is LayeredWidgetForm's own now - see its own class comment.
+/// base's own move/resize/snap/rename/title-menu/Settings-button/theme/extra-button/content-button/
+/// list chrome works for something that isn't a Fence. Chrome plus a Close button (chained off
+/// Settings in the margin band, like a Fence's own close), a Manage Layouts.../Save Current Layout row
+/// (drawn inside the body itself, pinned to its bottom edge, since they're this widget's own primary
+/// actions rather than chrome controls - see GetContentButtons), and a scrollable list of every saved
+/// profile's name filling the rest of the body (see GetListArea/PaintListRow) - Run/Copy/Delete per
+/// row comes back in its own later step, verified on its own rather than bundled into this one.
+/// Everything not genuinely specific to this widget (theme derivation, the Settings dropdown's default
+/// rows, button/border/title/list painting) is LayeredWidgetForm's own now - see its own class comment.
 /// </summary>
 internal sealed class LayoutLauncherWidget : LayeredWidgetForm
 {
@@ -27,21 +30,24 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // LayoutLauncherModel.Height's own "null until moved/resized once" comment) - a real resize
     // persists over this immediately, the same way a real move persists over the centered X/Y default.
     private const int DefaultBodyHeight = 120;
-    private const int CloseButtonSize = 22;
-    private const int ButtonSpacing = 4;
 
     private readonly LayoutManager _manager;
-    private readonly FenceManager _fenceManager;
     private readonly LayoutLauncherModel _model;
     private readonly LayoutLauncherStore _store;
 
     private bool _allowClose;
     private bool _settingsButtonArmed;
-    private bool _closeButtonArmed;
+
+    /// <summary>Close (× - hides, same as the "x" a Fence's own delete button uses, but this widget
+    /// is hidden rather than destroyed - see HideAndPersist) - LayeredWidgetForm's own ChromeButton
+    /// mechanism instead of hand-rolled rect-chaining/paint/hit-test/arm-fire code. Built once rather
+    /// than a fresh list/delegate pair on every paint/hit-test call.</summary>
+    protected override IReadOnlyList<ChromeButton> ExtraButtons { get; }
 
     /// <summary>Guid? carries a freshly-captured profile's Id up to TrayApplicationContext.
-    /// OpenLayoutEditor - not raised by anything yet (the layout list itself comes back in a later
-    /// step), but kept declared so TrayApplicationContext's own subscription still compiles.</summary>
+    /// OpenLayoutEditor - null from the Manage Layouts... button itself (there's no specific profile
+    /// to jump to yet, just "open the editor"); a non-null value is for a future Save Current Layout
+    /// button to jump straight to the profile it just captured.</summary>
     public event EventHandler<Guid?>? ManageLayoutsRequested;
 
     protected override int OuterMargin => OuterMarginPx;
@@ -57,9 +63,13 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         : base(model.Opacity / 100f, fenceManager)
     {
         _manager = manager;
-        _fenceManager = fenceManager;
         _model = model;
         _store = store;
+
+        ExtraButtons = new List<ChromeButton>
+        {
+            new("×", 22, HideAndPersist),
+        };
 
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -94,7 +104,11 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             cp.Width = _model.Width + OuterMargin * 2;
             cp.Height = bodyHeight + TopBand + BottomBand;
             cp.Style = NativeMethods.WS_POPUP | NativeMethods.WS_CLIPCHILDREN;
-            cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED | NativeMethods.WS_EX_TOPMOST;
+            // Not WS_EX_TOPMOST - same ordinary (non-always-on-top) window style as FenceForm's own
+            // CreateParams, so this doesn't sit above every other app's window on screen forever; it
+            // just behaves like any other normal top-level window (still WS_EX_TOOLWINDOW, so it has
+            // no taskbar button/Alt-Tab entry of its own, matching a Fence).
+            cp.ExStyle = 0x00000080 /* WS_EX_TOOLWINDOW */ | NativeMethods.WS_EX_LAYERED;
             cp.X = bodyX - OuterMargin;
             cp.Y = bodyY - TopBand;
             return cp;
@@ -160,12 +174,12 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         _model.Width,
         _model.Height ?? DefaultBodyHeight);
 
-    protected override Guid SnapExcludeId => Guid.Empty;
     protected override int SnapMargin => _model.Margin;
 
     // ComputeMovedBody/ComputeResizedBody/BeginSnapDrag/SupportsResize/ResizableEdges all use
     // LayeredWidgetForm's own defaults unchanged - full, unrestricted resize on every edge, snapping
-    // against fences/custom snap lines the same as any other widget on this base.
+    // against every other live widget's edges (fences, any future widget) and custom snap lines the
+    // same as any other widget on this base (see LayeredWidgetForm.GetOtherWidgetEdges).
 
     protected override void OnDragEnd()
     {
@@ -199,8 +213,12 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         var contentPoint = ToContent(windowPoint);
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
         if (ShowsButtons && (GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
-            || GetCloseButtonRect(contentWidth, onLeft).Contains(contentPoint)))
+            || TryGetExtraButtonAt(contentWidth, onLeft, contentPoint, out _)))
             return HTCLIENT;
+
+        // Manage Layouts... lives inside the body itself (see GetContentButtons) - already inside the
+        // ordinary HTCLIENT territory below, so no extra carve-out is needed here, unlike the margin-
+        // band Settings/extra buttons above.
 
         if (ShowsButtons)
         {
@@ -226,15 +244,6 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         return HTCLIENT;
     }
 
-    /// <summary>Chained immediately inside the Settings button, same pattern as FenceForm's own
-    /// GetNewFenceButtonRect/GetDeleteButtonRect - closes (hides) the widget when clicked.</summary>
-    private Rectangle GetCloseButtonRect(int contentWidth, bool onLeft)
-    {
-        var settingsRect = GetSettingsButtonRect(contentWidth, onLeft);
-        var x = onLeft ? settingsRect.Right + ButtonSpacing : settingsRect.X - ButtonSpacing - CloseButtonSize;
-        return new Rectangle(x, settingsRect.Y, CloseButtonSize, SettingsButtonHeight);
-    }
-
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
@@ -246,9 +255,27 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
 
         if (ShowsButtons && GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint))
+        {
             _settingsButtonArmed = true;
-        else if (ShowsButtons && GetCloseButtonRect(contentWidth, onLeft).Contains(contentPoint))
-            _closeButtonArmed = true;
+            return;
+        }
+        if (ShowsButtons && TryArmExtraButton(contentPoint))
+            return;
+        if (TryArmContentButton(contentPoint))
+            return;
+        TryHandleListMouseDown(contentPoint);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        UpdateListScrollDrag(ToContent(e.Location));
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        HandleListMouseWheel(e.Delta);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -257,21 +284,21 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         if (e.Button != MouseButtons.Left)
             return;
 
+        var contentPoint = ToContent(e.Location);
         var contentWidth = GetContentSize().Width;
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
 
         if (_settingsButtonArmed)
         {
             _settingsButtonArmed = false;
-            if (ShowsButtons && GetSettingsButtonRect(contentWidth, onLeft).Contains(ToContent(e.Location)))
+            if (ShowsButtons && GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint))
                 OpenSettingsMenu();
+            return;
         }
-        else if (_closeButtonArmed)
-        {
-            _closeButtonArmed = false;
-            if (ShowsButtons && GetCloseButtonRect(contentWidth, onLeft).Contains(ToContent(e.Location)))
-                HideAndPersist();
-        }
+
+        FireArmedExtraButton(contentPoint);
+        FireArmedContentButton(contentPoint);
+        EndListScrollDrag();
     }
 
     protected override string Title
@@ -297,41 +324,121 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         }
     }
 
-    // BuildSettingsRows/HandleSettingsCommand/TargetOpacity/EditBoxTextColor/EditBoxBackgroundColor/
-    // ChromeMenuFieldColor/ChromeMenuHoverColor/SettingsMenu* are all LayeredWidgetForm's own default
-    // now - this widget has nothing beyond Hide Title/Full Opacity/the color grid/sliders/margin
-    // stepper to add, so the base's own default row list and command dispatch already cover it.
-    // Every IWidgetStyle property (color, Header Darkness, Opacity, Full Opacity When Active, Tint
-    // Strength, Margin, Corner Radius, Font Size, Align) is mutated directly against Style (== _model)
-    // by the base itself now - this widget doesn't need a dedicated SetHeaderDarkness/SetOpacity/etc.
-    // override of its own for any of them, just this one persistence hook.
+    // TargetOpacity/EditBoxTextColor/EditBoxBackgroundColor/ChromeMenuFieldColor/ChromeMenuHoverColor/
+    // SettingsMenu* are all LayeredWidgetForm's own default now. Every IWidgetStyle property (color,
+    // Header Darkness, Opacity, Full Opacity When Active, Tint Strength, Margin, Corner Radius, Font
+    // Size, Align, Header Border Mode) is mutated directly against Style (== _model) by the base
+    // itself now - this widget doesn't need a dedicated SetHeaderDarkness/SetOpacity/etc. override of
+    // its own for any of them, just this one persistence hook.
     protected override void PersistStyle() => Persist();
 
-    /// <summary>Everything genuinely specific to this widget beyond LayeredWidgetForm's own
-    /// PaintChrome (body/title/border/title-text/Settings button): just the Close button chained
-    /// off it - the layout list itself comes back in a later step.</summary>
-    protected override void PaintContent(Graphics g, int contentWidth, int contentHeight)
+    /// <summary>The only thing genuinely specific to this widget beyond the base's own default rows -
+    /// Rows Shown only means anything for a widget with a row list, so it doesn't belong in
+    /// LayeredWidgetForm's own shared "Base" flyout. A stepper (same interface as Margin/Corner
+    /// Radius/Font Size) rather than a checkbox - see LayoutLauncherModel.RowsShown's own doc comment
+    /// for why this replaced the resize-drag row-snapping it used to be.</summary>
+    protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => new List<DropdownMenu.Row>
     {
-        PaintChrome(g, contentWidth, contentHeight);
+        new(0, "Rows Shown", IsHeader: true),
+        new(0, string.Empty, IsStepper: true,
+            StepperValue: () => _model.RowsShown,
+            OnStepperChange: rows =>
+            {
+                _model.RowsShown = Math.Clamp(rows, 1, 20);
+                Persist();
+                RenderAndPresent();
+            },
+            StepperMin: 1, StepperMax: 20, StepperStep: 1, StepperSuffix: ""),
+    };
 
-        if (!ShowsButtons)
-            return;
+    /// <summary>Manage Layouts.../Save Current Layout sit inside the body itself, pinned to its bottom
+    /// edge, rather than chained off Settings in the margin band - they're this widget's own primary
+    /// actions (the whole point of the launcher), not chrome controls like Close/Settings, so they
+    /// should read as part of the widget's own surface and stay visible/clickable regardless of
+    /// activation state. Side by side via LayeredWidgetForm.LayoutRow when they both fit, stacked
+    /// otherwise (a narrow widget) - stacking grows upward from the bottom so the row still reads as
+    /// anchored there either way. Bottom-pinned rather than centered so the real saved-layout list
+    /// (coming back in a later step) has the rest of the body, above this row, to itself.</summary>
+    // Shared by GetContentButtons (the row itself) and GetListArea (which needs to know how tall
+    // that row turns out so the list can stop just above it) - kept together so the two can never
+    // drift out of sync with each other.
+    private const int BottomRowHeight = 26;
+    private const int BottomRowGap = 8;
+    private const int BottomRowBottomPadding = 12;
+    private static readonly int[] BottomRowWidths = { 120, 150 };
 
-        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
-        var closeRect = ToWindow(GetCloseButtonRect(contentWidth, onLeft));
-        using (var closePath = RoundedRectPath.Full(closeRect, 6))
-        using (var closeFill = new SolidBrush(ChromeFill))
+    protected override IReadOnlyList<ContentButton> GetContentButtons(int contentWidth, int contentHeight)
+    {
+        var top = contentHeight - BottomRowBottomPadding - RowHeight(contentWidth, BottomRowHeight, BottomRowGap, BottomRowWidths);
+        var rects = LayoutRow(contentWidth, top, BottomRowHeight, BottomRowGap, BottomRowWidths);
+
+        return new[]
         {
-            g.FillPath(closeFill, closePath);
-            using var closeBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
-            g.DrawPath(closeBorderPen, closePath);
-        }
-
-        using var xPen = new Pen(Color.WhiteSmoke, 1.6f);
-        var xCenterX = closeRect.X + closeRect.Width / 2f;
-        var xCenterY = closeRect.Y + closeRect.Height / 2f;
-        const float xHalfSize = 4.5f;
-        g.DrawLine(xPen, xCenterX - xHalfSize, xCenterY - xHalfSize, xCenterX + xHalfSize, xCenterY + xHalfSize);
-        g.DrawLine(xPen, xCenterX - xHalfSize, xCenterY + xHalfSize, xCenterX + xHalfSize, xCenterY - xHalfSize);
+            new ContentButton("Manage Layouts...", rects[0], () => ManageLayoutsRequested?.Invoke(this, null)),
+            new ContentButton("Save Current Layout", rects[1], SaveCurrentLayout),
+        };
     }
+
+    /// <summary>Captures whatever's actually open and where it's actually sitting right now (see
+    /// LayoutManager.CaptureCurrentLayout) into a freshly named profile, then opens the editor jumped
+    /// straight to it - same ManageLayoutsRequested event Manage Layouts... itself fires, just with
+    /// the new profile's Id instead of null (see the event's own doc comment).</summary>
+    private void SaveCurrentLayout()
+    {
+        var profile = _manager.CaptureCurrentLayout($"Layout {_manager.Profiles.Count + 1}");
+        ManageLayoutsRequested?.Invoke(this, profile.Id);
+    }
+
+    private const int ListVerticalPadding = 12;
+    private const int ListHorizontalPadding = 10;
+
+    /// <summary>Everything in the body that isn't the list's own rows - header (if shown), the list's
+    /// own top/bottom padding, and the Manage Layouts.../Save Current Layout row below it. Shared with
+    /// GetListArea so the two formulas can never drift out of sync with each other.</summary>
+    private int NonListOverhead(int contentWidth) =>
+        (_model.HideTitle ? 0 : HeaderHeight) + ListVerticalPadding * 2
+        + BottomRowBottomPadding + RowHeight(contentWidth, BottomRowHeight, BottomRowGap, BottomRowWidths);
+
+    /// <summary>Everything between the header and the Manage Layouts.../Save Current Layout row - the
+    /// list itself never grows taller than min(RowsShown, actual saved profile count) rows (see
+    /// LayoutLauncherModel.RowsShown), so it neither wastes space showing fewer profiles than that nor
+    /// grows past the user's own chosen viewport size; a taller body than that just leaves blank space
+    /// below the list rather than stretching it, and more profiles than RowsShown scrolls instead of
+    /// growing further.</summary>
+    protected override Rectangle GetListArea(int contentWidth, int contentHeight)
+    {
+        var top = (_model.HideTitle ? 0 : HeaderHeight) + ListVerticalPadding;
+        var available = contentHeight - NonListOverhead(contentWidth);
+        var wanted = Math.Min(_model.RowsShown, ListRowCount) * ListRowHeight;
+        var height = Math.Max(0, Math.Min(available, wanted));
+        return new Rectangle(ListHorizontalPadding, top, contentWidth - ListHorizontalPadding * 2, height);
+    }
+
+    protected override int ListRowCount => _manager.Profiles.Count;
+    protected override int ListRowHeight => 24;
+
+    /// <summary>Just the name for now - Run/Copy/Delete per row comes back in a later step, verified
+    /// on its own rather than bundled into the list mechanism itself. Alternates ThemedField/
+    /// ThemedFieldDark by index so rows read as banded rather than one flat surface.</summary>
+    protected override void PaintListRow(Graphics g, int index, Rectangle rowRect)
+    {
+        using (var rowFill = new SolidBrush(index % 2 == 0 ? ThemedField : ThemedFieldDark))
+            g.FillRectangle(rowFill, rowRect);
+
+        var previousTextHint = g.TextRenderingHint;
+        g.TextRenderingHint = TextRenderingHint.AntiAlias;
+        using (var textBrush = new SolidBrush(Color.WhiteSmoke))
+        using (var textFormat = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+        {
+            var textRect = new RectangleF(rowRect.X + 8, rowRect.Y, rowRect.Width - 16, rowRect.Height);
+            g.DrawString(_manager.Profiles[index].Name, Font, textBrush, textRect, textFormat);
+        }
+        g.TextRenderingHint = previousTextHint;
+    }
+
+    /// <summary>Nothing genuinely specific to this widget left to paint on top - body/title/border/
+    /// Settings/Close/Manage Layouts.../Save Current Layout/the list itself are all LayeredWidgetForm's
+    /// own PaintChrome now (see ExtraButtons/GetContentButtons/GetListArea).</summary>
+    protected override void PaintContent(Graphics g, int contentWidth, int contentHeight) =>
+        PaintChrome(g, contentWidth, contentHeight);
 }

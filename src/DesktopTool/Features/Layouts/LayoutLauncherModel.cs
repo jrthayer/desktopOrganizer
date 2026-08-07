@@ -44,8 +44,16 @@ public sealed class LayoutLauncherModel : IWidgetStyle
     public int CornerRadius { get; set; } = 10;
     public int TitleFontSize { get; set; } = 9;
     public TitleAlignment TitleAlignment { get; set; } = TitleAlignment.Left;
+    public bool HeaderBorderMode { get; set; }
 
     /// <summary>Whether the widget should currently be showing - persisted so the tray's "Layout
     /// Launcher" toggle survives a restart instead of always defaulting back to shown.</summary>
     public bool Visible { get; set; } = true;
+
+    /// <summary>How many rows the list reserves body space for at most (see LayoutLauncherWidget.
+    /// GetListArea) - fewer saved profiles than this just leaves blank space below the list rather
+    /// than stretching it; more than this scrolls instead of growing further, even if the body itself
+    /// is taller. A direct +/- setting instead of the resize-drag-snapping this replaced, since sizing
+    /// the list by row count is the actual thing being asked for, not a resize-interaction nicety.</summary>
+    public int RowsShown { get; set; } = 5;
 }
