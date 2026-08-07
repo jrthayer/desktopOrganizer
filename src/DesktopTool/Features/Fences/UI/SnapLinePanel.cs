@@ -448,22 +448,8 @@ internal sealed class SnapLinePanel : Form
             DrawSpinnerButton(e.Graphics, _plusRect, isPlus: true);
         }
 
-        /// <summary>Same outlined-square-plus-glyph construction as DropdownMenu.DrawStepperButton -
-        /// kept as a copy rather than a shared helper since the two live in otherwise-unrelated
-        /// classes with no natural common base to hang a shared method off of.</summary>
-        private void DrawSpinnerButton(Graphics g, Rectangle rect, bool isPlus)
-        {
-            using (var pen = new Pen(AppTheme.Border))
-                g.DrawRectangle(pen, rect);
-
-            var cx = rect.X + rect.Width / 2f;
-            var cy = rect.Y + rect.Height / 2f;
-            const float halfLength = 4f;
-            using var glyphPen = new Pen(AppTheme.Accent, 1.5f);
-            g.DrawLine(glyphPen, cx - halfLength, cy, cx + halfLength, cy);
-            if (isPlus)
-                g.DrawLine(glyphPen, cx, cy - halfLength, cx, cy + halfLength);
-        }
+        private void DrawSpinnerButton(Graphics g, Rectangle rect, bool isPlus) =>
+            DropdownMenu.DrawPlusMinusGlyph(g, rect, isPlus, AppTheme.Border, AppTheme.Accent, 4f);
 
         protected override void OnMouseDown(MouseEventArgs e)
         {

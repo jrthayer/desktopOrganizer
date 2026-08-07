@@ -556,15 +556,20 @@ internal sealed class DropdownMenu : Form
 
     /// <summary>A small outlined square with a +/- glyph - same crossed-line construction as
     /// DrawGridItem's Plus glyph, just without needing a whole circle around it.</summary>
-    private void DrawStepperButton(Graphics g, Rectangle rect, bool isPlus)
+    private void DrawStepperButton(Graphics g, Rectangle rect, bool isPlus) =>
+        DrawPlusMinusGlyph(g, rect, isPlus, _getCheckboxBorder(), _getAccent(), 4.5f);
+
+    /// <summary>Shared with SnapLinePanel's own numeric field spinner - same outlined-square-plus-glyph
+    /// construction, just themed from different color sources (this menu's live getters vs.
+    /// SnapLinePanel's fixed AppTheme colors) and a slightly different glyph size.</summary>
+    internal static void DrawPlusMinusGlyph(Graphics g, Rectangle rect, bool isPlus, Color borderColor, Color glyphColor, float halfLength)
     {
-        using (var pen = new Pen(_getCheckboxBorder()))
+        using (var pen = new Pen(borderColor))
             g.DrawRectangle(pen, rect);
 
         var cx = rect.X + rect.Width / 2f;
         var cy = rect.Y + rect.Height / 2f;
-        const float halfLength = 4.5f;
-        using var glyphPen = new Pen(_getAccent(), 1.5f);
+        using var glyphPen = new Pen(glyphColor, 1.5f);
         g.DrawLine(glyphPen, cx - halfLength, cy, cx + halfLength, cy);
         if (isPlus)
             g.DrawLine(glyphPen, cx, cy - halfLength, cx, cy + halfLength);

@@ -24,6 +24,8 @@ internal abstract class LayeredWidgetForm : Form
 {
     protected const int WM_NCHITTEST = 0x0084;
     protected const int WM_NCLBUTTONDBLCLK = 0x00A3;
+    protected const int WM_PAINT = 0x000F;
+    protected const int WM_ERASEBKGND = 0x0014;
     protected const int WM_SIZE = 0x0005;
     protected const int WM_RBUTTONUP = 0x0205;
     protected const int WM_ENTERSIZEMOVE = 0x0231;
@@ -885,6 +887,22 @@ internal abstract class LayeredWidgetForm : Form
     /// default proc afterward, so they fall through instead of returning.</summary>
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == WM_ERASEBKGND)
+        {
+            m.Result = (IntPtr)1;
+            return;
+        }
+
+        if (m.Msg == WM_PAINT)
+        {
+            // Content is pushed via UpdateLayeredWindow (RenderAndPresent), not drawn in response to
+            // WM_PAINT - every subclass on this base needs this same swallow, or Windows keeps
+            // re-posting the message. Just clear the update region so it stops.
+            NativeMethods.BeginPaint(Handle, out var ps);
+            NativeMethods.EndPaint(Handle, ref ps);
+            return;
+        }
+
         if (m.Msg == WM_NCHITTEST)
         {
             m.Result = (IntPtr)HitTest(m.LParam);

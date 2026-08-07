@@ -85,16 +85,12 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     protected override int MaxTopBand => TopMargin;
 
-    // Every WM_*/HT* message/hit-test code with a shared home (move/resize/rename/caption codes) is
-    // LayeredWidgetForm's own now - only the messages with no shared home stay declared here.
-    private const int WM_PAINT = 0x000F;
-    private const int WM_ERASEBKGND = 0x0014;
-    private const int WM_COMMAND = 0x0111;
+    // Every WM_*/HT* message/hit-test code with a shared home (move/resize/rename/paint/erase-bkgnd
+    // codes) is LayeredWidgetForm's own now - nothing needs its own copy here anymore.
 
     // CmdToggleHideTitle/CmdToggleFullOpacityOnHover/CmdColorDefault/CmdColorCustom/CmdColorEyedrop/
     // CmdColorPresetBase are LayeredWidgetForm's own now (negative ids - see its own comment for why
     // that range can never collide with these).
-    private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
     private const int CmdResizeBoth = 9;
     private const int CmdResizeLeftRight = 10;
@@ -125,15 +121,13 @@ internal sealed class FenceForm : LayeredWidgetForm
     // GetNewFenceButtonRect/GetDeleteButtonRect) rather than anchored to their own corners.
     private const int SmallButtonSize = 22;
     private const int ButtonSpacing = 4;
-    private const int MenuCheckboxSize = 12;
-    private const int MenuTextPadding = 8;
 
     private readonly FenceManager _manager;
     private readonly FenceModel _model;
     private readonly IDesktopAnchorStrategy _anchorStrategy;
-    private readonly Font _font = new("Segoe UI", 9f);
     private readonly Dictionary<string, Icon?> _iconCache = new();
     private EditBox? _itemRenameBox;
+    private ContextMenuStrip? _itemContextMenu;
     private string? _itemRenamePath;
     private string? _contextItem;
     private int _hoverIndex = -1;
@@ -251,8 +245,10 @@ internal sealed class FenceForm : LayeredWidgetForm
         // LayeredWidgetForm's own default rename hit-testing/EditBox/title-context-menu (IsOverTitleRow,
         // BeginRename, BuildTitleContextMenu) all measure against Control.Font - without this, they'd
         // measure against the WinForms default (Microsoft Sans Serif) while PaintContent actually draws
-        // the title with _font (Segoe UI 9), so the rename hit-rect/box would be sized wrong.
-        Font = _font;
+        // with this same font instead. AppTheme.Font (Segoe UI 9) rather than a fence-owned instance -
+        // no need to create (and remember to dispose) a private copy of a font every other themed
+        // window in the app already shares.
+        Font = AppTheme.Font;
         _toolTip.Draw += DrawTooltip;
 
         Reanchor();
@@ -354,9 +350,9 @@ internal sealed class FenceForm : LayeredWidgetForm
     protected override void DisposeOwnedResources()
     {
         _itemRenameBox?.Dispose();
+        _itemContextMenu?.Dispose();
         _dragGhost?.Dispose();
         _toolTip.Dispose();
-        _font.Dispose();
         foreach (var icon in _iconCache.Values)
             icon?.Dispose();
     }
@@ -569,7 +565,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             // reposition ever having a reason to kick in.
             var formScreenOrigin = PointToScreen(Point.Empty);
             var workingArea = Screen.FromControl(this).WorkingArea;
-            var tooltipWidth = TextRenderer.MeasureText(text, _font).Width + 16;
+            var tooltipWidth = TextRenderer.MeasureText(text, Font).Width + 16;
             var x = formScreenOrigin.X + windowRect.Left + tooltipWidth > workingArea.Right
                 ? windowRect.Right - tooltipWidth
                 : windowRect.Left;
@@ -592,7 +588,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             e.Graphics.FillRectangle(background, e.Bounds);
         using (var borderPen = new Pen(Color.FromArgb(255, 20, 20, 24)))
             e.Graphics.DrawRectangle(borderPen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
-        TextRenderer.DrawText(e.Graphics, e.ToolTipText, _font, e.Bounds, Color.WhiteSmoke,
+        TextRenderer.DrawText(e.Graphics, e.ToolTipText, Font, e.Bounds, Color.WhiteSmoke,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
@@ -754,58 +750,16 @@ internal sealed class FenceForm : LayeredWidgetForm
         RenderAndPresent();
     }
 
-    /// <summary>Everything with no shared home in LayeredWidgetForm: WM_ERASEBKGND/WM_PAINT
-    /// (layered-window painting is pushed via UpdateLayeredWindow, not WM_PAINT), WM_COMMAND (only
-    /// CmdRenameItem now - title rename no longer routes through a native menu, see Title/
-    /// ChromeMenuFieldColor below), and the native owner-draw menu machinery (WM_MEASUREITEM/
-    /// WM_DRAWITEM, still needed for the item-rename context menu). A right-click anywhere in the
-    /// item grid shows the item context menu via OnClientRightClick instead (LayeredWidgetForm's own
-    /// WM_RBUTTONUP handling calls it after activating). Everything else goes through base.WndProc,
-    /// which is where move/resize/snap/rename/hover/the Settings dropdown all live now.</summary>
+    /// <summary>WM_PAINT/WM_ERASEBKGND swallowing (a layered window is never repainted by Windows
+    /// itself - see RenderAndPresent) and the item-rename context menu's own message plumbing are
+    /// both LayeredWidgetForm's own now - the former because it's universal to any subclass on this
+    /// base, not fence-specific at all; the latter because the item-rename menu switched from a
+    /// native TrackPopupMenuEx (its own WM_COMMAND/WM_MEASUREITEM/WM_DRAWITEM machinery) to a plain
+    /// ContextMenuStrip, the same mechanism the base's own title-rename menu already uses (see
+    /// ShowItemContextMenu). WM_DISPLAYCHANGE/WM_DPICHANGED are the only messages left with no
+    /// shared home.</summary>
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == WM_ERASEBKGND)
-        {
-            m.Result = (IntPtr)1;
-            return;
-        }
-
-        if (m.Msg == WM_PAINT)
-        {
-            // Content is pushed via UpdateLayeredWindow (RenderAndPresent), not drawn in
-            // response to WM_PAINT - just clear the update region so Windows stops re-posting it.
-            NativeMethods.BeginPaint(Handle, out var ps);
-            NativeMethods.EndPaint(Handle, ref ps);
-            return;
-        }
-
-        if (m.Msg == WM_COMMAND)
-        {
-            HandleCommand(m.WParam.ToInt32() & 0xFFFF);
-            return;
-        }
-
-        if (m.Msg == NativeMethods.WM_MEASUREITEM)
-        {
-            var mis = Marshal.PtrToStructure<MEASUREITEMSTRUCT>(m.LParam);
-            if (mis.CtlType == NativeMethods.ODT_MENU)
-            {
-                MeasureMenuItem(ref mis);
-                Marshal.StructureToPtr(mis, m.LParam, false);
-            }
-            m.Result = (IntPtr)1;
-            return;
-        }
-
-        if (m.Msg == NativeMethods.WM_DRAWITEM)
-        {
-            var dis = Marshal.PtrToStructure<DRAWITEMSTRUCT>(m.LParam);
-            if (dis.CtlType == NativeMethods.ODT_MENU)
-                DrawMenuItem(dis);
-            m.Result = (IntPtr)1;
-            return;
-        }
-
         base.WndProc(ref m);
 
         if (m.Msg == NativeMethods.WM_DISPLAYCHANGE || m.Msg == NativeMethods.WM_DPICHANGED)
@@ -1055,7 +1009,7 @@ internal sealed class FenceForm : LayeredWidgetForm
                 if (visibleHeight > 0)
                 {
                     var labelRect = ToWindow(new Rectangle(cellX, labelTop, CellWidth, visibleHeight));
-                    TextRenderer.DrawText(g, GetDisplayName(item), _font, labelRect, Color.WhiteSmoke,
+                    TextRenderer.DrawText(g, GetDisplayName(item), Font, labelRect, Color.WhiteSmoke,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
                 }
             }
@@ -1205,27 +1159,31 @@ internal sealed class FenceForm : LayeredWidgetForm
         _contextItem = FileAtLabelPosition(contentPoint);
         if (_contextItem is null)
             return;
-        ShowContextMenu(contentPoint);
+        ShowItemContextMenu();
     }
 
-    private void ShowContextMenu(Point contentPoint)
+    /// <summary>Same ContextMenuStrip-based pattern as LayeredWidgetForm's own title-rename menu (see
+    /// its BuildTitleContextMenu) - lazily built, themed via TrayMenuRenderer using the same
+    /// ChromeMenuFieldColor/ChromeMenuHoverColor colors, shown at the cursor. Used to be a hand-rolled
+    /// native TrackPopupMenuEx with its own owner-draw WM_MEASUREITEM/WM_DRAWITEM handling just to
+    /// show this one "Rename" item - all of that was redundant with a mechanism the base already
+    /// provides for the exact same kind of menu.</summary>
+    private void ShowItemContextMenu()
     {
+        _itemContextMenu ??= BuildItemContextMenu();
         NativeMethods.GetCursorPos(out var pt);
+        _itemContextMenu.Show(this, PointToClient(new Point(pt.X, pt.Y)));
+    }
 
-        var hMenu = NativeMethods.CreatePopupMenu();
-        try
+    private ContextMenuStrip BuildItemContextMenu()
+    {
+        var menu = new ContextMenuStrip
         {
-            AppendItem(hMenu, CmdRenameItem, false);
-
-            ApplyDarkMenuTheme(hMenu);
-
-            NativeMethods.SetForegroundWindow(Handle);
-            NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_RIGHTBUTTON, pt.X, pt.Y, Handle, IntPtr.Zero);
-        }
-        finally
-        {
-            NativeMethods.DestroyMenu(hMenu);
-        }
+            Renderer = new TrayMenuRenderer(() => ChromeMenuFieldColor, () => ChromeMenuHoverColor, () => AppTheme.Text),
+            Font = Font,
+        };
+        menu.Items.Add("Rename", null, (_, _) => BeginRenameItem(_contextItem));
+        return menu;
     }
 
     // Title/TitleRowHeight below are the only rename-related hooks left with a fence-specific
@@ -1310,39 +1268,6 @@ internal sealed class FenceForm : LayeredWidgetForm
     // reposition-on-resize are all LayeredWidgetForm's own defaults now (ChromeFill/ThemedMenuSelected/
     // Accent/ThemedCheckboxBorder, and OnResized - exactly what this used to override them to).
 
-    /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
-    /// separately filled by the menu's own background brush, which defaults to the system's (light)
-    /// COLOR_MENU and shows through as a stray light border around the dark rows unless replaced
-    /// here to match. MIM_APPLYTOSUBMENUS cascades this to any attached submenus too.</summary>
-    private void ApplyDarkMenuTheme(IntPtr hMenu)
-    {
-        var menuInfo = new MENUINFO
-        {
-            cbSize = (uint)Marshal.SizeOf<MENUINFO>(),
-            fMask = NativeMethods.MIM_BACKGROUND | NativeMethods.MIM_APPLYTOSUBMENUS,
-            hbrBack = GetThemeBrush(ThemedBody),
-        };
-        NativeMethods.SetMenuInfo(hMenu, ref menuInfo);
-    }
-
-    private static void AppendItem(IntPtr hMenu, int commandId, bool isChecked)
-    {
-        var flags = NativeMethods.MF_OWNERDRAW | (isChecked ? NativeMethods.MF_CHECKED : NativeMethods.MF_UNCHECKED);
-        NativeMethods.AppendMenu(hMenu, flags, (IntPtr)commandId, (IntPtr)commandId);
-    }
-
-    private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader, Color? Swatch = null);
-
-    /// <summary>Every owner-draw row's label, keyed by the item id carried in its itemData (see
-    /// AppendItem) - only "Rename" for the one single-item native menu this still serves
-    /// (ShowContextMenu's item-rename) now that the Settings dropdown draws itself directly from its
-    /// Row list, and title-rename uses a plain ContextMenuStrip instead of a native menu.</summary>
-    private static MenuRowStyle GetMenuRowStyle(int tag) => tag switch
-    {
-        CmdRenameItem => new MenuRowStyle("Rename", false, false),
-        _ => new MenuRowStyle(string.Empty, false, false),
-    };
-
     // ColorRef/Tint/DarkenTowardBlack/SafeChromeBlend are all LayeredWidgetForm's own now.
 
     /// <summary>Only rows worth explaining get one - most menu items are self-explanatory from
@@ -1353,78 +1278,6 @@ internal sealed class FenceForm : LayeredWidgetForm
             "After you resize this fence by hand, automatically snap it to the tightest size that fits its icons (same as OCD Formatting > Both).",
         _ => null,
     };
-
-    /// <summary>WM_MEASUREITEM handler for the one remaining native single-item menu (item-rename,
-    /// see ShowContextMenu) - the Settings dropdown measures its own rows directly (see
-    /// DropdownMenu.MeasureLayout) instead of going through this.</summary>
-    private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
-    {
-        var style = GetMenuRowStyle((int)mis.itemData);
-        var size = TextRenderer.MeasureText(style.Text, _font);
-        var leftReserve = style.HasCheckbox || style.Swatch is not null ? MenuCheckboxSize + MenuTextPadding : 0;
-        // No right-side reserve for a submenu arrow - Windows always adds its own fixed arrow
-        // margin outside whatever width we report for an MF_POPUP row, so reserving space for one
-        // here too just doubled up as a second, hand-drawn arrow next to the native one.
-        mis.itemWidth = (uint)(MenuTextPadding + leftReserve + size.Width + MenuTextPadding);
-        mis.itemHeight = (uint)Math.Max(size.Height + 8, 22);
-    }
-
-    /// <summary>WM_DRAWITEM handler for the one remaining native single-item menu (see
-    /// MeasureMenuItem's own comment) - paints a row to match the fence's own dark theme instead of
-    /// the native Windows menu look.</summary>
-    private void DrawMenuItem(DRAWITEMSTRUCT dis)
-    {
-        using var g = Graphics.FromHdc(dis.hDC);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var rect = Rectangle.FromLTRB(dis.rcItem.Left, dis.rcItem.Top, dis.rcItem.Right, dis.rcItem.Bottom);
-        var style = GetMenuRowStyle((int)dis.itemData);
-        var selected = !style.IsHeader && (dis.itemState & NativeMethods.ODS_SELECTED) != 0;
-        var isChecked = (dis.itemState & NativeMethods.ODS_CHECKED) != 0;
-
-        using (var background = new SolidBrush(selected ? ThemedMenuSelected : ThemedBody))
-            g.FillRectangle(background, rect);
-
-        if (style.HasCheckbox)
-        {
-            var checkRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
-            using (var checkPen = new Pen(ThemedCheckboxBorder))
-                g.DrawRectangle(checkPen, checkRect);
-
-            if (isChecked)
-            {
-                using var checkMarkPen = new Pen(Accent, 2);
-                g.DrawLine(checkMarkPen, checkRect.X + 2, checkRect.Y + 6, checkRect.X + 5, checkRect.Y + 9);
-                g.DrawLine(checkMarkPen, checkRect.X + 5, checkRect.Y + 9, checkRect.X + 10, checkRect.Y + 2);
-            }
-        }
-        else if (style.Swatch is { } swatchColor)
-        {
-            var swatchRect = new Rectangle(rect.X + MenuTextPadding, rect.Y + (rect.Height - MenuCheckboxSize) / 2, MenuCheckboxSize, MenuCheckboxSize);
-            using (var swatchBrush = new SolidBrush(swatchColor))
-                g.FillEllipse(swatchBrush, swatchRect);
-
-            // The currently-active color gets a bright ring around its swatch instead of a
-            // checkbox's checkmark - there's no empty "unchecked" state to draw here either way.
-            using var swatchPen = new Pen(isChecked ? Accent : ThemedCheckboxBorder, isChecked ? 2 : 1);
-            g.DrawEllipse(swatchPen, swatchRect);
-        }
-
-        var textLeft = rect.X + MenuTextPadding + (style.HasCheckbox || style.Swatch is not null ? MenuCheckboxSize + MenuTextPadding : 0);
-        var textRect = new Rectangle(textLeft, rect.Y, Math.Max(0, rect.Right - MenuTextPadding - textLeft), rect.Height);
-        var textColor = style.IsHeader ? Color.FromArgb(255, 140, 140, 148) : Color.WhiteSmoke;
-        TextRenderer.DrawText(g, style.Text, _font, textRect, textColor,
-            TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
-    }
-
-    /// <summary>WM_COMMAND dispatch for the one remaining native single-item menu (item-rename, see
-    /// ShowContextMenu) - everything else (the Settings dropdown's rows, title-rename) is handled
-    /// directly by LayeredWidgetForm now (see HandleSettingsCommand for the dropdown's own commands),
-    /// never routed through WM_COMMAND at all.</summary>
-    private void HandleCommand(int id)
-    {
-        if (id == CmdRenameItem)
-            BeginRenameItem(_contextItem);
-    }
 
     /// <summary>Dispatches a clicked Settings-dropdown row id - see LayeredWidgetForm.OpenSettingsMenu,
     /// which calls this directly (not via WM_COMMAND).</summary>
@@ -1641,7 +1494,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;
-        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), ToScreen(labelRect), _font);
+        _itemRenameBox = new EditBox(Handle, GetDisplayName(_model.Files[index]), ToScreen(labelRect), Font);
         _itemRenameBox.Commit += OnItemRenameCommit;
         _itemRenameBox.Cancel += OnItemRenameCancel;
         RenderAndPresent();

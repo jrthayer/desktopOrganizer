@@ -1,5 +1,6 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using DesktopTool.Native;
+using DesktopTool.UI;
 
 namespace DesktopTool.Features.Fences.UI;
 
@@ -59,7 +60,7 @@ internal sealed class DragGhostWindow : Form
 
         NativeMethods.SetLayeredWindowAttributes(Handle, 0, (byte)(0.85 * 255), NativeMethods.LWA_ALPHA);
 
-        using (var path = RoundedRect(new Rectangle(0, 0, CardWidth, CardHeight), CornerRadius))
+        using (var path = RoundedRectPath.Full(new Rectangle(0, 0, CardWidth, CardHeight), CornerRadius))
         using (var region = new Region(path))
         using (var g = Graphics.FromHwnd(Handle))
         {
@@ -97,11 +98,11 @@ internal sealed class DragGhostWindow : Form
         NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, _currentWidth, _currentHeight,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
 
-        using (var region = new Region(RoundedRect(new Rectangle(0, 0, CardWidth, CardHeight), CornerRadius)))
+        using (var region = new Region(RoundedRectPath.Full(new Rectangle(0, 0, CardWidth, CardHeight), CornerRadius)))
         {
             if (hint is not null)
             {
-                using var hintPath = RoundedRect(new Rectangle(0, CardHeight + HintGap, _currentWidth, HintHeight), CornerRadius);
+                using var hintPath = RoundedRectPath.Full(new Rectangle(0, CardHeight + HintGap, _currentWidth, HintHeight), CornerRadius);
                 region.Union(hintPath);
             }
             using var g = Graphics.FromHwnd(Handle);
@@ -136,7 +137,7 @@ internal sealed class DragGhostWindow : Form
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-            using var body = RoundedRect(new Rectangle(0, 0, CardWidth - 1, CardHeight - 1), CornerRadius);
+            using var body = RoundedRectPath.Full(new Rectangle(0, 0, CardWidth - 1, CardHeight - 1), CornerRadius);
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
             g.FillPath(bodyFill, body);
 
@@ -153,7 +154,7 @@ internal sealed class DragGhostWindow : Form
             if (_hintText is not null)
             {
                 var hintRect = new Rectangle(0, CardHeight + HintGap, _currentWidth - 1, HintHeight - 1);
-                using var hintPath = RoundedRect(hintRect, CornerRadius);
+                using var hintPath = RoundedRectPath.Full(hintRect, CornerRadius);
                 using var hintFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
                 g.FillPath(hintFill, hintPath);
                 TextRenderer.DrawText(g, _hintText, _font, hintRect, Color.WhiteSmoke,
@@ -164,18 +165,6 @@ internal sealed class DragGhostWindow : Form
         {
             NativeMethods.EndPaint(Handle, ref ps);
         }
-    }
-
-    private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
-    {
-        var path = new GraphicsPath();
-        int d = radius * 2;
-        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
-        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
-        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 
     protected override void Dispose(bool disposing)
