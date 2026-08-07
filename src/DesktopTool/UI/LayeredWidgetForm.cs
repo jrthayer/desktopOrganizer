@@ -168,6 +168,11 @@ internal abstract class LayeredWidgetForm : Form
     // bounds-tracking property per widget type.
     private static readonly List<LayeredWidgetForm> _liveWidgets = new();
 
+    /// <summary>Every live widget, for CopySettingsGroupPicker's own "All Widgets"/"All Fences"/"All
+    /// Non-Fence Widgets" boxes - a read-only view of the same list FindAt already walks, rather than
+    /// a second bolted-on collection to keep in sync.</summary>
+    internal static IReadOnlyList<LayeredWidgetForm> LiveWidgets => _liveWidgets;
+
     /// <summary>Which live widget (if any) screenPoint currently sits over - used by
     /// CopySettingsOverlay for continuous hover-tracking while it's itself the topmost window on
     /// screen, which rules out the usual WindowFromPoint+GetAncestor technique
@@ -858,55 +863,47 @@ internal abstract class LayeredWidgetForm : Form
         if (_hoveredButtonKind == HoveredButtonKind.CopySettings)
             PaintButtonHoverTint(g, buttonRect);
 
-        PaintPaintBrushGlyph(g, buttonRect);
+        PaintCopyIconGlyph(g, buttonRect);
     }
 
-    /// <summary>"Copy Settings To" - a hand-drawn paint brush: a diagonal, round-capped handle with
-    /// a small tilted rounded-rect "head" (the ferrule/bristles) at its far end. No icon asset
-    /// library in this app (see WarningIcon's own comment), so this is drawn the same "just the
-    /// shape" way as every other glyph here (WidgetManagerWidget's own Plus/Wrench/Cog) rather than
-    /// an embedded image. Icon-only, no text label - the button is too small for "Copy Settings To"
-    /// to fit, hence the tooltip (see _copySettingsTooltip).</summary>
-    private static void PaintPaintBrushGlyph(Graphics g, Rectangle rect)
+    /// <summary>"Copy Settings To" - the classic two-overlapping-squares "duplicate" glyph, same
+    /// hand-drawn approach as LayoutLauncherWidget's own row-level PaintCopyGlyph (no icon asset
+    /// library in this app - see WarningIcon's own comment). The front square's corner is punched
+    /// out of the back square first using ThemedField (this button's own fill - see
+    /// PaintCopySettingsButton just above) so it reads as sitting on top instead of two crossing
+    /// outlines. Icon-only, no text label - the button is too small for "Copy Settings To" to fit,
+    /// hence the tooltip (see _copySettingsTooltip).</summary>
+    private void PaintCopyIconGlyph(Graphics g, Rectangle rect)
     {
         var cx = rect.X + rect.Width / 2f;
         var cy = rect.Y + rect.Height / 2f;
         var scale = Math.Min(rect.Width, rect.Height);
+        var iconSize = scale * 0.42f;
+        var iconOffset = scale * 0.16f;
 
         var previousSmoothing = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        // 45-degree diagonal - the handle's own grip sits down-left, the brush head up-right.
-        const float dirX = -0.70710678f, dirY = 0.70710678f;
-        var handleHalf = scale * 0.32f;
-        var gripX = cx + dirX * handleHalf;
-        var gripY = cy + dirY * handleHalf;
-        var headX = cx - dirX * handleHalf * 0.55f;
-        var headY = cy - dirY * handleHalf * 0.55f;
+        var backRect = new RectangleF(cx - iconSize / 2f + iconOffset / 2f, cy - iconSize / 2f - iconOffset / 2f, iconSize, iconSize);
+        var frontRect = new RectangleF(cx - iconSize / 2f - iconOffset / 2f, cy - iconSize / 2f + iconOffset / 2f, iconSize, iconSize);
 
-        using (var handlePen = new Pen(Color.WhiteSmoke, Math.Max(1.4f, scale * 0.1f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-            g.DrawLine(handlePen, gripX, gripY, headX, headY);
-
-        // Brush head - a small rounded rectangle tilted onto the same diagonal as the handle, its
-        // own center pushed a bit further along the handle's own direction so it reads as the
-        // handle's continuation rather than a separate shape floating at its tip.
-        var headLength = scale * 0.42f;
-        var headWidth = scale * 0.26f;
-        var state = g.Save();
-        g.TranslateTransform(headX - dirX * headLength * 0.15f, headY - dirY * headLength * 0.15f);
-        g.RotateTransform(45f);
-        using (var headPath = RoundedRectPath.Full(new Rectangle((int)(-headLength / 2), (int)(-headWidth / 2), (int)headLength, (int)headWidth), (int)(headWidth * 0.4f)))
-        using (var headBrush = new SolidBrush(Color.WhiteSmoke))
-            g.FillPath(headBrush, headPath);
-        g.Restore(state);
+        using (var copyPen = new Pen(Color.WhiteSmoke, 1.1f))
+        {
+            g.DrawRectangle(copyPen, backRect.X, backRect.Y, backRect.Width, backRect.Height);
+            using (var punchBrush = new SolidBrush(ThemedField))
+                g.FillRectangle(punchBrush, frontRect);
+            g.DrawRectangle(copyPen, frontRect.X, frontRect.Y, frontRect.Width, frontRect.Height);
+        }
 
         g.SmoothingMode = previousSmoothing;
     }
 
     /// <summary>The same translucent-white tint a Fence's own icon-grid hover uses (see FenceForm.
     /// PaintContent's _hoverIndex check), shared by Settings/ChromeButton/ContentButton so all three
-    /// read as one consistent hover language across every LayeredWidgetForm.</summary>
-    private static void PaintButtonHoverTint(Graphics g, Rectangle windowRect)
+    /// read as one consistent hover language across every LayeredWidgetForm - protected, not private,
+    /// so a subclass's own hand-painted list rows (CopySettingsGroupPicker's own boxes) can reuse the
+    /// exact same tint instead of a second copy of it.</summary>
+    protected static void PaintButtonHoverTint(Graphics g, Rectangle windowRect)
     {
         using var hoverBrush = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
         using var hoverPath = RoundedRectPath.Full(windowRect, 6);
@@ -1027,8 +1024,42 @@ internal abstract class LayeredWidgetForm : Form
             return;
 
         var overlay = new CopySettingsOverlay(this);
-        overlay.FormClosed += (_, _) => overlay.Dispose();
+        var pickerStore = new CopySettingsPickerStore();
+        var groupPicker = new CopySettingsGroupPicker(this, Fences, pickerStore.Load(), pickerStore);
+        // Seeds the picker's own look from this widget's current one, the same copy every individual
+        // target gets - reuses CopySettingsFrom itself rather than duplicating its dozen-property
+        // list here. Applied on top of the picker's own persisted position/size (already set by its
+        // constructor), not instead of them - only the tint/opacity/etc half of CopySettingsFrom's
+        // work is meant to track the source; where the picker itself last sat on screen is its own.
+        groupPicker.CopySettingsFrom(this);
+
+        // Forced to full opacity regardless of the source's own current Opacity - a picker that
+        // copied a faded-into-the-desktop fence's low Opacity would be hard to read/click reliably
+        // right when it needs to be clearest. Still just Style.Opacity underneath, so the picker's
+        // own Settings menu can lower it again afterward like any other widget - only the value this
+        // particular pick starts at is forced, not the knob itself.
+        groupPicker.Style.Opacity = 100;
+        groupPicker.RenderOpacity.SnapToTarget();
+        groupPicker.PersistStyle();
+        groupPicker.RenderAndPresent();
+
+        // The two halves of one pick (see CopySettingsGroupPicker's own class comment) - a cancel
+        // landing on either one closes both, guarded so the mutual FormClosed handlers below don't
+        // just bounce a second Close() back and forth once the first has already fired.
+        var closingBoth = false;
+        overlay.FormClosed += (_, _) =>
+        {
+            if (!closingBoth) { closingBoth = true; groupPicker.Close(); }
+            overlay.Dispose();
+        };
+        groupPicker.FormClosed += (_, _) =>
+        {
+            if (!closingBoth) { closingBoth = true; overlay.Close(); }
+            groupPicker.Dispose();
+        };
+
         overlay.Show();
+        groupPicker.Show();
     }
 
     /// <summary>Arms whichever extra button contentPoint lands on, if any - a subclass's own

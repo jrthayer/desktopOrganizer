@@ -836,22 +836,14 @@ internal sealed class FenceForm : LayeredWidgetForm
             g.FillPath(newFenceFill, newFencePath);
             PaintHeaderBorderModeOutline(g, newFencePath);
 
-            // The classic two-overlapping-squares "duplicate" glyph, hand-drawn like everything
-            // else here rather than pulled from an icon font - this app has no icon asset library
-            // (see FenceForm's own class comment on hand-painting UI). The front square's corner
-            // is punched out of the back square first (filled with the button's own ChromeFill
-            // color) so it reads as sitting on top instead of two crossing outlines.
+            // A plain cross - same hand-drawn construction as WidgetManagerWidget's own "Add Fence"
+            // PaintPlusGlyph, sized to this button instead of that one's row-button footprint.
             var cx = newFenceRect.X + newFenceRect.Width / 2f;
             var cy = newFenceRect.Y + newFenceRect.Height / 2f;
-            const float iconSize = 9f;
-            const float iconOffset = 3f;
-            var backRect = new RectangleF(cx - iconSize / 2f + iconOffset / 2f, cy - iconSize / 2f - iconOffset / 2f, iconSize, iconSize);
-            var frontRect = new RectangleF(cx - iconSize / 2f - iconOffset / 2f, cy - iconSize / 2f + iconOffset / 2f, iconSize, iconSize);
-
-            using var copyPen = new Pen(Color.WhiteSmoke, 1.3f);
-            g.DrawRectangle(copyPen, backRect.X, backRect.Y, backRect.Width, backRect.Height);
-            g.FillRectangle(newFenceFill, frontRect);
-            g.DrawRectangle(copyPen, frontRect.X, frontRect.Y, frontRect.Width, frontRect.Height);
+            const float half = 4.5f;
+            using var plusPen = new Pen(Color.WhiteSmoke, 1.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLine(plusPen, cx - half, cy, cx + half, cy);
+            g.DrawLine(plusPen, cx, cy - half, cx, cy + half);
 
             // ChromeFill (via the same newFenceFill brush), same as Settings/"+" - matches this
             // fence's own color theme instead of a fixed color, while staying readable against

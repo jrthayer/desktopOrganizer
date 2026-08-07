@@ -32,8 +32,6 @@ public sealed class FenceManager : IDisposable
     {
         _models.Clear();
         _models.AddRange(_store.Load());
-        foreach (var model in _models)
-            ShowFence(model);
 
         // Re-establishes hidden state for every already-fenced shortcut - the real files are only
         // ever restored on a clean exit (see Dispose), so on a normal launch this re-hides them
@@ -44,11 +42,22 @@ public sealed class FenceManager : IDisposable
         // something that's permanently un-hideable (e.g. a folder containing DesktopTool's own
         // running executable) on every single launch would be far more annoying than useful; see
         // AddFiles, where the same failure is worth surfacing once, at the moment it's added.
+        //
+        // Done before ShowFence below, not after - each FenceForm paints its own items (icon and
+        // all) immediately in its constructor, reading item.Path as it stands at that moment. Doing
+        // this migration/re-hide pass first means every fence's very first paint already sees the
+        // settled, final path instead of wherever a pre-migration/not-yet-re-hidden item happened to
+        // be sitting - hiding it out from under an already-painted fence used to occasionally leave
+        // an item showing no icon at all until some later repaint (a hover, a resize) retried it
+        // (see GetIcon's own comment on why a failed extraction isn't cached).
         foreach (var model in _models)
             foreach (var file in model.Files)
                 if (!file.IsRecycleBin)
                     _iconHider.Hide(file);
         Save();
+
+        foreach (var model in _models)
+            ShowFence(model);
     }
 
     public void CreateFence()
