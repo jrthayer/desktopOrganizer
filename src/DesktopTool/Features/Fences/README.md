@@ -108,6 +108,11 @@ Fences' or a design tool's own alignment guides:
   come back once you do (a monitor is only ever seeded once).
 - **Fence Margin** (see Fence settings below) adds a consistent gap instead
   of snapping flush to whatever it's snapping to.
+- **Widget Manager**'s own Snap Lines switch (see
+  [Widget Manager](../WidgetManager/README.md)) turns every custom/default
+  line off or on as a drag candidate app-wide, without affecting
+  fence-to-fence edge snapping - editing lines via Manage Snap Lines...
+  still works either way.
 
 The pure edge-snapping geometry itself (`SnapEngine`) lives as a sibling
 feature — see [Snapping](../Snapping/README.md) — it has no dependency on

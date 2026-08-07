@@ -200,6 +200,13 @@ public sealed class FenceManager : IDisposable
     /// that's actually the source of truth.</summary>
     public bool HasRecycleBin => _models.Any(m => m.Files.Any(f => f.IsRecycleBin));
 
+    /// <summary>Whether at least one fence is currently shown - read fresh from every live form's
+    /// own Visible rather than cached, the same "scan live state, never track a shadow flag"
+    /// reasoning as HasRecycleBin above. Lets Show/Hide All (tray, and Widget Manager's own Fences
+    /// switch) always flip off the actual current state instead of two independent callers each
+    /// keeping their own possibly-stale toggle bit.</summary>
+    public bool AnyVisible => _forms.Values.Any(f => f.Visible);
+
     public bool IsRecycleBinAt(Guid fenceId, int index)
     {
         var model = _models.Find(m => m.Id == fenceId);

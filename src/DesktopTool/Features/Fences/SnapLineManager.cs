@@ -23,6 +23,12 @@ public sealed class SnapLineManager : IDisposable
 
     public IReadOnlyList<SnapLineModel> Lines => _lines;
 
+    /// <summary>Off drops every custom snap line from drag candidates app-wide - see
+    /// SnapLineSettings.Enabled and SetEnabled below. Loaded once here; every other place that
+    /// cares (MergeCandidates/BeginDrag/UpdateDragOverlay) reads this field directly rather than
+    /// re-deriving it.</summary>
+    public bool Enabled { get; private set; }
+
     public event Action? LinesChanged;
 
     public SnapLineManager()
@@ -30,7 +36,18 @@ public sealed class SnapLineManager : IDisposable
         var settings = _store.Load();
         _lines = settings.Lines;
         _seededMonitors = settings.SeededMonitors;
+        Enabled = settings.Enabled;
         SeedDefaultEdgeLinesForNewMonitors();
+    }
+
+    /// <summary>Widget Manager's own Snap Lines switch - a no-op if it didn't actually change, same
+    /// redundant-but-safe guard every other setter-style mutator here already has.</summary>
+    public void SetEnabled(bool enabled)
+    {
+        if (enabled == Enabled)
+            return;
+        Enabled = enabled;
+        Save();
     }
 
     /// <summary>Gives every monitor that's never been seeded before (a first-ever launch, or a
@@ -107,11 +124,12 @@ public sealed class SnapLineManager : IDisposable
     {
         _guideOverlay ??= new SnapGuideOverlay();
 
-        var lines = includeCustomLines
+        var showCustomLines = includeCustomLines && Enabled;
+        var lines = showCustomLines
             ? _lines.Select(l => (l.Orientation, l.Position, Highlighted: false, Span: MonitorSpanOf(l))).ToList()
             : new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
 
-        if (!includeCustomLines)
+        if (!showCustomLines)
         {
             if (verticalGuides is not null)
                 lines.AddRange(verticalGuides.Distinct().Select(p => (SnapOrientation.Vertical, p, false, guideSpan)));
@@ -267,8 +285,9 @@ public sealed class SnapLineManager : IDisposable
         // that's combining both buttons' candidates (see FenceForm's own MouseButtons check in
         // WM_MOVING/UpdateRightDrag) shows both sets of guide lines together, not just whichever
         // one this call happened to lead with.
+        var showCustomLines = includeCustomLines && Enabled;
         var lines = new List<(SnapOrientation Orientation, int Position, bool Highlighted, Rectangle Span)>();
-        if (includeCustomLines)
+        if (showCustomLines)
         {
             foreach (var l in _lines)
             {
@@ -283,7 +302,7 @@ public sealed class SnapLineManager : IDisposable
             }
         }
 
-        var customPositions = includeCustomLines
+        var customPositions = showCustomLines
             ? _lines.Select(l => (l.Orientation, l.Position)).ToHashSet()
             : new HashSet<(SnapOrientation, int)>();
 
@@ -324,7 +343,7 @@ public sealed class SnapLineManager : IDisposable
         var vertical = new List<int>(extraVertical);
         var horizontal = new List<int>(extraHorizontal);
 
-        if (!includeCustomLines)
+        if (!includeCustomLines || !Enabled)
             return (vertical, horizontal);
 
         foreach (var line in _lines)
@@ -346,5 +365,5 @@ public sealed class SnapLineManager : IDisposable
         return (vertical, horizontal);
     }
 
-    private void Save() => _store.Save(new SnapLineSettings { Lines = _lines, SeededMonitors = _seededMonitors });
+    private void Save() => _store.Save(new SnapLineSettings { Lines = _lines, SeededMonitors = _seededMonitors, Enabled = Enabled });
 }

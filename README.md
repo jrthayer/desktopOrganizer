@@ -2,8 +2,8 @@
 
 A Windows desktop app, run from the system tray, built to grow into a
 general desktop-organization toolkit over time. Its features are
-**Fences** and **Layouts**, built on a shared **Snapping** engine — see
-below.
+**Fences**, **Layouts**, and **Widget Manager**, built on a shared
+**Snapping** engine — see below.
 
 ## Requirements
 
@@ -55,6 +55,17 @@ leave in a saved layout (running it just tries to "relaunch" Desktop Tool
 itself, which is already running and a no-op in practice), but worth
 deleting by hand via Manage Layouts if you notice it.
 
+### Widget Manager
+
+A persistent on-screen panel listing the app's three toggleable widgets -
+Fences, Snap Lines, and Layout Launcher - each with an on/off switch plus
+a row-specific action button (**Add Fence** / **Edit** / **Edit
+Layouts**), reachable via tray menu > Widgets > Widget Manager.
+
+See [`src/DesktopTool/Features/WidgetManager/README.md`](src/DesktopTool/Features/WidgetManager/README.md)
+for the full feature writeup and known limitations. All of its code lives
+under [`src/DesktopTool/Features/WidgetManager`](src/DesktopTool/Features/WidgetManager).
+
 ### Snapping
 
 The pure edge-snapping geometry (`SnapEngine`) that gives both Fences and
@@ -102,6 +113,8 @@ All of its code lives under [`src/DesktopTool/UI`](src/DesktopTool/UI).
   persistent on-screen panel that lists every saved layout (click to run
   one) plus **Save Current Layout** and **Manage Layouts...** (see
   [Layouts](#layouts) above).
+- **Widgets > Widget Manager** — toggles the Widget Manager widget (see
+  [Widget Manager](#widget-manager) above).
 
 **Limitations:** the Show Hidden Files setting itself takes effect
 immediately, but the desktop's own icon view doesn't visibly pick it up

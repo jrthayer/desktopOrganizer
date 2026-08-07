@@ -57,19 +57,20 @@ internal sealed class FenceItemListConverter : JsonConverter<List<FenceItem>>
         JsonSerializer.Serialize(writer, value, options);
 }
 
-/// <summary>Implements IWidgetStyle (TintColor/HeaderDarkness/Opacity/FullOpacityOnHover/
-/// TintStrength/Margin, all already declared below with matching types) purely so StyleMenuRows/
-/// StyleTint's shared helpers can operate against a Fence the same way they do LayoutLauncherModel -
-/// zero effect on JSON serialization (System.Text.Json serializes FenceModel's own concrete
-/// properties regardless of what interfaces it implements) and zero behavior change for FenceForm,
-/// which still reads/writes these properties directly, not through the interface.</summary>
-public sealed class FenceModel : IWidgetStyle
+/// <summary>Inherits WidgetStyleModel (TintColor/HeaderDarkness/Opacity/FullOpacityOnHover/
+/// TintStrength/Margin/CornerRadius/TitleFontSize/TitleAlignment/HeaderBorderMode/LightBorder/
+/// HideTitle) purely so StyleMenuRows/StyleTint's shared helpers can operate against a Fence the
+/// same way they do LayoutLauncherModel/WidgetManagerModel - zero effect on JSON serialization
+/// (System.Text.Json serializes every inherited public property the same as a directly-declared
+/// one) and zero behavior change for FenceForm, which still reads/writes these properties directly,
+/// not through the interface.</summary>
+public sealed class FenceModel : WidgetStyleModel
 {
-    // Shared with FenceManager.SetTintColor's "click the same color again resets these" gesture, so
-    // the reset target and each property's own initial value can never drift apart.
-    public const int DefaultHeaderDarkness = 65;
-    public const int DefaultOpacity = 85;
-    public const int DefaultTintStrength = 55;
+    // 22 matches the fixed corner radius a fence used before Corner Radius became adjustable -
+    // every other widget on this base defaults to WidgetStyleModel's own 10 instead.
+    public FenceModel() : base(defaultCornerRadius: 22)
+    {
+    }
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "Fence";
@@ -82,67 +83,7 @@ public sealed class FenceModel : IWidgetStyle
     public List<FenceItem> Files { get; set; } = new();
     public bool Collapsed { get; set; }
     public bool HideLabels { get; set; }
-    public bool HideTitle { get; set; }
     public bool OcdFenceSizing { get; set; }
-
-    /// <summary>ARGB int (Color.ToArgb()), not System.Drawing.Color directly - Color doesn't
-    /// round-trip through System.Text.Json without a custom converter. Null means the default dark
-    /// gray theme (see FenceForm.RenderAndPresent's Tint helper).</summary>
-    public int? TintColor { get; set; }
-
-    /// <summary>True only for a color picked via the Eyedropper (see FenceForm.PickEyedropperColor) -
-    /// every other source (a preset, Custom...'s dialog, or no tint at all) leaves this false. Presets
-    /// and Custom... are still blended toward the fixed dark theme (see FenceForm.Tint) so a fully
-    /// saturated pick still reads as part of the same theme; an eyedropped color is meant to match an
-    /// exact on-screen pixel, so it applies at full strength instead - see ThemedBody/ThemedTitle.</summary>
-    public bool TintIsExact { get; set; }
-
-    /// <summary>0-100 - how much black is blended into the title bar's own base color before tinting
-    /// (see FenceForm.HeaderBaseColor/ThemedTitle), independent of TintColor's own blend amount. 65
-    /// approximates the fixed near-black title color this used to be before it became adjustable.</summary>
-    public int HeaderDarkness { get; set; } = DefaultHeaderDarkness;
-
-    /// <summary>0-100 - how translucent the whole fence renders (see FenceForm.EffectiveOpacity),
-    /// clamped to a safe minimum by FenceManager.SetOpacity so a fence can never be dragged all the
-    /// way to fully invisible/unclickable. 85 matches the fixed opacity this used to be before it
-    /// became adjustable. FenceForm.PickEyedropperColor sets this to 100 at the moment of an Eyedropper
-    /// pick so it starts pixel-exact, but it's freely adjustable from there same as any other fence.</summary>
-    public int Opacity { get; set; } = DefaultOpacity;
-
-    /// <summary>Off by default - while on, this fence renders fully opaque (see
-    /// FenceForm.TargetOpacity) whenever it's "in use": hovered, being dragged/resized, or has its
-    /// settings dropdown open, ignoring the Opacity slider until none of those apply anymore.
-    /// Independent of Opacity itself, which stays whatever it was set to and simply resumes once. The
-    /// property name still says "OnHover" from before it covered the other two cases too - the
-    /// display label ("Full Opacity When Active") reflects the current behavior instead; renaming
-    /// this would silently drop the setting for anyone who already has it saved.</summary>
-    public bool FullOpacityOnHover { get; set; }
-
-    /// <summary>0-100 - how strongly TintColor blends into the fixed dark theme for every non-exact
-    /// source (a preset or Custom...'s dialog - see FenceForm.Tint/TintAmount), independent of
-    /// TintIsExact's own full-strength Eyedropper path. 55 matches the fixed blend this used to be
-    /// before it became adjustable.</summary>
-    public int TintStrength { get; set; } = DefaultTintStrength;
-
-    /// <summary>0-100 physical pixels - how far this fence wants to sit from another fence's edge
-    /// when it snaps against one (see FenceManager.GetOtherFenceEdges), instead of landing flush.
-    /// It's this fence's own value that applies while it's the one being dragged, not the other
-    /// fence's - like a CSS margin, which is also where the name comes from. 0 (the default) means
-    /// flush edge-to-edge, the original behavior. Doesn't affect snapping to a custom snap line.</summary>
-    public int Margin { get; set; }
-
-    /// <summary>Physical pixels - how rounded this fence's own body/title corners are (see
-    /// LayeredWidgetForm.PaintChrome). 22 matches the fixed radius this used to be before it became
-    /// adjustable.</summary>
-    public int CornerRadius { get; set; } = 22;
-
-    /// <summary>Point size of the title text - 9 matches AppTheme.Font, the fixed size every fence
-    /// used before this became adjustable.</summary>
-    public int TitleFontSize { get; set; } = 9;
-
-    public TitleAlignment TitleAlignment { get; set; } = TitleAlignment.Left;
-
-    public bool HeaderBorderMode { get; set; }
 
     [JsonIgnore]
     public Rectangle Bounds

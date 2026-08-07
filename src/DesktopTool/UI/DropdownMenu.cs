@@ -304,19 +304,26 @@ internal sealed class DropdownMenu : Form
     public static Size Measure(IEnumerable<Row> rows, Font font) => LayoutRows(rows.ToList(), font).Size;
 
     /// <summary>The widest a row's own tooltip pill would render (same +16 padding UpdateTooltip
-    /// itself adds), across every row that has one - 0 if none do. Also used by
-    /// FenceForm.ShouldSettingsButtonOpenLeft, alongside Measure, so the button/menu side is decided
-    /// with the widest tooltip already accounted for before anything actually opens, rather than
-    /// discovering mid-hover that a particular tooltip needs more room than the menu alone did and
-    /// having to flip everything live at that point (which read as a jarring on-screen jump).</summary>
+    /// itself adds), across every row that has one anywhere in this row tree - recurses into
+    /// Row.Submenu, not just the top level, since BuildSettingsRows' own "Base"/"Additional" flyout
+    /// openers carry no Tooltip of their own; without recursing here, every tooltip actually living
+    /// one or more flyouts deep (Full Opacity When Active, Header Border Mode, Light Border, OCD
+    /// Fence Sizing, ...) would silently drop out of this calculation entirely. 0 if none do
+    /// anywhere. Also used by FenceForm.ShouldSettingsButtonOpenLeft, alongside Measure, so the
+    /// button/menu side is decided with the widest tooltip already accounted for before anything
+    /// actually opens, rather than discovering mid-hover (possibly after a nested flyout has already
+    /// opened on the same side as its parent) that a particular tooltip needs more room than the
+    /// menu alone did and having to flip everything live at that point (which read as a jarring
+    /// on-screen jump).</summary>
     public static int MaxTooltipWidth(IEnumerable<Row> rows, Font font)
     {
         var max = 0;
         foreach (var row in rows)
         {
-            if (row.Tooltip is not { } text)
-                continue;
-            max = Math.Max(max, TextRenderer.MeasureText(text, font).Width + 16);
+            if (row.Tooltip is { } text)
+                max = Math.Max(max, TextRenderer.MeasureText(text, font).Width + 16);
+            if (row.Submenu is { } submenu)
+                max = Math.Max(max, MaxTooltipWidth(submenu, font));
         }
         return max;
     }

@@ -778,11 +778,11 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
 
     /// <summary>Name text, plus Copy (duplicate) and Delete ("x") buttons at the row's own right edge -
     /// clicking the row body anywhere else runs that layout (see OnMouseUp/GetRowActionAt/
-    /// FireRowAction). Alternates ThemedField/ThemedFieldDark by index so rows read as banded rather
-    /// than one flat surface.</summary>
+    /// FireRowAction). Alternates ThemedListRow/ThemedListRowDark by index so rows read as banded
+    /// rather than one flat surface.</summary>
     protected override void PaintListRow(Graphics g, int index, Rectangle rowRect)
     {
-        var rowBackground = index % 2 == 0 ? ThemedField : ThemedFieldDark;
+        var rowBackground = index % 2 == 0 ? ThemedListRow : ThemedListRowDark;
         using (var rowFill = new SolidBrush(rowBackground))
             g.FillRectangle(rowFill, rowRect);
 

@@ -289,19 +289,45 @@ internal abstract class LayeredWidgetForm : Form
     /// stay readable no matter how light/bright the element's own picked color is.</summary>
     protected Color ChromeFill => StyleTint.Tint(DefaultBodyColor, CurrentTint, StyleTint.SafeChromeBlend);
 
-    /// <summary>A widget's own secondary panels (a list's alternating row background - see Layout
-    /// Launcher's PaintListRow - or anything else that wants visible separation from the plain body
-    /// fill) alternate between this and ThemedFieldDark. Tinted at the same fixed SafeChromeBlend as
-    /// ChromeFill rather than the user's adjustable Tint Strength, so the two stay visibly distinct
-    /// from each other and from the body even under an Eyedropper-exact pick. Lightened off
-    /// DefaultBodyColor itself (see StyleTint.LightenTowardWhite), not a fixed AppTheme gray, so it's
-    /// guaranteed lighter than whatever this widget's own body color actually is rather than just
-    /// happening to be lighter than one particular default. Expected to be reused by any future list/
-    /// secondary-panel content on any LayeredWidgetForm, not just this one list.</summary>
+    /// <summary>This base's own chrome fills - the Settings/ChromeButton/ContentButton backgrounds
+    /// (see PaintSettingsButton/PaintExtraButtons/PaintContentButtons). Tinted at the same fixed
+    /// SafeChromeBlend as ChromeFill rather than the user's adjustable Tint Strength, for the same
+    /// "stay readable no matter how light/bright the pick is" reason ChromeFill's own doc comment
+    /// gives - a button's fixed WhiteSmoke label needs to stay legible regardless of tint. Lightened
+    /// off DefaultBodyColor itself (see StyleTint.LightenTowardWhite), not a fixed AppTheme gray, so
+    /// it's guaranteed lighter than whatever this widget's own body color actually is rather than
+    /// just happening to be lighter than one particular default. NOT used for list row banding - see
+    /// ThemedListRow for that, which deliberately does track Tint Strength instead.</summary>
     protected Color ThemedField => StyleTint.Tint(StyleTint.LightenTowardWhite(DefaultBodyColor, 0.15), CurrentTint, StyleTint.SafeChromeBlend);
 
     /// <summary>The darker half of the ThemedField pair - see its own doc comment.</summary>
     protected Color ThemedFieldDark => StyleTint.Tint(AppTheme.FieldDark, CurrentTint, StyleTint.SafeChromeBlend);
+
+    /// <summary>A list's own alternating row background (Layout Launcher's/Widget Manager's own
+    /// PaintListRow) - alternates between this and ThemedListRowDark. Unlike ThemedField (this
+    /// base's own button fills, which stay pinned to a fixed SafeChromeBlend so a button's fixed
+    /// label text never goes unreadable), a list's own rows are part of the widget's main content,
+    /// not auxiliary chrome - previously reused ThemedField for this too, but that meant Tint
+    /// Strength visibly changing the body/header fill while the row banding sitting right next to it
+    /// never moved read as broken rather than intentional. Tracks TintAmount the same way ThemedBody
+    /// does, including the same TintIsExact dilute-from-exact reversal for an Eyedropper pick (see
+    /// ThemedBody's own doc comment for why that reversal exists). Lightened off DefaultBodyColor
+    /// itself, same reasoning as ThemedField.</summary>
+    protected Color ThemedListRow
+    {
+        get
+        {
+            var lightened = StyleTint.LightenTowardWhite(DefaultBodyColor, 0.15);
+            return Style.TintIsExact && CurrentTint is { } exact
+                ? StyleTint.DilutedExact(exact, lightened, TintAmount)
+                : StyleTint.Tint(lightened, CurrentTint, TintAmount);
+        }
+    }
+
+    /// <summary>The darker half of the ThemedListRow pair - see its own doc comment.</summary>
+    protected Color ThemedListRowDark => Style.TintIsExact && CurrentTint is { } exactDark
+        ? StyleTint.DilutedExact(exactDark, AppTheme.FieldDark, TintAmount)
+        : StyleTint.Tint(AppTheme.FieldDark, CurrentTint, TintAmount);
 
     private Color HeaderBaseColor => StyleTint.DarkenTowardBlack(DefaultBodyColor, Style.HeaderDarkness / 100.0);
 
@@ -368,6 +394,7 @@ internal abstract class LayeredWidgetForm : Form
     protected const int CmdColorCustom = -4;
     protected const int CmdColorEyedrop = -5;
     protected const int CmdToggleHeaderBorderMode = -6;
+    protected const int CmdToggleLightBorder = -7;
     // Reserves -1000..-901 (100 ids) for the color-preset grid.
     protected const int CmdColorPresetBase = -1000;
 
@@ -379,14 +406,6 @@ internal abstract class LayeredWidgetForm : Form
     // abstract method of its own anymore, the same reason Title's own setter used to be the only
     // exception - now it's the pattern.
     protected abstract void PersistStyle();
-
-    // Reset targets for a non-exact color pick (see ApplyTintPick) - inherent to what "pick a plain
-    // color" means for any IWidgetStyle-driven widget, not a Fence-specific default, so this lives
-    // here rather than being read off the model (which can't expose them without static abstract
-    // members - a bigger interface change than three fixed numbers used only by this one reset).
-    protected const int DefaultHeaderDarkness = 65;
-    protected const int DefaultOpacity = 85;
-    protected const int DefaultTintStrength = 55;
 
     /// <summary>Applies a Settings-dropdown color pick - Default/preset/Custom... (exact: false) blend
     /// toward the plain theme and reset HeaderDarkness/Opacity/TintStrength back to their defaults
@@ -405,9 +424,9 @@ internal abstract class LayeredWidgetForm : Form
         }
         else
         {
-            Style.HeaderDarkness = DefaultHeaderDarkness;
-            Style.Opacity = DefaultOpacity;
-            Style.TintStrength = DefaultTintStrength;
+            Style.HeaderDarkness = WidgetStyleModel.DefaultHeaderDarkness;
+            Style.Opacity = WidgetStyleModel.DefaultOpacity;
+            Style.TintStrength = WidgetStyleModel.DefaultTintStrength;
         }
         PersistStyle();
         RenderOpacity.SnapToTarget();
@@ -425,11 +444,11 @@ internal abstract class LayeredWidgetForm : Form
     /// these additional rows didn't add).</summary>
     protected virtual IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => null;
 
-    /// <summary>Font Size (a stepper, same interface as Margin/Corner Radius) and Align (Left/Center/
-    /// Right, see DropdownMenu.Row.IsAlignmentPicker) - both affect the title text specifically (see
-    /// TitleFont/PaintChrome's title draw), nested in their own "Header" flyout at the top of "Base"
-    /// rather than inline, so they read as a distinct group from the fill/tint-driven rows below
-    /// them.</summary>
+    /// <summary>Font Size (a stepper, same interface as Margin/Corner Radius), Align (Left/Center/
+    /// Right, see DropdownMenu.Row.IsAlignmentPicker), and Light Border - all affect the title row
+    /// specifically (see TitleFont/PaintChrome's title draw and its own header-outline stroke),
+    /// nested in their own "Header" flyout at the top of "Base" rather than inline, so they read as
+    /// a distinct group from the fill/tint-driven rows below them.</summary>
     private List<DropdownMenu.Row> BuildHeaderSettingsRows() => new()
     {
         new(0, "Font Size", IsHeader: true),
@@ -455,6 +474,16 @@ internal abstract class LayeredWidgetForm : Form
                 PersistStyle();
                 RenderAndPresent();
             }),
+        new(0, string.Empty, IsSeparator: true),
+        // Independent of Header Border Mode (see CmdToggleHeaderBorderMode's own handling) - turning
+        // Header Border Mode on ticks this OFF, since Header Border Mode already borders the title
+        // row its own way, but it stays a genuinely separate flag the user can tick back on
+        // afterward without touching Header Border Mode itself. Outlines just the title row (see
+        // PaintChrome's own header-border stroke) in the plain ThemedBorder color, unlike Header
+        // Border Mode's own themed border, which covers the rest of the widget instead.
+        new(CmdToggleLightBorder, "Light Border", HasCheckbox: true,
+            IsChecked: () => Style.LightBorder,
+            Tooltip: "Border the title row on its own, in the plain default color, independent of Header Border Mode"),
     };
 
     /// <summary>Floor for Opacity (see StyleMenuRows.Build's own slider, which otherwise allows the
@@ -566,6 +595,17 @@ internal abstract class LayeredWidgetForm : Form
                 break;
             case CmdToggleHeaderBorderMode:
                 Style.HeaderBorderMode = !Style.HeaderBorderMode;
+                // Turning Header Border Mode on ticks Light Border OFF - Header Border Mode already
+                // borders the title row its own way, so the two would otherwise double up - see
+                // CmdToggleLightBorder's own doc comment on BuildHeaderSettingsRows for why this is
+                // one-directional (turning Header Border Mode back off doesn't force it back on).
+                if (Style.HeaderBorderMode)
+                    Style.LightBorder = false;
+                PersistStyle();
+                RenderAndPresent();
+                break;
+            case CmdToggleLightBorder:
+                Style.LightBorder = !Style.LightBorder;
                 PersistStyle();
                 RenderAndPresent();
                 break;
@@ -617,6 +657,19 @@ internal abstract class LayeredWidgetForm : Form
             // within the body itself, which needs no such margin on any edge.
             borderPen.Alignment = PenAlignment.Inset;
             g.DrawPath(borderPen, body);
+        }
+
+        // Light Border - see IWidgetStyle.LightBorder's own doc comment - a separate stroke around
+        // just the title row, independent of the outer body border above (Header Border Mode
+        // included): drawn in ThemedBorder rather than ThemedTitle, since a ThemedTitle stroke would
+        // blend invisibly into the title band's own ThemedTitle fill sitting right underneath it.
+        // Always drawn when on, regardless of ShowsButtons - unlike the outer border, this isn't
+        // trying to double as an "engaged" indicator, just a persistent on/off accent.
+        if (TitleVisible && Style.LightBorder)
+        {
+            using var titleBorderPen = new Pen(ThemedBorder, 1f) { LineJoin = LineJoin.Round, Alignment = PenAlignment.Inset };
+            using var titleBorderPath = RoundedRectPath.Top(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleRowHeight)), cornerRadius);
+            g.DrawPath(titleBorderPen, titleBorderPath);
         }
 
         if (TitleVisible && !IsRenaming)
@@ -684,17 +737,26 @@ internal abstract class LayeredWidgetForm : Form
 
     /// <summary>Header Border Mode's own outline (see IWidgetStyle.HeaderBorderMode) - a no-op unless
     /// it's on, shared by Settings/ChromeButton/ContentButton/PaintList so every element borders
-    /// itself in ThemedTitle the same way, and draws NO border at all otherwise (not a fixed default
-    /// color swapped for a themed one - these elements are borderless by default, full stop, same as
-    /// Settings/ChromeButton/ContentButton already are). Protected so a subclass's own hand-drawn
-    /// buttons that aren't ChromeButtons (a Fence's own New/Delete squares - see
-    /// AdditionalFullOpacityRegions' own doc comment on why those stay separate) can opt into the
-    /// exact same all-or-nothing behavior instead of always drawing some border.</summary>
+    /// itself the same way, and draws NO border at all otherwise (not a fixed default color swapped
+    /// for a themed one - these elements are borderless by default, full stop, same as Settings/
+    /// ChromeButton/ContentButton already are). Protected so a subclass's own hand-drawn buttons that
+    /// aren't ChromeButtons (a Fence's own New/Delete squares - see AdditionalFullOpacityRegions' own
+    /// doc comment on why those stay separate) can opt into the exact same all-or-nothing behavior
+    /// instead of always drawing some border.
+    ///
+    /// Same ShowsButtons-wins-over-HeaderBorderMode color choice as PaintChrome's own outer body
+    /// border - Settings/ChromeButton/ContentButton are only ever painted while ShowsButtons is true
+    /// in the first place (see PaintChrome's own `if (ShowsButtons)` guard), which is also exactly
+    /// when the outer body border switches to ThemedActiveBorder - without matching that here too,
+    /// these elements' own ThemedTitle outline and the body's own ThemedActiveBorder outline would
+    /// visibly disagree on color the whole time either one is even visible to compare against the
+    /// other (i.e. always, in practice, since a button only shows up alongside an active-colored
+    /// body edge).</summary>
     protected void PaintHeaderBorderModeOutline(Graphics g, GraphicsPath path)
     {
         if (!Style.HeaderBorderMode)
             return;
-        using var borderPen = new Pen(ThemedTitle, 1f);
+        using var borderPen = new Pen(ShowsButtons ? ThemedActiveBorder : ThemedTitle, 1f);
         g.DrawPath(borderPen, path);
     }
 
@@ -1070,6 +1132,12 @@ internal abstract class LayeredWidgetForm : Form
         var hasScrollbar = maxScroll > 0;
         var rowWidth = hasScrollbar ? area.Width - (Scrollbar.Width + Scrollbar.Margin * 2) : area.Width;
 
+        // Same ShowsButtons-wins color choice as PaintHeaderBorderModeOutline/PaintChrome's own
+        // outer body border - see PaintHeaderBorderModeOutline's own doc comment for why - shared by
+        // the list's own outer border and the divider lines between its rows below, so all three
+        // always agree.
+        var borderColor = ShowsButtons ? ThemedActiveBorder : ThemedTitle;
+
         var previousClip = g.Clip;
         g.SetClip(ToWindow(area));
         for (var i = 0; i < ListRowCount; i++)
@@ -1078,13 +1146,28 @@ internal abstract class LayeredWidgetForm : Form
             if (rowTop + ListRowHeight <= area.Top || rowTop >= area.Bottom)
                 continue;
             PaintListRow(g, i, ToWindow(new Rectangle(area.Left, rowTop, rowWidth, ListRowHeight)));
+
+            // Header Border Mode's own row divider - a line under every row except the last (whose
+            // own bottom edge already coincides with the list's own outer border, drawn below) - the
+            // same "tie every element together" idea Header Border Mode already applies to buttons
+            // and the list's own outer border, just carried one level deeper into the rows
+            // themselves. 2.5f, not the list border's own 1f - a standalone DrawLine at 1f reads
+            // visibly fainter than the same-width DrawRectangle below once it's sitting on top of a
+            // row's own fill instead of the sharper contrast at the list's outer edge, even though
+            // both are nominally the same thickness.
+            if (Style.HeaderBorderMode && i < ListRowCount - 1)
+            {
+                var dividerY = rowTop + ListRowHeight;
+                using var dividerPen = new Pen(borderColor, 2.5f);
+                g.DrawLine(dividerPen, ToWindow(new Point(area.Left, dividerY)), ToWindow(new Point(area.Left + rowWidth, dividerY)));
+            }
         }
         g.Clip = previousClip;
         previousClip.Dispose();
 
         if (Style.HeaderBorderMode)
         {
-            using var borderPen = new Pen(ThemedTitle, 1f);
+            using var borderPen = new Pen(borderColor, 1f);
             g.DrawRectangle(borderPen, ToWindow(area));
         }
 

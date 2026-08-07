@@ -11,6 +11,12 @@ public sealed class SnapLineSettings
     /// get default Top/Bottom/Left/Right lines automatically, without ever re-adding them once the
     /// user has deleted some or all of them for a monitor that's already been seeded once.</summary>
     public HashSet<string> SeededMonitors { get; set; } = new();
+
+    /// <summary>Off drops every custom snap line (seeded defaults included - they're plain entries
+    /// in Lines, not distinguished from a user-drawn one) from drag candidates app-wide, while
+    /// fence-to-fence edge snapping keeps working untouched - see SnapLineManager.Enabled/SetEnabled.
+    /// Editing lines via Manage Snap Lines... still works regardless of this.</summary>
+    public bool Enabled { get; set; } = true;
 }
 
 public sealed class SnapLineStore

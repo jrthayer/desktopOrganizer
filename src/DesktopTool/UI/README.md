@@ -60,15 +60,22 @@ what a few theme colors are, what rows its own settings dropdown adds):
 
 ## Style contract
 
-[`IWidgetStyle`](IWidgetStyle.cs) is the six-ish-property data contract (`TintColor`,
-`HeaderDarkness`, `Opacity`, `FullOpacityOnHover`, `TintStrength`, `Margin`, `CornerRadius`,
-`TitleFontSize`, `TitleAlignment`, `HeaderBorderMode`) that `FenceModel` and `LayoutLauncherModel`
-both implement — anything implementing it gets `LayeredWidgetForm`'s shared theme derivation and
-settings-dropdown rows without re-declaring them. [`StyleMenuRows`](StyleMenuRows.cs) builds the
-actual dropdown rows (the color grid plus the Header Darkness/Opacity/Tint Strength sliders and
-Corner Radius/Margin steppers) against that contract, and [`StyleTint`](StyleTint.cs) supplies the
-underlying blend math (the eight preset colors, tinting a base color toward a pick, darkening toward
-black for a header band, lightening toward white for a raised panel).
+[`IWidgetStyle`](IWidgetStyle.cs) is the data contract (`TintColor`, `HeaderDarkness`, `Opacity`,
+`FullOpacityOnHover`, `TintStrength`, `Margin`, `CornerRadius`, `TitleFontSize`, `TitleAlignment`,
+`HeaderBorderMode`, `LightBorder`) that anything implementing it gets `LayeredWidgetForm`'s shared
+theme derivation and settings-dropdown rows from, without re-declaring them. Every current widget
+model (`FenceModel`, `LayoutLauncherModel`, `WidgetManagerModel`) implements it the same way — by
+inheriting [`WidgetStyleModel`](WidgetStyleModel.cs), a plain abstract base that holds every one of
+those properties (plus `HideTitle`, which isn't technically part of `IWidgetStyle` but was still
+identical across all three) so a fourth widget wanting the same styling only has to inherit it
+instead of retyping a dozen properties again. Position/size/title/visibility stay out of that base
+on purpose — see its own class comment for why `FenceModel`'s shape there genuinely differs from the
+other two rather than just happening to be a different copy of the same thing.
+[`StyleMenuRows`](StyleMenuRows.cs) builds the actual dropdown rows (the color grid plus the Header
+Darkness/Opacity/Tint Strength sliders and Corner Radius/Margin steppers) against the `IWidgetStyle`
+contract, and [`StyleTint`](StyleTint.cs) supplies the underlying blend math (the eight preset
+colors, tinting a base color toward a pick, darkening toward black for a header band, lightening
+toward white for a raised panel).
 
 ## DropdownMenu
 

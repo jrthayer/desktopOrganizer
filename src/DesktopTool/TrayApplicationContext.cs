@@ -1,6 +1,8 @@
 using DesktopTool.Features.Fences;
 using DesktopTool.Features.Layouts;
 using DesktopTool.Features.Layouts.UI;
+using DesktopTool.Features.WidgetManager;
+using DesktopTool.Features.WidgetManager.UI;
 using DesktopTool.UI;
 
 namespace DesktopTool;
@@ -11,7 +13,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly FenceManager _fenceManager = new();
     private readonly LayoutManager _layoutManager = new();
     private readonly LayoutLauncherStore _layoutLauncherStore = new();
-    private bool _allVisible = true;
+    private readonly WidgetManagerStore _widgetManagerStore = new();
 
     // At most one editor open at a time - OnManageLayouts activates this instead of opening a
     // second copy, the same "don't duplicate, just surface the existing one" idea FenceManager's
@@ -24,6 +26,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // Visible state (LayoutLauncherWidget.ToggleVisible) rather than creating/disposing it.
     private readonly LayoutLauncherWidget _layoutLauncher;
 
+    // Same "created once up front, never recreated" reasoning as _layoutLauncher above - toggled via
+    // the Widgets menu's own "Widget Manager" item rather than opened fresh each time.
+    private readonly WidgetManagerWidget _widgetManager;
+
     public TrayApplicationContext()
     {
         _layoutManager.Load();
@@ -32,6 +38,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var layoutLauncherModel = _layoutLauncherStore.Load();
         _layoutLauncher = new LayoutLauncherWidget(_layoutManager, _fenceManager, layoutLauncherModel, _layoutLauncherStore);
         _layoutLauncher.ManageLayoutsRequested += (_, profileId) => OpenLayoutEditor(profileId);
+
+        // Needs _layoutLauncher to already exist - its own Fences row reads/toggles that widget's
+        // Visible directly rather than through a separate manager class.
+        var widgetManagerModel = _widgetManagerStore.Load();
+        _widgetManager = new WidgetManagerWidget(_fenceManager, _layoutLauncher, widgetManagerModel, _widgetManagerStore);
+        _widgetManager.EditLayoutsRequested += (_, _) => OpenLayoutEditor(null);
 
         var menu = new ContextMenuStrip
         {
@@ -87,6 +99,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         layoutLauncherItem.Click += (_, _) => _layoutLauncher.ToggleVisible();
         menu.Opening += (_, _) => layoutLauncherItem.Checked = _layoutLauncher.Visible;
         widgetsItem.DropDownItems.Add(layoutLauncherItem);
+        var widgetManagerItem = new ToolStripMenuItem("Widget Manager");
+        widgetManagerItem.Click += (_, _) => _widgetManager.ToggleVisible();
+        menu.Opening += (_, _) => widgetManagerItem.Checked = _widgetManager.Visible;
+        widgetsItem.DropDownItems.Add(widgetManagerItem);
         menu.Items.Add(widgetsItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
@@ -107,6 +123,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         // already exactly what was just loaded.
         if (layoutLauncherModel.Visible)
             _layoutLauncher.Show();
+        if (widgetManagerModel.Visible)
+            _widgetManager.Show();
     }
 
     private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
@@ -153,11 +171,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _layoutEditor.Show();
     }
 
-    private void OnShowHideAll(object? sender, EventArgs e)
-    {
-        _allVisible = !_allVisible;
-        _fenceManager.SetAllVisible(_allVisible);
-    }
+    private void OnShowHideAll(object? sender, EventArgs e) =>
+        _fenceManager.SetAllVisible(!_fenceManager.AnyVisible);
 
     private void OnExit(object? sender, EventArgs e)
     {
@@ -165,6 +180,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _trayIcon.Dispose();
         _layoutEditor?.Dispose();
         _layoutLauncher.Shutdown();
+        _widgetManager.Shutdown();
         _fenceManager.Dispose();
         ExitThread();
     }

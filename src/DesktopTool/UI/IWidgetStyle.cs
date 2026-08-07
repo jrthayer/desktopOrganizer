@@ -67,6 +67,16 @@ internal interface IWidgetStyle
     /// LayeredWidgetForm.PaintSettingsButton/PaintExtraButtons/PaintContentButtons), and its list
     /// container (see PaintList) - is bordered in the header/title band's own color (ThemedTitle)
     /// instead of each one's usual border color, tying the whole widget together as one visibly
-    /// matched set.</summary>
+    /// matched set. Does NOT itself cover the title row's own border - see LightBorder below for
+    /// that.</summary>
     bool HeaderBorderMode { get; set; }
+
+    /// <summary>While on, the title row gets its own border outline in the plain default
+    /// ThemedBorder color rather than HeaderBorderMode's own themed one (see LayeredWidgetForm.
+    /// PaintChrome's header-border stroke). Independent of HeaderBorderMode above - turning
+    /// HeaderBorderMode on ticks this OFF, since HeaderBorderMode already borders the title row its
+    /// own way (see LayeredWidgetForm.HandleSettingsCommand's own CmdToggleHeaderBorderMode case) -
+    /// but it's a genuinely separate flag the user can still tick back on afterward without touching
+    /// HeaderBorderMode itself.</summary>
+    bool LightBorder { get; set; }
 }
