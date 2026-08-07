@@ -340,18 +340,48 @@ internal abstract class LayeredWidgetForm : Form
     // Reserves -1000..-901 (100 ids) for the color-preset grid.
     protected const int CmdColorPresetBase = -1000;
 
-    // Mutation hooks, not plain Style property setters - persistence (and, for a Fence, notifying
-    // FenceManager so it can broadcast/save across the whole collection) differs by subclass, the
-    // same reason Title's own setter is abstract rather than a plain auto-property.
-    protected abstract void SetHeaderDarkness(int darkness);
-    protected abstract void SetOpacity(int opacity);
-    protected abstract void SetTintStrength(int strength);
-    protected abstract void SetMargin(int margin);
-    protected abstract void SetCornerRadius(int radius);
-    protected abstract void SetTitleFontSize(int size);
-    protected abstract void SetTitleAlignment(TitleAlignment alignment);
-    protected abstract void SetTintColor(Color? color, bool exact);
-    protected abstract void SetFullOpacityOnHover(bool enabled);
+    // Every IWidgetStyle property is mutated directly against Style (it IS the subclass's own model -
+    // a Fence's FenceModel sits in FenceManager's own _models list by reference, so writing through
+    // Style already reaches it) - the only thing that differs by subclass is how the change actually
+    // reaches disk, which is exactly what this one hook is for. A Fence's own PersistStyle is a
+    // one-liner (_manager.Save()); nothing here needs a dedicated SetHeaderDarkness/SetOpacity/etc.
+    // abstract method of its own anymore, the same reason Title's own setter used to be the only
+    // exception - now it's the pattern.
+    protected abstract void PersistStyle();
+
+    // Reset targets for a non-exact color pick (see ApplyTintPick) - inherent to what "pick a plain
+    // color" means for any IWidgetStyle-driven widget, not a Fence-specific default, so this lives
+    // here rather than being read off the model (which can't expose them without static abstract
+    // members - a bigger interface change than three fixed numbers used only by this one reset).
+    protected const int DefaultHeaderDarkness = 65;
+    protected const int DefaultOpacity = 85;
+    protected const int DefaultTintStrength = 55;
+
+    /// <summary>Applies a Settings-dropdown color pick - Default/preset/Custom... (exact: false) blend
+    /// toward the plain theme and reset HeaderDarkness/Opacity/TintStrength back to their defaults
+    /// (the sliders are a per-pick tweak, not a setting that carries over once you've moved to a
+    /// different pick); an Eyedropper pick (exact: true) applies at full strength and instead resets
+    /// Opacity to 100/TintStrength to 0, so it starts out pixel-exact - see ThemedBody/ThemedTitle's
+    /// own TintIsExact branch for what "applies at full strength" actually means to render.</summary>
+    private void ApplyTintPick(Color? color, bool exact)
+    {
+        Style.TintColor = color?.ToArgb();
+        Style.TintIsExact = exact;
+        if (exact)
+        {
+            Style.Opacity = 100;
+            Style.TintStrength = 0;
+        }
+        else
+        {
+            Style.HeaderDarkness = DefaultHeaderDarkness;
+            Style.Opacity = DefaultOpacity;
+            Style.TintStrength = DefaultTintStrength;
+        }
+        PersistStyle();
+        RenderOpacity.SnapToTarget();
+        RenderAndPresent();
+    }
 
     /// <summary>Rows specific to a subclass's own feature - shown in a flyout labeled "Additional"
     /// below "Base" (see BuildSettingsRows). Kept separate from the shared rows in BuildBaseSettingsRows
@@ -373,7 +403,13 @@ internal abstract class LayeredWidgetForm : Form
     {
         new(0, "Font Size", IsHeader: true),
         new(0, string.Empty, IsStepper: true,
-            StepperValue: () => Style.TitleFontSize, OnStepperChange: SetTitleFontSize,
+            StepperValue: () => Style.TitleFontSize,
+            OnStepperChange: size =>
+            {
+                Style.TitleFontSize = Math.Clamp(size, 7, 14);
+                PersistStyle();
+                RenderAndPresent();
+            },
             // Max of 14, not some rounder-looking number like 20 - TitleRowHeight is a fixed
             // ~26-28px, and a much larger point size than this renders taller than that (vertically
             // clipped by the row itself) rather than actually fitting.
@@ -381,15 +417,36 @@ internal abstract class LayeredWidgetForm : Form
         new(0, string.Empty, IsSeparator: true),
         new(0, "Align", IsHeader: true),
         new(0, string.Empty, IsAlignmentPicker: true,
-            AlignmentValue: () => Style.TitleAlignment, OnAlignmentChange: SetTitleAlignment),
+            AlignmentValue: () => Style.TitleAlignment,
+            OnAlignmentChange: alignment =>
+            {
+                Style.TitleAlignment = alignment;
+                PersistStyle();
+                RenderAndPresent();
+            }),
     };
+
+    /// <summary>Floor for Opacity (see StyleMenuRows.Build's own slider, which otherwise allows the
+    /// full 0-100%) - 0% would be both fully invisible and (per LayeredWindowPresenter's own doc
+    /// comment) click-through, with no way to get it back short of editing the persisted JSON by
+    /// hand. Inherent to any WS_EX_LAYERED window driven by RenderOpacity, not a Fence-specific safety
+    /// margin, so it's enforced once here rather than separately by each subclass's own SetOpacity
+    /// (or, worse, by whatever persists it - see FenceManager/LayoutLauncherWidget's own now-removed
+    /// copies of this exact clamp, which had drifted to two different floors, 15 and 5).</summary>
+    protected const int MinOpacity = 15;
 
     /// <summary>The "Header" flyout (see BuildHeaderSettingsRows), then Hide Title, Full Opacity When
     /// Active, and the shared color grid/Header Darkness/Opacity/Tint Strength sliders/Corner Radius/
     /// Margin steppers (StyleMenuRows.Build) - every setting LayeredWidgetForm itself owns, regardless
     /// of subclass. Shown in its own "Base" flyout (see BuildSettingsRows) rather than inline, so it
     /// reads as a distinct group from whatever a subclass's own BuildAdditionalSettingsRows
-    /// contributes below it.</summary>
+    /// contributes below it.
+    ///
+    /// Each row mutates Style directly and clamps right here (DropdownMenu's own stepper/slider
+    /// mechanics already guarantee an in-range value for every row here except Opacity, whose slider
+    /// allows the full 0-100% with no built-in floor of its own - clamping the rest too is just
+    /// documentation at this point, not load-bearing) - a subclass's own PersistStyle never has to
+    /// know or re-validate which property changed.</summary>
     private List<DropdownMenu.Row> BuildBaseSettingsRows()
     {
         var rows = new List<DropdownMenu.Row>
@@ -403,7 +460,40 @@ internal abstract class LayeredWidgetForm : Form
             new(0, string.Empty, IsSeparator: true),
         };
         rows.AddRange(StyleMenuRows.Build(Style, DefaultBodyColor, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
-            SetHeaderDarkness, SetOpacity, SetTintStrength, SetCornerRadius, SetMargin));
+            darkness =>
+            {
+                Style.HeaderDarkness = Math.Clamp(darkness, 0, 100);
+                PersistStyle();
+                RenderAndPresent();
+            },
+            opacity =>
+            {
+                // Snaps RenderOpacity straight to the new TargetOpacity instead of easing - a slider
+                // drag needs to track the cursor immediately, an animated lag here would feel
+                // unresponsive.
+                Style.Opacity = Math.Clamp(opacity, MinOpacity, 100);
+                PersistStyle();
+                RenderOpacity.SnapToTarget();
+                RenderAndPresent();
+            },
+            strength =>
+            {
+                Style.TintStrength = Math.Clamp(strength, 0, 100);
+                PersistStyle();
+                RenderAndPresent();
+            },
+            radius =>
+            {
+                Style.CornerRadius = Math.Clamp(radius, 0, 50);
+                PersistStyle();
+                RenderAndPresent();
+            },
+            margin =>
+            {
+                Style.Margin = Math.Clamp(margin, 0, 100);
+                PersistStyle();
+                RenderAndPresent();
+            }));
         return rows;
     }
 
@@ -435,7 +525,8 @@ internal abstract class LayeredWidgetForm : Form
                 RenderAndPresent();
                 break;
             case CmdToggleFullOpacityOnHover:
-                SetFullOpacityOnHover(!Style.FullOpacityOnHover);
+                Style.FullOpacityOnHover = !Style.FullOpacityOnHover;
+                PersistStyle();
                 RenderOpacity.SnapToTarget();
                 RenderAndPresent();
                 break;
@@ -445,15 +536,8 @@ internal abstract class LayeredWidgetForm : Form
             case >= CmdColorPresetBase and < CmdColorPresetBase + 100:
                 StyleMenuRows.TryHandleColorCommand(id, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
                     DefaultBodyColor, this, CurrentTint,
-                    color => { SetTintColor(color, false); RenderOpacity.SnapToTarget(); RenderAndPresent(); },
-                    color =>
-                    {
-                        SetTintColor(color, true);
-                        SetOpacity(100);
-                        SetTintStrength(0);
-                        RenderOpacity.SnapToTarget();
-                        RenderAndPresent();
-                    });
+                    color => ApplyTintPick(color, exact: false),
+                    color => ApplyTintPick(color, exact: true));
                 break;
         }
     }

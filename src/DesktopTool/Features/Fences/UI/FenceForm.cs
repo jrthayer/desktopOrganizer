@@ -186,7 +186,8 @@ internal sealed class FenceForm : LayeredWidgetForm
         get => _model.HideTitle;
         set
         {
-            _manager.SetHideTitle(FenceId, value);
+            _model.HideTitle = value;
+            _manager.Save();
             // Changes GridTop (see its own comment), which OCD Fence Sizing's fit is based on - only
             // height can possibly need to change here, never the columns/width.
             if (_model.OcdFenceSizing)
@@ -780,8 +781,11 @@ internal sealed class FenceForm : LayeredWidgetForm
     protected override void OnDragEnd()
     {
         if (NativeMethods.GetWindowRect(Handle, out var rect))
-            _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
-                rect.Left + OuterMargin, rect.Top + TopBand, rect.Right - OuterMargin, rect.Bottom - BottomBand));
+        {
+            _model.Bounds = Rectangle.FromLTRB(
+                rect.Left + OuterMargin, rect.Top + TopBand, rect.Right - OuterMargin, rect.Bottom - BottomBand);
+            _manager.Save();
+        }
 
         // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
         // whatever size was just dragged to - not after a move, see IsResizing. Done before the
@@ -1194,7 +1198,11 @@ internal sealed class FenceForm : LayeredWidgetForm
     protected override string Title
     {
         get => _model.Name;
-        set => _manager.NotifyRenamed(FenceId, value);
+        set
+        {
+            _model.Name = value;
+            _manager.Save();
+        }
     }
 
     protected override int TitleRowHeight => TitleBarHeight;
@@ -1260,90 +1268,13 @@ internal sealed class FenceForm : LayeredWidgetForm
         }
     }
 
-    /// <summary>exact is only ever true from PickEyedropperColor - see FenceModel.TintIsExact. A
-    /// non-exact pick also resets Opacity back to its default as a side effect (see
-    /// FenceManager.SetTintColor) - RenderOpacity needs to snap to match immediately, the same
-    /// reasoning as SetOpacity's own snap, or the fence would keep rendering at whatever opacity it
-    /// was at right before this pick until something else (hover, the dropdown closing) happened to
-    /// notice the mismatch.</summary>
-    protected override void SetTintColor(Color? color, bool exact)
-    {
-        _manager.SetTintColor(FenceId, color, exact);
-        RenderOpacity.SnapToTarget();
-        RenderAndPresent();
-    }
-
-    /// <summary>"Header Darkness" slider - called directly from DropdownMenu.Row.OnSliderChange
-    /// (not routed through HandleSettingsCommand/ItemClicked the way every other row is, since a
-    /// slider needs a live value rather than a single command id) on mouse-down and on every
-    /// subsequent mouse-move while dragging, so the header repaints continuously as it's dragged
-    /// rather than only once on release.</summary>
-    protected override void SetHeaderDarkness(int darkness)
-    {
-        _manager.SetHeaderDarkness(FenceId, darkness);
-        RenderAndPresent();
-    }
-
-    /// <summary>"Fence Opacity" slider - same live-drag pattern as SetHeaderDarkness above.
-    /// FenceManager.SetOpacity enforces a safe minimum, so a value dragged below it snaps back on the
-    /// next repaint rather than the fence actually going invisible. Snaps RenderOpacity straight to
-    /// the new TargetOpacity instead of animating - a slider drag needs to track the cursor
-    /// immediately, an animated lag here would feel unresponsive.</summary>
-    protected override void SetOpacity(int opacity)
-    {
-        _manager.SetOpacity(FenceId, opacity);
-        RenderOpacity.SnapToTarget();
-        RenderAndPresent();
-    }
-
-    /// <summary>"Tint Strength" slider - same live-drag pattern as SetHeaderDarkness/SetOpacity above.
-    /// Affects both a preset/Custom... pick (TintAmount) and an Eyedropper's exact pick
-    /// (DilutedExactTint), just in opposite directions - see either one's own doc comment.</summary>
-    protected override void SetTintStrength(int strength)
-    {
-        _manager.SetTintStrength(FenceId, strength);
-        RenderAndPresent();
-    }
-
-    /// <summary>"Fence Margin" numeric input. Doesn't need a repaint of its own (unlike the sliders
-    /// above, nothing this fence draws depends on its own Margin value - it only affects candidates
-    /// offered to OTHER fences' drags via FenceManager.GetOtherFenceEdges) but RenderAndPresent
-    /// stays for consistency and to keep anything else the dropdown reflects in sync.</summary>
-    protected override void SetMargin(int margin)
-    {
-        _manager.SetMargin(FenceId, margin);
-        RenderAndPresent();
-    }
-
-    /// <summary>"Fence Corner Radius" stepper - same live-drag pattern as SetMargin above.
-    /// PaintChrome (LayeredWidgetForm's own) reads Style.CornerRadius directly, so a repaint is all
-    /// that's needed here for the new value to actually show.</summary>
-    protected override void SetCornerRadius(int radius)
-    {
-        _manager.SetCornerRadius(FenceId, radius);
-        RenderAndPresent();
-    }
-
-    /// <summary>"Font Size" stepper (inside the "Header" flyout) - same live-drag pattern as
-    /// SetMargin/SetCornerRadius above.</summary>
-    protected override void SetTitleFontSize(int size)
-    {
-        _manager.SetTitleFontSize(FenceId, size);
-        RenderAndPresent();
-    }
-
-    /// <summary>"Align" Left/Center/Right picker (inside the "Header" flyout).</summary>
-    protected override void SetTitleAlignment(TitleAlignment alignment)
-    {
-        _manager.SetTitleAlignment(FenceId, alignment);
-        RenderAndPresent();
-    }
-
-    /// <summary>LayeredWidgetForm's own required mutator hook - plumbed straight through to
-    /// FenceManager, same as the sliders above; the Render/opacity side effects live at each call
-    /// site instead (see HandleSettingsCommand's own CmdToggleFullOpacityOnHover case) since this is
-    /// also reused, unmodified, by nothing else.</summary>
-    protected override void SetFullOpacityOnHover(bool enabled) => _manager.SetFullOpacityOnHover(FenceId, enabled);
+    /// <summary>LayeredWidgetForm's own single required style-persistence hook - every IWidgetStyle
+    /// property (color, Header Darkness, Opacity, Full Opacity When Active, Tint Strength, Margin,
+    /// Corner Radius, Font Size, Align) is mutated directly against Style (== _model, the same
+    /// instance FenceManager's own _models list already holds) by the base itself, so this fence
+    /// doesn't need - and no longer has - a dedicated SetHeaderDarkness/SetOpacity/etc. override of
+    /// its own for any of them; Save() just flushes whatever the base already changed.</summary>
+    protected override void PersistStyle() => _manager.Save();
 
     private void OpenItem(string? path)
     {
@@ -1362,7 +1293,8 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     private void ToggleHideLabels()
     {
-        _manager.SetHideLabels(FenceId, !_model.HideLabels);
+        _model.HideLabels = !_model.HideLabels;
+        _manager.Save();
         // Changes EffectiveCellHeight (see its own comment), which OCD Fence Sizing's fit is based
         // on - only height can possibly need to change here, never the columns/width.
         if (_model.OcdFenceSizing)
@@ -1372,7 +1304,8 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     private void ToggleOcdFenceSizing()
     {
-        _manager.SetOcdFenceSizing(FenceId, !_model.OcdFenceSizing);
+        _model.OcdFenceSizing = !_model.OcdFenceSizing;
+        _manager.Save();
         // Otherwise this only ever takes effect after the next manual resize (see OnDragEnd) -
         // turning it on should tidy up the fence right away instead of waiting for that.
         if (_model.OcdFenceSizing)
@@ -1425,13 +1358,13 @@ internal sealed class FenceForm : LayeredWidgetForm
         if (newBounds == _model.Bounds)
             return;
 
-        // WM_SIZE (already handled in WndProc) re-renders with the new size once this returns -
-        // NotifyBoundsChanged just needs to persist it, the same way OnDragEnd does after an
-        // interactive drag-resize.
+        // WM_SIZE (already handled in WndProc) re-renders with the new size once this returns - just
+        // needs persisting, the same way OnDragEnd does after an interactive drag-resize.
         NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
             newBounds.Width + OuterMargin * 2, newBounds.Height + TopBand + BottomBand,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
-        _manager.NotifyBoundsChanged(FenceId, newBounds);
+        _model.Bounds = newBounds;
+        _manager.Save();
     }
 
     private void BeginRenameItem(string? path)

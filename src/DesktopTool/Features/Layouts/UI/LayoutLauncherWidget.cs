@@ -301,75 +301,11 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // ChromeMenuFieldColor/ChromeMenuHoverColor/SettingsMenu* are all LayeredWidgetForm's own default
     // now - this widget has nothing beyond Hide Title/Full Opacity/the color grid/sliders/margin
     // stepper to add, so the base's own default row list and command dispatch already cover it.
-
-    /// <summary>LayeredWidgetForm's own required mutator hooks - plumbed straight to the model plus
-    /// Persist(), the same pattern FenceForm's own overrides use via FenceManager instead.</summary>
-    protected override void SetTintColor(Color? color, bool exact)
-    {
-        _model.TintColor = color?.ToArgb();
-        _model.TintIsExact = exact;
-        if (!exact)
-        {
-            _model.HeaderDarkness = LayoutLauncherModel.DefaultHeaderDarkness;
-            _model.Opacity = LayoutLauncherModel.DefaultOpacity;
-            _model.TintStrength = LayoutLauncherModel.DefaultTintStrength;
-        }
-        Persist();
-    }
-
-    protected override void SetHeaderDarkness(int darkness)
-    {
-        _model.HeaderDarkness = darkness;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetOpacity(int opacity)
-    {
-        _model.Opacity = Math.Max(5, opacity);
-        Persist();
-    }
-
-    protected override void SetTintStrength(int strength)
-    {
-        _model.TintStrength = strength;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetMargin(int margin)
-    {
-        _model.Margin = margin;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetCornerRadius(int radius)
-    {
-        _model.CornerRadius = radius;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetTitleFontSize(int size)
-    {
-        _model.TitleFontSize = size;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetTitleAlignment(TitleAlignment alignment)
-    {
-        _model.TitleAlignment = alignment;
-        Persist();
-        RenderAndPresent();
-    }
-
-    protected override void SetFullOpacityOnHover(bool enabled)
-    {
-        _model.FullOpacityOnHover = enabled;
-        Persist();
-    }
+    // Every IWidgetStyle property (color, Header Darkness, Opacity, Full Opacity When Active, Tint
+    // Strength, Margin, Corner Radius, Font Size, Align) is mutated directly against Style (== _model)
+    // by the base itself now - this widget doesn't need a dedicated SetHeaderDarkness/SetOpacity/etc.
+    // override of its own for any of them, just this one persistence hook.
+    protected override void PersistStyle() => Persist();
 
     /// <summary>Everything genuinely specific to this widget beyond LayeredWidgetForm's own
     /// PaintChrome (body/title/border/title-text/Settings button): just the Close button chained

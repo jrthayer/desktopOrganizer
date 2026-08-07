@@ -165,6 +165,7 @@ internal sealed class DropdownMenu : Form
         _getTooltipColor = getTooltipColor;
         _preferLeft = preferLeft;
         _toolTip.Draw += DrawTooltip;
+        _stepperRepeatTimer.Tick += OnStepperRepeatTick;
 
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -687,7 +688,16 @@ internal sealed class DropdownMenu : Form
         }
         else if (_rows[index].IsStepper)
         {
-            AdjustStepper(index, e.Location);
+            if (HitTestStepperButton(_rowRects[index], e.Location) is { } isPlus)
+            {
+                StepStepper(index, isPlus);
+                // Same capture reasoning as the slider drag above - keeps the repeat timer's own
+                // cursor check (see OnStepperRepeatTick) working, and guarantees the matching
+                // mouse-up reaches this window, even if the cursor drifts outside the button (or this
+                // whole popup) while held.
+                Capture = true;
+                BeginStepperRepeat(index, isPlus);
+            }
         }
         else if (_rows[index].IsAlignmentPicker)
         {
@@ -695,22 +705,81 @@ internal sealed class DropdownMenu : Form
         }
     }
 
-    /// <summary>A plain click-per-step on whichever button (if either) the click actually landed on -
-    /// no press-and-hold repeat, same one-shot feel as every other row's click.</summary>
-    private void AdjustStepper(int index, Point clientPoint)
+    /// <summary>Which button (if either) clientPoint lands on - shared by the initial mouse-down step
+    /// and every subsequent repeat tick (see _stepperRepeatTimer), so both always agree on which
+    /// direction is being held.</summary>
+    private static bool? HitTestStepperButton(Rectangle rowRect, Point clientPoint)
+    {
+        var (minusRect, plusRect) = StepperButtonRects(rowRect);
+        if (minusRect.Contains(clientPoint))
+            return false;
+        if (plusRect.Contains(clientPoint))
+            return true;
+        return null;
+    }
+
+    /// <summary>Steps a single row's value once - shared by the initial mouse-down click and every
+    /// subsequent repeat tick.</summary>
+    private void StepStepper(int index, bool isPlus)
     {
         var row = _rows[index];
-        var (minusRect, plusRect) = StepperButtonRects(_rowRects[index]);
         var current = Math.Clamp(row.StepperValue?.Invoke() ?? 0, row.StepperMin, row.StepperMax);
-
-        if (minusRect.Contains(clientPoint))
-            row.OnStepperChange?.Invoke(Math.Max(row.StepperMin, current - row.StepperStep));
-        else if (plusRect.Contains(clientPoint))
-            row.OnStepperChange?.Invoke(Math.Min(row.StepperMax, current + row.StepperStep));
-        else
-            return;
-
+        var next = isPlus ? Math.Min(row.StepperMax, current + row.StepperStep) : Math.Max(row.StepperMin, current - row.StepperStep);
+        row.OnStepperChange?.Invoke(next);
         Invalidate();
+    }
+
+    // Press-and-hold on a stepper button repeats it instead of needing a fresh click per step, same
+    // as a native spinner/scrollbar arrow - the first repeat lands after a longer initial delay (so a
+    // plain single click doesn't also trigger a second, unwanted step), then each subsequent repeat's
+    // own interval shrinks toward a floor, so a long hold visibly accelerates rather than ticking at
+    // one fixed rate the whole time.
+    private const int StepperInitialDelayMs = 450;
+    private const int StepperStartIntervalMs = 150;
+    private const int StepperMinIntervalMs = 35;
+    private const int StepperAccelerationStepMs = 12;
+
+    private readonly System.Windows.Forms.Timer _stepperRepeatTimer = new();
+    private int _stepperRepeatRowIndex = -1;
+    private bool _stepperRepeatIsPlus;
+    private int _stepperRepeatTickCount;
+
+    private void BeginStepperRepeat(int index, bool isPlus)
+    {
+        _stepperRepeatRowIndex = index;
+        _stepperRepeatIsPlus = isPlus;
+        _stepperRepeatTickCount = 0;
+        _stepperRepeatTimer.Interval = StepperInitialDelayMs;
+        _stepperRepeatTimer.Start();
+    }
+
+    private void StopStepperRepeat()
+    {
+        _stepperRepeatTimer.Stop();
+        _stepperRepeatRowIndex = -1;
+    }
+
+    private void OnStepperRepeatTick(object? sender, EventArgs e)
+    {
+        if (_stepperRepeatRowIndex < 0 || _stepperRepeatRowIndex >= _rowRects.Count)
+        {
+            StopStepperRepeat();
+            return;
+        }
+
+        // Stops repeating the moment the cursor drifts off the button being held, even without a
+        // real mouse-up - matches a native spinner's own "release to stop" feel while still dragged
+        // off it. Mouse is still captured (see OnMouseDown), so this keeps getting called either way.
+        if (HitTestStepperButton(_rowRects[_stepperRepeatRowIndex], PointToClient(Cursor.Position)) != _stepperRepeatIsPlus)
+        {
+            StopStepperRepeat();
+            return;
+        }
+
+        StepStepper(_stepperRepeatRowIndex, _stepperRepeatIsPlus);
+
+        _stepperRepeatTickCount++;
+        _stepperRepeatTimer.Interval = Math.Max(StepperMinIntervalMs, StepperStartIntervalMs - _stepperRepeatTickCount * StepperAccelerationStepMs);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -859,6 +928,13 @@ internal sealed class DropdownMenu : Form
             return;
         }
 
+        if (_stepperRepeatRowIndex >= 0)
+        {
+            StopStepperRepeat();
+            Capture = false;
+            return;
+        }
+
         var index = RowAt(e.Location);
         if (index < 0)
             return;
@@ -887,6 +963,7 @@ internal sealed class DropdownMenu : Form
         {
             _toolTip.Dispose();
             _submenu?.Dispose();
+            _stepperRepeatTimer.Dispose();
         }
         base.Dispose(disposing);
     }

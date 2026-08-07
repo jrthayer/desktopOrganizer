@@ -64,11 +64,10 @@ public sealed class FenceManager : IDisposable
     }
 
     /// <summary>Same idea as CreateFence, but seeded from an existing fence's settings (every
-    /// IWidgetStyle knob - color/HeaderDarkness/Opacity/FullOpacityOnHover/TintStrength/Margin -
-    /// plus HideTitle/HideLabels/OCD sizing and size) instead of the defaults - see FenceForm's "+"
-    /// button next to Settings. Deliberately doesn't copy Files or Bounds' own position: this is
-    /// "another fence styled and sized the same way", not a clone of its contents or a
-    /// stack-on-top-of-the-original duplicate.</summary>
+    /// IWidgetStyle knob, plus HideTitle/HideLabels/OCD sizing and size) instead of the defaults -
+    /// see FenceForm's "+" button next to Settings. Deliberately doesn't copy Files or Bounds' own
+    /// position: this is "another fence styled and sized the same way", not a clone of its contents
+    /// or a stack-on-top-of-the-original duplicate.</summary>
     public void CreateFenceLike(Guid sourceId)
     {
         var source = _models.Find(m => m.Id == sourceId);
@@ -89,6 +88,9 @@ public sealed class FenceManager : IDisposable
             FullOpacityOnHover = source.FullOpacityOnHover,
             TintStrength = source.TintStrength,
             Margin = source.Margin,
+            CornerRadius = source.CornerRadius,
+            TitleFontSize = source.TitleFontSize,
+            TitleAlignment = source.TitleAlignment,
         };
         _models.Add(model);
         ShowFence(model);
@@ -131,15 +133,6 @@ public sealed class FenceManager : IDisposable
             // actual Dispose to its own turn on the message loop, after all of that has unwound.
             form.BeginInvoke(new Action(form.Dispose));
 
-        Save();
-    }
-
-    public void NotifyBoundsChanged(Guid id, Rectangle bounds)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null)
-            return;
-        model.Bounds = bounds;
         Save();
     }
 
@@ -430,168 +423,6 @@ public sealed class FenceManager : IDisposable
         Save();
     }
 
-    public void NotifyRenamed(Guid id, string name)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null)
-            return;
-        model.Name = name;
-        Save();
-    }
-
-    public void SetHideLabels(Guid id, bool hide)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null || model.HideLabels == hide)
-            return;
-        model.HideLabels = hide;
-        Save();
-    }
-
-    public void SetHideTitle(Guid id, bool hide)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null || model.HideTitle == hide)
-            return;
-        model.HideTitle = hide;
-        Save();
-    }
-
-    public void SetOcdFenceSizing(Guid id, bool enabled)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null || model.OcdFenceSizing == enabled)
-            return;
-        model.OcdFenceSizing = enabled;
-        Save();
-    }
-
-    public void SetFullOpacityOnHover(Guid id, bool enabled)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null || model.FullOpacityOnHover == enabled)
-            return;
-        model.FullOpacityOnHover = enabled;
-        Save();
-    }
-
-    /// <summary>exact marks color as an Eyedropper pick (see FenceModel.TintIsExact) rather than a
-    /// preset/Custom... dialog result - false for every caller except FenceForm.PickEyedropperColor.
-    /// Meaningless (and forced false) alongside a null color, since there's no tint left to apply
-    /// exactly or otherwise.
-    ///
-    /// Every non-exact pick (Default, a preset, or a Custom... dialog result) resets
-    /// HeaderDarkness/Opacity/TintStrength back to their defaults, even re-clicking the color that's
-    /// already selected - the sliders are meant as a per-pick tweak, not a setting that carries over
-    /// once you've moved on to a different (or the same) swatch. An Eyedropper pick has its own reset
-    /// instead (PickEyedropperColor always sets Opacity to 100 and TintStrength to 0 on every pick).</summary>
-    public void SetTintColor(Guid id, Color? color, bool exact = false)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null)
-            return;
-        var argb = color?.ToArgb();
-        var effectiveExact = color is not null && exact;
-
-        if (!effectiveExact)
-        {
-            var alreadyDefault = model.TintColor == argb && model.TintIsExact == effectiveExact
-                && model.HeaderDarkness == FenceModel.DefaultHeaderDarkness && model.Opacity == FenceModel.DefaultOpacity
-                && model.TintStrength == FenceModel.DefaultTintStrength;
-            if (alreadyDefault)
-                return;
-            model.TintColor = argb;
-            model.TintIsExact = false;
-            model.HeaderDarkness = FenceModel.DefaultHeaderDarkness;
-            model.Opacity = FenceModel.DefaultOpacity;
-            model.TintStrength = FenceModel.DefaultTintStrength;
-            Save();
-            return;
-        }
-
-        if (model.TintColor == argb && model.TintIsExact == effectiveExact)
-            return;
-        model.TintColor = argb;
-        model.TintIsExact = effectiveExact;
-        Save();
-    }
-
-    public void SetHeaderDarkness(Guid id, int darkness)
-    {
-        var model = _models.Find(m => m.Id == id);
-        var clamped = Math.Clamp(darkness, 0, 100);
-        if (model is null || model.HeaderDarkness == clamped)
-            return;
-        model.HeaderDarkness = clamped;
-        Save();
-    }
-
-    // A fence dragged all the way to 0% opacity would be both invisible and (per
-    // LayeredWindowPresenter's own doc comment) click-through, with no way to get it back short of
-    // editing fences.json by hand - this floor keeps at least a faint, still-clickable trace visible.
-    private const int MinOpacity = 15;
-
-    public void SetOpacity(Guid id, int opacity)
-    {
-        var model = _models.Find(m => m.Id == id);
-        var clamped = Math.Clamp(opacity, MinOpacity, 100);
-        if (model is null || model.Opacity == clamped)
-            return;
-        model.Opacity = clamped;
-        Save();
-    }
-
-    public void SetTintStrength(Guid id, int strength)
-    {
-        var model = _models.Find(m => m.Id == id);
-        var clamped = Math.Clamp(strength, 0, 100);
-        if (model is null || model.TintStrength == clamped)
-            return;
-        model.TintStrength = clamped;
-        Save();
-    }
-
-    public void SetMargin(Guid id, int margin)
-    {
-        var model = _models.Find(m => m.Id == id);
-        var clamped = Math.Clamp(margin, 0, 100);
-        if (model is null || model.Margin == clamped)
-            return;
-        model.Margin = clamped;
-        Save();
-    }
-
-    public void SetCornerRadius(Guid id, int radius)
-    {
-        var model = _models.Find(m => m.Id == id);
-        var clamped = Math.Clamp(radius, 0, 50);
-        if (model is null || model.CornerRadius == clamped)
-            return;
-        model.CornerRadius = clamped;
-        Save();
-    }
-
-    public void SetTitleFontSize(Guid id, int size)
-    {
-        var model = _models.Find(m => m.Id == id);
-        // Same range as the "Font Size" stepper itself (see LayeredWidgetForm.BuildHeaderSettingsRows)
-        // - kept in sync as a defensive clamp, not the primary enforcement.
-        var clamped = Math.Clamp(size, 7, 14);
-        if (model is null || model.TitleFontSize == clamped)
-            return;
-        model.TitleFontSize = clamped;
-        Save();
-    }
-
-    public void SetTitleAlignment(Guid id, TitleAlignment alignment)
-    {
-        var model = _models.Find(m => m.Id == id);
-        if (model is null || model.TitleAlignment == alignment)
-            return;
-        model.TitleAlignment = alignment;
-        Save();
-    }
-
     public void SetAllVisible(bool visible)
     {
         foreach (var form in _forms.Values)
@@ -616,5 +447,13 @@ public sealed class FenceManager : IDisposable
 
     private bool IsReferencedByAnyFence(string path) => _models.Any(m => m.Files.Any(f => f.Path == path));
 
-    private void Save() => _store.Save(_models);
+    /// <summary>Flushes every fence's current model state to disk - internal rather than private now
+    /// that FenceForm calls this directly after mutating its own model in place (position, name,
+    /// every IWidgetStyle property, Hide Title/Labels, OCD Sizing - see LayeredWidgetForm's own
+    /// PersistStyle and FenceForm's HideTitle/Title setters), instead of routing each individual
+    /// field change through its own dedicated FenceManager method. FenceManager's own remaining
+    /// methods are everything that genuinely needs the shared _models/_forms collections - item-grid
+    /// content, lifecycle, z-order, spatial/cross-fence queries - not per-field persistence for a
+    /// single fence's own settings.</summary>
+    internal void Save() => _store.Save(_models);
 }
