@@ -111,8 +111,6 @@ internal sealed class FenceForm : LayeredWidgetForm
     private const int IconTopPadding = 8;
     private const int CellWidth = 84;
     private const int CellHeight = 94;
-    private const int ScrollbarWidth = 6;
-    private const int ScrollbarMargin = 3;
     // SettingsButtonGap (the vertical gap between the button row's bottom edge and the fence's own
     // top edge) is LayeredWidgetForm's own default (6) now, unchanged from what this used to declare
     // itself - TopMargin's own extra room above OuterMargin is still sized for it.
@@ -143,11 +141,9 @@ internal sealed class FenceForm : LayeredWidgetForm
     private Point _dragCurrentPoint;
     private DragGhostWindow? _dragGhost;
 
-    // Vertical scroll for fences that hold more rows of items than fit in their set height.
-    private int _scrollOffset;
-    private bool _scrollbarDragging;
-    private int _scrollbarDragStartY;
-    private int _scrollbarDragStartOffset;
+    // Vertical scroll for fences that hold more rows of items than fit in their set height - see
+    // Scrollbar's own doc comment for why this is shared with LayeredWidgetForm's generic list.
+    private readonly Scrollbar _scrollbar = new();
 
     // A real child Button control was tried here first, but a window painted via UpdateLayeredWindow
     // (see RenderAndPresent/LayeredWindowPresenter) doesn't compose child windows on top of itself -
@@ -320,24 +316,14 @@ internal sealed class FenceForm : LayeredWidgetForm
         return new Rectangle(x, newFenceRect.Y, SmallButtonSize, SettingsButtonHeight);
     }
 
-    private readonly record struct ScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
-
-    /// <summary>Null when the fence's content doesn't need to scroll (no scrollbar to draw or hit-test).</summary>
-    private ScrollbarGeometry? GetScrollbarGeometry(int contentWidth, int contentHeight)
+    /// <summary>The scrollbar's own viewport - Scrollbar.GetGeometry only reads Right/Top/Height off
+    /// this (a scrollbar always hugs the right edge of whatever it's given), so Left/Width beyond
+    /// contentWidth itself don't matter here.</summary>
+    private Rectangle GridViewport(int contentWidth, int contentHeight)
     {
-        var maxScroll = GetMaxScroll(contentWidth, contentHeight);
-        if (maxScroll <= 0)
-            return null;
-
         var trackTop = GridTop + GridPadding;
         var trackHeight = Math.Max(0, contentHeight - trackTop - GridPadding);
-        var trackX = contentWidth - ScrollbarWidth - ScrollbarMargin;
-        var totalHeight = trackHeight + maxScroll;
-        var thumbHeight = Math.Min(trackHeight, Math.Max(20, (int)((long)trackHeight * trackHeight / Math.Max(1, totalHeight))));
-        var maxThumbTravel = Math.Max(0, trackHeight - thumbHeight);
-        var thumbY = trackTop + (maxThumbTravel > 0 ? (int)((long)_scrollOffset * maxThumbTravel / maxScroll) : 0);
-
-        return new ScrollbarGeometry(trackX, trackTop, trackHeight, thumbY, thumbHeight);
+        return new Rectangle(0, trackTop, contentWidth, trackHeight);
     }
 
     /// <summary>LayeredWidgetForm's own Dispose(bool) calls this (having already set IsDisposing=true
@@ -434,29 +420,12 @@ internal sealed class FenceForm : LayeredWidgetForm
             return;
         }
 
-        if (GetScrollbarGeometry(contentSize.Width, contentSize.Height) is { } sb)
+        if (_scrollbar.TryHandleMouseDown(contentPoint, GridViewport(contentSize.Width, contentSize.Height),
+                GetMaxScroll(contentSize.Width, contentSize.Height), EffectiveCellHeight))
         {
-            // A little horizontal slack around the thin thumb/track makes it easier to grab.
-            var thumbRect = new Rectangle(sb.TrackX - 2, sb.ThumbY, ScrollbarWidth + 4, sb.ThumbHeight);
-            if (thumbRect.Contains(contentPoint))
-            {
-                _scrollbarDragging = true;
-                _scrollbarDragStartY = e.Location.Y;
-                _scrollbarDragStartOffset = _scrollOffset;
-                Capture = true;
-                return;
-            }
-
-            var trackRect = new Rectangle(sb.TrackX - 2, sb.TrackTop, ScrollbarWidth + 4, sb.TrackHeight);
-            if (trackRect.Contains(contentPoint))
-            {
-                // Clicking the track outside the thumb pages toward the click, like a normal scrollbar.
-                var page = Math.Max(EffectiveCellHeight, sb.TrackHeight - EffectiveCellHeight);
-                var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
-                _scrollOffset = Math.Clamp(_scrollOffset + (contentPoint.Y < sb.ThumbY ? -page : page), 0, maxScroll);
-                RenderAndPresent();
-                return;
-            }
+            Capture = true;
+            RenderAndPresent();
+            return;
         }
 
         if (IndexAtGridPosition(contentPoint) is int index)
@@ -475,18 +444,13 @@ internal sealed class FenceForm : LayeredWidgetForm
     {
         base.OnMouseMove(e);
 
-        if (_scrollbarDragging)
+        if (_scrollbar.IsDragging)
         {
             var contentSize = GetContentSize();
-            if (GetScrollbarGeometry(contentSize.Width, contentSize.Height) is { } sb && sb.TrackHeight > sb.ThumbHeight)
-            {
-                var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
-                var maxThumbTravel = sb.TrackHeight - sb.ThumbHeight;
-                var dy = e.Location.Y - _scrollbarDragStartY;
-                var newOffset = _scrollbarDragStartOffset + (int)((long)dy * maxScroll / maxThumbTravel);
-                _scrollOffset = Math.Clamp(newOffset, 0, maxScroll);
+            var contentPoint = ToContent(e.Location);
+            if (_scrollbar.UpdateDrag(contentPoint, GridViewport(contentSize.Width, contentSize.Height),
+                    GetMaxScroll(contentSize.Width, contentSize.Height)))
                 RenderAndPresent();
-            }
             return;
         }
 
@@ -665,9 +629,8 @@ internal sealed class FenceForm : LayeredWidgetForm
             return;
         }
 
-        if (_scrollbarDragging)
+        if (_scrollbar.EndDrag())
         {
-            _scrollbarDragging = false;
             Capture = false;
             return;
         }
@@ -722,11 +685,8 @@ internal sealed class FenceForm : LayeredWidgetForm
 
         var contentSize = GetContentSize();
         var maxScroll = GetMaxScroll(contentSize.Width, contentSize.Height);
-        if (maxScroll <= 0)
-            return;
-
-        _scrollOffset = Math.Clamp(_scrollOffset - e.Delta / 120 * EffectiveCellHeight, 0, maxScroll);
-        RenderAndPresent();
+        if (_scrollbar.HandleWheel(e.Delta, EffectiveCellHeight, maxScroll))
+            RenderAndPresent();
     }
 
     // OnMouseEnter needs no override of its own anymore - LayeredWidgetForm's own already does
@@ -887,7 +847,7 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// </summary>
     protected override void PaintContent(Graphics g, int contentWidth, int contentHeight)
     {
-        _scrollOffset = Math.Clamp(_scrollOffset, 0, GetMaxScroll(contentWidth, contentHeight));
+        _scrollbar.ClampToMax(GetMaxScroll(contentWidth, contentHeight));
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
 
         // Body/title fill, border, title text, and the Settings button itself are all
@@ -967,7 +927,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             var column = i % columns;
             var row = i / columns;
             var cellX = GridPadding + column * CellWidth;
-            var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollOffset;
+            var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollbar.Offset;
 
             // A scrolled row can straddle the grid-top boundary. g.Clip normally handles that for
             // shapes/icons (GDI+ respects it), but TextRenderer.DrawText (GDI) draws its text in
@@ -1025,15 +985,9 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     private void PaintScrollbar(Graphics g, int width, int height)
     {
-        if (GetScrollbarGeometry(width, height) is not { } sb)
-            return;
-
-        using var trackBrush = new SolidBrush(Color.FromArgb(30, 255, 255, 255));
-        g.FillRectangle(trackBrush, ToWindow(new Rectangle(sb.TrackX, sb.TrackTop, ScrollbarWidth, sb.TrackHeight)));
-
-        using var thumbBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
-        using var thumbPath = RoundedRect(ToWindow(new Rectangle(sb.TrackX, sb.ThumbY, ScrollbarWidth, sb.ThumbHeight)), ScrollbarWidth / 2);
-        g.FillPath(thumbBrush, thumbPath);
+        var maxScroll = GetMaxScroll(width, height);
+        if (_scrollbar.GetGeometry(GridViewport(width, height), maxScroll) is { } sb)
+            PaintScrollbar(g, sb);
     }
 
     /// <summary>Draws the drop-target outline while an in-progress item drag (started in
@@ -1050,7 +1004,7 @@ internal sealed class FenceForm : LayeredWidgetForm
 
         var columns = GetColumns(width);
         var cellX = GridPadding + targetIndex % columns * CellWidth;
-        var cellY = GridTop + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollOffset;
+        var cellY = GridTop + GridPadding + targetIndex / columns * EffectiveCellHeight - _scrollbar.Offset;
 
         using var targetPen = new Pen(Color.FromArgb(200, Accent), 2);
         using var targetRect = RoundedRect(ToWindow(new Rectangle(cellX + 1, cellY + 1, CellWidth - 2, EffectiveCellHeight - 2)), 4);
@@ -1128,7 +1082,7 @@ internal sealed class FenceForm : LayeredWidgetForm
 
         var columns = GetColumns(GetContentSize().Width);
         var row = i / columns;
-        var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollOffset;
+        var cellY = GridTop + GridPadding + row * EffectiveCellHeight - _scrollbar.Offset;
         var labelTop = cellY + IconTopPadding + IconSize + 2;
         return contentLocation.Y >= labelTop ? _model.Files[i].Path : null;
     }
@@ -1141,7 +1095,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         var columns = GetColumns(GetContentSize().Width);
 
         var column = (contentLocation.X - GridPadding) / CellWidth;
-        var row = (contentLocation.Y - GridTop - GridPadding + _scrollOffset) / EffectiveCellHeight;
+        var row = (contentLocation.Y - GridTop - GridPadding + _scrollbar.Offset) / EffectiveCellHeight;
         if (column < 0 || column >= columns || row < 0)
             return null;
 
@@ -1349,7 +1303,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             // set aside for it, so without this the scrollbar would have nowhere to go but
             // overlapping the last column's icons.
             if (finalRows < totalRowsNeeded)
-                newBounds.Width += ScrollbarWidth + ScrollbarMargin;
+                newBounds.Width += Scrollbar.Width + Scrollbar.Margin;
         }
 
         if (adjustHeight)
@@ -1387,12 +1341,12 @@ internal sealed class FenceForm : LayeredWidgetForm
         // the edit box could end up positioned above the grid top or below the fence entirely.
         var gridTop = GridTop + GridPadding;
         var gridBottom = contentSize.Height - GridPadding;
-        if (absoluteCellY - _scrollOffset < gridTop)
-            _scrollOffset = Math.Max(0, absoluteCellY - gridTop);
-        else if (absoluteCellY + EffectiveCellHeight - _scrollOffset > gridBottom)
-            _scrollOffset = Math.Min(GetMaxScroll(contentSize.Width, contentSize.Height), absoluteCellY + EffectiveCellHeight - gridBottom);
+        if (absoluteCellY - _scrollbar.Offset < gridTop)
+            _scrollbar.Offset = Math.Max(0, absoluteCellY - gridTop);
+        else if (absoluteCellY + EffectiveCellHeight - _scrollbar.Offset > gridBottom)
+            _scrollbar.Offset = Math.Min(GetMaxScroll(contentSize.Width, contentSize.Height), absoluteCellY + EffectiveCellHeight - gridBottom);
 
-        var cellY = absoluteCellY - _scrollOffset;
+        var cellY = absoluteCellY - _scrollbar.Offset;
         var labelRect = ToWindow(new Rectangle(cellX, cellY + IconTopPadding + IconSize + 2, CellWidth, 20));
 
         _itemRenamePath = path;

@@ -956,10 +956,10 @@ internal abstract class LayeredWidgetForm : Form
     // ---- Generic in-body list (Layout Launcher's saved-layout rows) ----
     //
     // Same split as ContentButton/ChromeButton: the base owns the shared scrolling/layout/paint
-    // machinery, a subclass owns what a row actually shows (GetListArea/ListRowCount/ListRowHeight/
-    // PaintListRow) since that's inherently subclass-specific, the same way FenceForm's own icon grid
-    // owns its own column/cell math and hand-rolled scrollbar (see FenceForm.GetScrollbarGeometry) -
-    // this is that same pattern generalized so a second (and future) subclass doesn't re-derive it.
+    // machinery (now via the shared Scrollbar class - see its own doc comment), a subclass owns what
+    // a row actually shows (GetListArea/ListRowCount/ListRowHeight/PaintListRow) since that's
+    // inherently subclass-specific, the same way FenceForm's own icon grid owns its own column/cell
+    // math while sharing the same Scrollbar underneath.
 
     /// <summary>Content-relative rect the list occupies - Rectangle.Empty (the default) means "no
     /// list" and none of the machinery below paints/scrolls/hit-tests anything. A subclass computes
@@ -982,12 +982,7 @@ internal abstract class LayeredWidgetForm : Form
     /// ignores Graphics.Clip - see FenceForm.PaintContent's own comment on that same quirk).</summary>
     protected virtual void PaintListRow(Graphics g, int index, Rectangle rowRect) { }
 
-    private const int ListScrollbarWidth = 6;
-    private const int ListScrollbarMargin = 3;
-    private int _listScrollOffset;
-    private bool _listScrollbarDragging;
-    private int _listScrollbarDragStartY;
-    private int _listScrollbarDragStartOffset;
+    private readonly Scrollbar _listScrollbar = new();
 
     private int GetListMaxScroll(Rectangle area)
     {
@@ -996,90 +991,40 @@ internal abstract class LayeredWidgetForm : Form
         return Math.Max(0, ListRowCount * ListRowHeight - area.Height);
     }
 
-    private readonly record struct ListScrollbarGeometry(int TrackX, int TrackTop, int TrackHeight, int ThumbY, int ThumbHeight);
-
-    /// <summary>Null when the list doesn't need to scroll (no scrollbar to draw or hit-test) - same
-    /// track/thumb math as FenceForm's own GetScrollbarGeometry, just against the list's own area
-    /// instead of the whole fence body.</summary>
-    private ListScrollbarGeometry? GetListScrollbarGeometry(Rectangle area)
-    {
-        var maxScroll = GetListMaxScroll(area);
-        if (maxScroll <= 0)
-            return null;
-
-        var trackX = area.Right - ListScrollbarWidth - ListScrollbarMargin;
-        var totalHeight = area.Height + maxScroll;
-        var thumbHeight = Math.Min(area.Height, Math.Max(20, (int)((long)area.Height * area.Height / Math.Max(1, totalHeight))));
-        var maxThumbTravel = Math.Max(0, area.Height - thumbHeight);
-        var thumbY = area.Top + (maxThumbTravel > 0 ? (int)((long)_listScrollOffset * maxThumbTravel / maxScroll) : 0);
-
-        return new ListScrollbarGeometry(trackX, area.Top, area.Height, thumbY, thumbHeight);
-    }
-
     /// <summary>A subclass's own OnMouseDown calls this, typically as the final fallback once
     /// Settings/Extra/Content-button checks miss - arms scrollbar-thumb dragging, or pages the track
-    /// toward a click, exactly like FenceForm's own hand-rolled scrollbar already does (see its own
-    /// OnMouseDown). Returns true if the click landed on the scrollbar at all.</summary>
+    /// toward a click (see Scrollbar.TryHandleMouseDown). Returns true if the click landed on the
+    /// scrollbar at all, repainting immediately if it was a track-page click (a thumb-drag repaints on
+    /// the next UpdateListScrollDrag tick instead).</summary>
     protected bool TryHandleListMouseDown(Point contentPoint)
     {
         var size = GetContentSize();
         var area = GetListArea(size.Width, size.Height);
-        if (GetListScrollbarGeometry(area) is not { } sb)
+        var maxScroll = GetListMaxScroll(area);
+        if (!_listScrollbar.TryHandleMouseDown(contentPoint, area, maxScroll, ListRowHeight))
             return false;
 
-        // A little horizontal slack around the thin thumb/track makes it easier to grab.
-        var thumbRect = new Rectangle(sb.TrackX - 2, sb.ThumbY, ListScrollbarWidth + 4, sb.ThumbHeight);
-        if (thumbRect.Contains(contentPoint))
-        {
-            _listScrollbarDragging = true;
-            _listScrollbarDragStartY = contentPoint.Y;
-            _listScrollbarDragStartOffset = _listScrollOffset;
-            Capture = true;
-            return true;
-        }
-
-        var trackRect = new Rectangle(sb.TrackX - 2, sb.TrackTop, ListScrollbarWidth + 4, sb.TrackHeight);
-        if (trackRect.Contains(contentPoint))
-        {
-            // Clicking the track outside the thumb pages toward the click, like a normal scrollbar.
-            var page = Math.Max(ListRowHeight, sb.TrackHeight - ListRowHeight);
-            var maxScroll = GetListMaxScroll(area);
-            _listScrollOffset = Math.Clamp(_listScrollOffset + (contentPoint.Y < sb.ThumbY ? -page : page), 0, maxScroll);
-            RenderAndPresent();
-            return true;
-        }
-
-        return false;
+        Capture = true;
+        RenderAndPresent();
+        return true;
     }
 
     /// <summary>A subclass's own OnMouseMove calls this every tick - a no-op unless
     /// TryHandleListMouseDown just armed the thumb.</summary>
     protected void UpdateListScrollDrag(Point contentPoint)
     {
-        if (!_listScrollbarDragging)
-            return;
-
         var size = GetContentSize();
         var area = GetListArea(size.Width, size.Height);
-        if (GetListScrollbarGeometry(area) is not { } sb || sb.TrackHeight <= sb.ThumbHeight)
-            return;
-
-        var maxScroll = GetListMaxScroll(area);
-        var maxThumbTravel = sb.TrackHeight - sb.ThumbHeight;
-        var dy = contentPoint.Y - _listScrollbarDragStartY;
-        var newOffset = _listScrollbarDragStartOffset + (int)((long)dy * maxScroll / maxThumbTravel);
-        _listScrollOffset = Math.Clamp(newOffset, 0, maxScroll);
-        RenderAndPresent();
+        if (_listScrollbar.UpdateDrag(contentPoint, area, GetListMaxScroll(area)))
+            RenderAndPresent();
     }
 
     /// <summary>A subclass's own OnMouseUp calls this unconditionally - a no-op unless a scrollbar
     /// drag was actually in progress.</summary>
     protected void EndListScrollDrag()
     {
-        if (!_listScrollbarDragging)
-            return;
-        _listScrollbarDragging = false;
-        Capture = false;
+        if (_listScrollbar.EndDrag())
+            Capture = false;
     }
 
     /// <summary>A subclass's own OnMouseWheel calls this with e.Delta - a no-op if the list has
@@ -1088,12 +1033,8 @@ internal abstract class LayeredWidgetForm : Form
     {
         var size = GetContentSize();
         var area = GetListArea(size.Width, size.Height);
-        var maxScroll = GetListMaxScroll(area);
-        if (maxScroll <= 0)
-            return;
-
-        _listScrollOffset = Math.Clamp(_listScrollOffset - delta / 120 * ListRowHeight, 0, maxScroll);
-        RenderAndPresent();
+        if (_listScrollbar.HandleWheel(delta, ListRowHeight, GetListMaxScroll(area)))
+            RenderAndPresent();
     }
 
     /// <summary>Painted unconditionally (unlike PaintExtraButtons/PaintSettingsButton, which only show
@@ -1105,21 +1046,22 @@ internal abstract class LayeredWidgetForm : Form
         if (area.IsEmpty)
             return;
 
-        // Re-clamped on every paint (same reasoning as FenceForm.PaintContent's own _scrollOffset
-        // clamp) - a resize changes GetListArea's own height (and so GetListMaxScroll) without going
-        // through TryHandleListMouseDown/UpdateListScrollDrag/HandleListMouseWheel, so a scroll offset
-        // set before the resize could otherwise sit past the new, smaller max - drawing every row's
+        // Re-clamped on every paint (same reasoning as FenceForm.PaintContent's own scrollbar clamp) -
+        // a resize changes GetListArea's own height (and so GetListMaxScroll) without going through
+        // TryHandleListMouseDown/UpdateListScrollDrag/HandleListMouseWheel, so a scroll offset set
+        // before the resize could otherwise sit past the new, smaller max - drawing every row's
         // rowTop from a stale offset that no longer corresponds to a valid scroll position at all.
-        _listScrollOffset = Math.Clamp(_listScrollOffset, 0, GetListMaxScroll(area));
+        var maxScroll = GetListMaxScroll(area);
+        _listScrollbar.ClampToMax(maxScroll);
 
-        var hasScrollbar = GetListMaxScroll(area) > 0;
-        var rowWidth = hasScrollbar ? area.Width - (ListScrollbarWidth + ListScrollbarMargin * 2) : area.Width;
+        var hasScrollbar = maxScroll > 0;
+        var rowWidth = hasScrollbar ? area.Width - (Scrollbar.Width + Scrollbar.Margin * 2) : area.Width;
 
         var previousClip = g.Clip;
         g.SetClip(ToWindow(area));
         for (var i = 0; i < ListRowCount; i++)
         {
-            var rowTop = area.Top + i * ListRowHeight - _listScrollOffset;
+            var rowTop = area.Top + i * ListRowHeight - _listScrollbar.Offset;
             if (rowTop + ListRowHeight <= area.Top || rowTop >= area.Bottom)
                 continue;
             PaintListRow(g, i, ToWindow(new Rectangle(area.Left, rowTop, rowWidth, ListRowHeight)));
@@ -1133,20 +1075,19 @@ internal abstract class LayeredWidgetForm : Form
             g.DrawRectangle(borderPen, ToWindow(area));
         }
 
-        if (hasScrollbar)
-            PaintListScrollbar(g, area);
+        if (_listScrollbar.GetGeometry(area, maxScroll) is { } sb)
+            PaintScrollbar(g, sb);
     }
 
-    private void PaintListScrollbar(Graphics g, Rectangle area)
+    /// <summary>Draws a Scrollbar.Geometry's own track/thumb - shared by the list above and FenceForm's
+    /// own icon-grid scrollbar, both against the same Scrollbar instance-per-widget pattern.</summary>
+    protected void PaintScrollbar(Graphics g, Scrollbar.Geometry sb)
     {
-        if (GetListScrollbarGeometry(area) is not { } sb)
-            return;
-
         using var trackBrush = new SolidBrush(Color.FromArgb(30, 255, 255, 255));
-        g.FillRectangle(trackBrush, ToWindow(new Rectangle(sb.TrackX, sb.TrackTop, ListScrollbarWidth, sb.TrackHeight)));
+        g.FillRectangle(trackBrush, ToWindow(new Rectangle(sb.TrackX, sb.TrackTop, Scrollbar.Width, sb.TrackHeight)));
 
         using var thumbBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
-        using var thumbPath = RoundedRectPath.Full(ToWindow(new Rectangle(sb.TrackX, sb.ThumbY, ListScrollbarWidth, sb.ThumbHeight)), ListScrollbarWidth / 2);
+        using var thumbPath = RoundedRectPath.Full(ToWindow(new Rectangle(sb.TrackX, sb.ThumbY, Scrollbar.Width, sb.ThumbHeight)), Scrollbar.Width / 2);
         g.FillPath(thumbBrush, thumbPath);
     }
 
