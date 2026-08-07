@@ -110,10 +110,9 @@ Fences' or a design tool's own alignment guides:
   of snapping flush to whatever it's snapping to.
 
 The pure edge-snapping geometry itself (`SnapEngine`) lives as a sibling
-feature, at [`src/DesktopTool/Features/Snapping`](../Snapping/SnapEngine.cs)
-— it has no dependency on fences or any particular widget type, so any
-future draggable/resizable UI element in this app can reuse it the same way
-`FenceForm` does.
+feature — see [Snapping](../Snapping/README.md) — it has no dependency on
+fences or any particular widget type, so any future draggable/resizable UI
+element in this app can reuse it the same way `FenceForm` does.
 
 ## Fence settings
 
@@ -125,40 +124,55 @@ settings (color, Hide Title/Labels, OCD sizing, size) copied over, and an
 aren't deleted, only removed from the fence; their real desktop icons are
 restored (see Desktop icon hiding above).
 
-- **Hide Shortcut Names** — hides the label under each icon, showing icons
-  only. Toggle it again to bring labels back.
-- **Hide Title** — hides the fence's title bar entirely, reclaiming that
-  space for the icon grid. The fence can still be moved via its outer
-  margin.
-- **OCD Fence Sizing** — after you resize the fence by hand, automatically
-  snaps it to the tightest size that fits its icons (equivalent to running
-  OCD → Both after every manual resize). Also fires immediately the moment
-  you turn it on, rather than waiting for the next resize.
-- **Fence Margin** — 0-100px (in steps of 5, via the +/- stepper). How far
-  this fence wants to sit from whatever it's snapping to (another fence's
-  edge, or a custom snap line) while being dragged, instead of landing
-  flush against it — see Snap lines above. It's this fence's own value that
-  applies while it's the one being dragged, like a CSS margin.
-- **Full Opacity When Active** — off by default. When on, the fence
+The menu itself has two flyouts. **Base** holds every setting shared by any
+widget built on [`LayeredWidgetForm`](../../UI/LayeredWidgetForm.cs) — a
+fence and the [Layout Launcher](../Layouts/README.md#layout-launcher-widget)
+widget both get the exact same rows here, so they're documented once
+rather than per-widget:
+
+- **Header > Font Size / Align** — the title text's own point size (7-14pt)
+  and how it sits in its row (Left/Center/Right).
+- **Hide Title** — hides the title bar entirely, reclaiming that space for
+  the body. The widget can still be moved via its outer margin.
+- **Full Opacity When Active** — off by default. When on, the widget
   renders fully opaque while hovered, while being dragged or resized, or
-  while its own settings menu is open, easing back down to the Fence
-  Opacity slider's value once none of those still apply.
-- **Fence Color** — pick one of the eight preset swatches, **Custom...**
-  for the full Windows color picker, **Eyedropper** to sample a color from
-  anywhere on screen (even outside the app), or **Default** to reset to
-  the plain dark theme.
+  while its own settings menu is open, easing back down to the Opacity
+  slider's value once none of those still apply.
+- **Header Border Mode** — borders every element the widget draws (its own
+  outer border, its buttons, its list) in the header's own color instead of
+  each one's usual border color, tying the whole widget together as one
+  visibly matched set.
+- **Color** — pick one of the eight preset swatches, **Custom...** for the
+  full Windows color picker, **Eyedropper** to sample a color from anywhere
+  on screen (even outside the app), or **Default** to reset to the plain
+  dark theme.
   - **Header Darkness** — how much black blends into the title bar,
-    independent of the fence's own color.
-  - **Fence Opacity** — how translucent the fence renders, clamped to a
-    15% floor so it can never be dragged all the way to
-    invisible/unclickable.
+    independent of the widget's own color.
+  - **Opacity** — how translucent the widget renders, clamped to a 15%
+    floor so it can never be dragged all the way to invisible/unclickable.
   - **Tint Strength** — how strongly a preset/Custom... color blends into
     the dark theme rather than replacing it outright. An Eyedropper pick
     uses this the opposite way: 0% (where every fresh pick starts) keeps
     the sampled color exact, and dragging it up mutes that color back
     toward the plain theme instead. Picking any color — even re-picking
-    the one already selected — resets Header Darkness, Fence Opacity, and
-    Tint Strength back to their defaults.
+    the one already selected — resets Header Darkness, Opacity, and Tint
+    Strength back to their defaults.
+- **Corner Radius** — 0-50px. How rounded the widget's own body/title
+  corners are; 0 is square.
+- **Margin** — 0-100px (in steps of 5). How far this widget wants to sit
+  from whatever it's snapping to (another fence's edge, or a custom snap
+  line) while being dragged, instead of landing flush against it — see
+  Snap lines above. It's this widget's own value that applies while it's
+  the one being dragged, like a CSS margin.
+
+**Additional** holds what's genuinely specific to a fence, on top of Base:
+
+- **Hide Shortcut Names** — hides the label under each icon, showing icons
+  only. Toggle it again to bring labels back.
+- **OCD Fence Sizing** — after you resize the fence by hand, automatically
+  snaps it to the tightest size that fits its icons (equivalent to running
+  OCD → Both after every manual resize). Also fires immediately the moment
+  you turn it on, rather than waiting for the next resize.
 - **OCD** — a submenu with three one-off resize actions: **Both** (trims
   width and height), **Left/Right** (width only), and **Top/Down** (height
   only). Each shrinks or grows the fence to fit its current icons without

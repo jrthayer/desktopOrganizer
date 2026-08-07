@@ -2,7 +2,8 @@
 
 A Windows desktop app, run from the system tray, built to grow into a
 general desktop-organization toolkit over time. Its features are
-**Fences** and **Layouts** — see below.
+**Fences** and **Layouts**, built on a shared **Snapping** engine — see
+below.
 
 ## Requirements
 
@@ -40,8 +41,11 @@ programs and place each one's window on a chosen monitor and position.
 currently open and where it's sitting, instead of picking each program by
 hand through **Manage Layouts...**. Both live on the **Layout Launcher**
 widget (tray menu > Widgets > Layout Launcher), which also lists every
-saved layout for one-click run. All of its code lives under
-[`src/DesktopTool/Features/Layouts`](src/DesktopTool/Features/Layouts).
+saved layout for one-click run.
+
+See [`src/DesktopTool/Features/Layouts/README.md`](src/DesktopTool/Features/Layouts/README.md)
+for the full feature writeup, the layout entry model, and known limitations.
+All of its code lives under [`src/DesktopTool/Features/Layouts`](src/DesktopTool/Features/Layouts).
 
 **Limitations:** Save Current Layout can end up including one of Desktop
 Tool's own windows (a fence) as a captured entry - it's excluded by
@@ -50,6 +54,16 @@ that hasn't reliably kept it out in every case seen so far. Harmless to
 leave in a saved layout (running it just tries to "relaunch" Desktop Tool
 itself, which is already running and a no-op in practice), but worth
 deleting by hand via Manage Layouts if you notice it.
+
+### Snapping
+
+The pure edge-snapping geometry (`SnapEngine`) that gives both Fences and
+the Layout Launcher widget their drag-to-snap feel — a shared, stateless
+utility rather than a user-facing feature of its own.
+
+See [`src/DesktopTool/Features/Snapping/README.md`](src/DesktopTool/Features/Snapping/README.md)
+for what it does and how the two features above use it. All of its code
+lives under [`src/DesktopTool/Features/Snapping`](src/DesktopTool/Features/Snapping).
 
 ## Tray menu
 
