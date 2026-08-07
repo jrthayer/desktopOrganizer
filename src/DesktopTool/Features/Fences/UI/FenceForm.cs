@@ -576,7 +576,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         {
             var index = IndexAtGridPosition(contentPoint) ?? _model.Files.Count;
             if (_manager.IsRecycleBinAt(FenceId, index))
-                return "Move to Recycle Bin â†’";
+                return "Move to Recycle Bin";
             // Landing back on (or adjacent to) its own starting cell isn't really a reorder, but
             // there's no cheap way to tell "would actually move" from "would land right back where
             // it started" here without duplicating MoveFile's own index-shift math - and showing the
@@ -590,8 +590,8 @@ internal sealed class FenceForm : LayeredWidgetForm
         {
             var index = targetForm.IndexForExternalDrop(screenPoint);
             return _manager.IsRecycleBinAt(targetForm.FenceId, index)
-                ? "Move to Recycle Bin â†’"
-                : $"Move to {targetForm.FenceName} â†’";
+                ? "Move to Recycle Bin"
+                : $"Move to {targetForm.FenceName}";
         }
 
         return "Remove from Fence";

@@ -984,6 +984,14 @@ internal abstract class LayeredWidgetForm : Form
 
     private readonly Scrollbar _listScrollbar = new();
 
+    /// <summary>How far the list is currently scrolled down, in pixels - read-only here (mutated only
+    /// through TryHandleListMouseDown/UpdateListScrollDrag/HandleListMouseWheel above). A subclass
+    /// wanting its own per-row click handling (Layout Launcher's Run/Copy/Delete) needs this to work
+    /// out which row a given content point actually lands on - deliberately just this one accessor,
+    /// not a full row-hit-testing mechanism, since a subclass's own row layout (icon/button placement
+    /// within a row) is exactly the kind of thing that stays subclass-specific.</summary>
+    protected int ListScrollOffset => _listScrollbar.Offset;
+
     private int GetListMaxScroll(Rectangle area)
     {
         if (area.IsEmpty || ListRowCount == 0)

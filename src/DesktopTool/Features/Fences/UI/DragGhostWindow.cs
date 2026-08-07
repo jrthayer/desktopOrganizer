@@ -22,7 +22,7 @@ internal sealed class DragGhostWindow : Form
     private const int IconSize = 48;
     private const int CornerRadius = 6;
 
-    // The drop-target hint pill ("Move to Recycle Bin ->") that grows below the card - see SetHint.
+    // The drop-target hint pill ("Move to Recycle Bin") that grows below the card - see SetHint.
     private const int HintGap = 6;
     private const int HintHeight = 26;
     private const int HintPaddingX = 10;
@@ -137,7 +137,13 @@ internal sealed class DragGhostWindow : Form
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-            using var body = RoundedRectPath.Full(new Rectangle(0, 0, CardWidth - 1, CardHeight - 1), CornerRadius);
+            // Full CardWidth/CardHeight, not the usual "-1" inset - that convention exists elsewhere
+            // in this app to keep an INSET BORDER STROKE from getting clipped (see LayeredWidgetForm.
+            // PaintChrome's own comment), but nothing here draws a border afterward. With SetWindowRgn
+            // clipping to the full size (see the constructor/SetHint), a "-1" fill left an unpainted
+            // 1px sliver along the right/bottom edge showing whatever GDI happened to leave behind -
+            // stray-looking pixels right where the card (or the hint pill below it) visually ends.
+            using var body = RoundedRectPath.Full(new Rectangle(0, 0, CardWidth, CardHeight), CornerRadius);
             using var bodyFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
             g.FillPath(bodyFill, body);
 
@@ -153,7 +159,9 @@ internal sealed class DragGhostWindow : Form
 
             if (_hintText is not null)
             {
-                var hintRect = new Rectangle(0, CardHeight + HintGap, _currentWidth - 1, HintHeight - 1);
+                // Same full-size reasoning as the card body above - no "-1" since there's no border
+                // stroke to protect, and the region this clips against (see SetHint) is full-size too.
+                var hintRect = new Rectangle(0, CardHeight + HintGap, _currentWidth, HintHeight);
                 using var hintPath = RoundedRectPath.Full(hintRect, CornerRadius);
                 using var hintFill = new SolidBrush(Color.FromArgb(255, 32, 32, 36));
                 g.FillPath(hintFill, hintPath);
