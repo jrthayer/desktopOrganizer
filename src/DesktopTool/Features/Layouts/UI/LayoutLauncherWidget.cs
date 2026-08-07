@@ -237,6 +237,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         var contentPoint = ToContent(windowPoint);
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
         if (ShowsButtons && (GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
+            || GetCopySettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
             || TryGetExtraButtonAt(contentWidth, onLeft, contentPoint, out _)))
             return HTCLIENT;
 
@@ -283,6 +284,8 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             _settingsButtonArmed = true;
             return;
         }
+        if (ShowsButtons && TryArmCopySettingsButton(contentPoint))
+            return;
         if (ShowsButtons && TryArmExtraButton(contentPoint))
             return;
         if (TryArmContentButton(contentPoint))
@@ -339,6 +342,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             return;
         }
 
+        FireArmedCopySettingsButton(contentPoint);
         FireArmedExtraButton(contentPoint);
         FireArmedContentButton(contentPoint);
         EndListScrollDrag();
@@ -386,6 +390,19 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // itself now - this widget doesn't need a dedicated SetHeaderDarkness/SetOpacity/etc. override of
     // its own for any of them, just this one persistence hook.
     protected override void PersistStyle() => Persist();
+
+    /// <summary>Copy Settings To, same-widget-type only (see LayeredWidgetForm.CopySettingsFrom's
+    /// own same-type check) - Rows Shown/Always Max Rows, the two settings genuinely specific to
+    /// this widget (see BuildAdditionalSettingsRows below). Only ever fires between two Layout
+    /// Launcher instances, which this app never actually has more than one of at once - kept for
+    /// consistency with FenceForm's own override regardless, and in case that ever changes.</summary>
+    protected override void CopyAdditionalSettingsFrom(LayeredWidgetForm source)
+    {
+        if (source is not LayoutLauncherWidget other)
+            return;
+        _model.RowsShown = other._model.RowsShown;
+        _model.AlwaysMaxRows = other._model.AlwaysMaxRows;
+    }
 
     private const int CmdToggleAlwaysMaxRows = 1;
 

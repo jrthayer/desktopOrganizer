@@ -290,13 +290,14 @@ internal sealed class FenceForm : LayeredWidgetForm
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Immediately inside the settings button (i.e. between it and the fence body) rather
-    /// than anchored to its own corner - moves and flips sides together with LayeredWidgetForm's own
-    /// GetSettingsButtonRect as a pair, always adjacent to it. Duplicates this fence's settings into
-    /// a new, empty fence (see FenceManager.CreateFenceLike) when clicked.</summary>
+    /// <summary>Immediately inside the Copy Settings button (i.e. between it and the fence body)
+    /// rather than anchored to its own corner - moves and flips sides together with
+    /// LayeredWidgetForm's own GetCopySettingsButtonRect as a pair, always adjacent to it (which is
+    /// itself always adjacent to Settings - see that method's own comment). Duplicates this fence's
+    /// settings into a new, empty fence (see FenceManager.CreateFenceLike) when clicked.</summary>
     private Rectangle GetNewFenceButtonRect(int contentWidth, bool onLeft)
     {
-        var settingsRect = GetSettingsButtonRect(contentWidth, onLeft);
+        var settingsRect = GetCopySettingsButtonRect(contentWidth, onLeft);
         var x = onLeft ? settingsRect.Right + ButtonSpacing : settingsRect.X - ButtonSpacing - SmallButtonSize;
         return new Rectangle(x, settingsRect.Y, SmallButtonSize, SettingsButtonHeight);
     }
@@ -413,6 +414,9 @@ internal sealed class FenceForm : LayeredWidgetForm
             _settingsButtonArmed = true;
             return;
         }
+
+        if (ShowsButtons && TryArmCopySettingsButton(contentPoint))
+            return;
 
         if (ShowsButtons && GetNewFenceButtonRect(contentSize.Width, onLeft).Contains(contentPoint))
         {
@@ -579,6 +583,8 @@ internal sealed class FenceForm : LayeredWidgetForm
                 OpenSettingsMenu();
             return;
         }
+
+        FireArmedCopySettingsButton(ToContent(e.Location));
 
         if (_newFenceButtonArmed)
         {
@@ -764,6 +770,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         var contentPoint = ToContent(windowPoint);
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
         if (ShowsButtons && (GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
+            || GetCopySettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
             || GetNewFenceButtonRect(contentWidth, onLeft).Contains(contentPoint)
             || GetDeleteButtonRect(contentWidth, onLeft).Contains(contentPoint)))
             return HTCLIENT;
@@ -1195,6 +1202,18 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// doesn't need - and no longer has - a dedicated SetHeaderDarkness/SetOpacity/etc. override of
     /// its own for any of them; Save() just flushes whatever the base already changed.</summary>
     protected override void PersistStyle() => _manager.Save();
+
+    /// <summary>Copy Settings To, fence-to-fence only (see LayeredWidgetForm.CopySettingsFrom's own
+    /// same-type check) - Hide Shortcut Names/OCD Fence Sizing, the two settings genuinely specific
+    /// to a fence (see BuildAdditionalSettingsRows above). Deliberately doesn't touch Files/Name/
+    /// Bounds - same "settings, not identity/content" scope CopySettingsFrom itself already draws.</summary>
+    protected override void CopyAdditionalSettingsFrom(LayeredWidgetForm source)
+    {
+        if (source is not FenceForm other)
+            return;
+        _model.HideLabels = other._model.HideLabels;
+        _model.OcdFenceSizing = other._model.OcdFenceSizing;
+    }
 
     private void OpenItem(string? path)
     {

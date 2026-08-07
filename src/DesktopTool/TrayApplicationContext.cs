@@ -22,12 +22,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     // Unlike _layoutEditor, created once up front (see the constructor) and never recreated for the
     // rest of the process - this is meant to be a persistent desktop element like a Fence, not a
-    // window opened fresh each time from the tray. "Layout Launcher" in the Widgets menu toggles its
-    // Visible state (LayoutLauncherWidget.ToggleVisible) rather than creating/disposing it.
+    // window opened fresh each time from the tray. No tray item of its own toggles its Visible state
+    // any more - only Widget Manager's own Layout Launcher row does (LayoutLauncherWidget.
+    // ToggleVisible), same "created once, never disposed" object either way.
     private readonly LayoutLauncherWidget _layoutLauncher;
 
     // Same "created once up front, never recreated" reasoning as _layoutLauncher above - toggled via
-    // the Widgets menu's own "Widget Manager" item rather than opened fresh each time.
+    // the tray's own top-level "Widget Manager" item rather than opened fresh each time.
     private readonly WidgetManagerWidget _widgetManager;
 
     public TrayApplicationContext()
@@ -59,7 +60,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ShowImageMargin = false,
             ShowCheckMargin = true,
         };
-        menu.Items.Add("New Fence", null, OnNewFence);
+        // At the top since it's the entry point into everything else this menu used to list
+        // directly (New Fence/Manage Snap Lines.../Layout Launcher toggle all moved onto Widget
+        // Manager's own rows instead - see WidgetManagerWidget). CheckOnClick would fight
+        // ToggleVisible's own idea of the current state (it flips Checked itself before the Click
+        // handler runs, same as startupItem/hiddenFilesItem below already avoid) - toggled and
+        // reflected explicitly instead, still "read fresh every open" like those.
+        var widgetManagerItem = new ToolStripMenuItem("Widget Manager");
+        widgetManagerItem.Click += (_, _) => _widgetManager.ToggleVisible();
+        menu.Opening += (_, _) => widgetManagerItem.Checked = _widgetManager.Visible;
+        menu.Items.Add(widgetManagerItem);
         menu.Items.Add("Show/Hide All", null, OnShowHideAll);
         menu.Items.Add(new ToolStripSeparator());
         // Checked reflects the registry Run key's actual current state (see StartupManager) rather
@@ -78,32 +88,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Opening += (_, _) => hiddenFilesItem.Checked = HiddenFilesManager.IsEnabled;
         menu.Items.Add(hiddenFilesItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Manage Snap Lines...", null, OnManageSnapLines);
-        menu.Items.Add(new ToolStripSeparator());
         // Only one Recycle Bin item is allowed across every fence at once (see
         // FenceManager.HasRecycleBin) - hidden entirely once one exists anywhere, re-checked fresh
         // on every open same as the toggles above.
         var addRecycleBinItem = new ToolStripMenuItem("Add Recycle Bin", null, OnAddRecycleBin);
         menu.Opening += (_, _) => addRecycleBinItem.Visible = !_fenceManager.HasRecycleBin;
         menu.Items.Add(addRecycleBinItem);
-        menu.Items.Add(new ToolStripSeparator());
-        // Its own category for on-screen panels that stay open, currently just the launcher widget
-        // but named/grouped so a future widget has somewhere to go without another top-level entry.
-        // Layout quick-run/Save Current Layout/Manage Layouts... all live on the widget itself now
-        // (see LayoutLauncherWidget) rather than a separate tray submenu.
-        // CheckOnClick would fight ToggleVisible's own idea of the current state (it flips Checked
-        // itself before the Click handler runs, same as startupItem/hiddenFilesItem above already
-        // avoid) - toggled and reflected explicitly instead, still "read fresh every open" like those.
-        var widgetsItem = new ToolStripMenuItem("Widgets");
-        var layoutLauncherItem = new ToolStripMenuItem("Layout Launcher");
-        layoutLauncherItem.Click += (_, _) => _layoutLauncher.ToggleVisible();
-        menu.Opening += (_, _) => layoutLauncherItem.Checked = _layoutLauncher.Visible;
-        widgetsItem.DropDownItems.Add(layoutLauncherItem);
-        var widgetManagerItem = new ToolStripMenuItem("Widget Manager");
-        widgetManagerItem.Click += (_, _) => _widgetManager.ToggleVisible();
-        menu.Opening += (_, _) => widgetManagerItem.Checked = _widgetManager.Visible;
-        widgetsItem.DropDownItems.Add(widgetManagerItem);
-        menu.Items.Add(widgetsItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExit);
 
@@ -125,9 +115,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _layoutLauncher.Show();
         if (widgetManagerModel.Visible)
             _widgetManager.Show();
-    }
 
-    private void OnNewFence(object? sender, EventArgs e) => _fenceManager.CreateFence();
+        // Widget Manager's own Fences/Layout Launcher rows were painted (see its constructor's own
+        // forced RenderAndPresent) before LoadAndShowAll/Show above ran - see RefreshRowStates' own
+        // doc comment for why that leaves them showing stale "Off" without this.
+        _widgetManager.RefreshRowStates();
+    }
 
     // CheckOnClick already flipped the item's own Checked before this fires - just persist
     // whatever it now shows.
@@ -137,9 +130,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     // Doesn't force the desktop to visually pick this up - see README's Tray menu limitations.
     private void OnToggleHiddenFiles(object? sender, EventArgs e) =>
         HiddenFilesManager.SetEnabled(((ToolStripMenuItem)sender!).Checked);
-
-    private void OnManageSnapLines(object? sender, EventArgs e) =>
-        _fenceManager.SnapLines.EnterEditMode();
 
     private void OnAddRecycleBin(object? sender, EventArgs e) =>
         _fenceManager.AddRecycleBin();

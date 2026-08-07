@@ -59,6 +59,19 @@ internal abstract class LayeredWidgetForm : Form
     // engaged - right-click anywhere, or a title-bar click - see WidgetActivation's own doc comment.
     protected readonly WidgetActivation Activation = new();
 
+    /// <summary>Lets CopySettingsOverlay drive this widget's own engaged chrome (Settings button,
+    /// active-state border) as a hover-target indicator, without a real OS focus/mouse event ever
+    /// reaching it - the overlay owns all input for the duration of a pick (see FindAt's own doc
+    /// comment), so this is the only way the widget can visually read as "this is what a click would
+    /// target right now" while that's happening.</summary>
+    internal void SetPickTargetActive(bool active)
+    {
+        if (active)
+            Activation.Activate();
+        else
+            Activation.Deactivate();
+    }
+
     // Eases the render opacity toward TargetOpacity over several ticks rather than jumping there in
     // one repaint - see OpacityAnimator's own doc comment for why a plain Form.Opacity can't do this
     // for a window that pushes its own bitmap via UpdateLayeredWindow. Named RenderOpacity, not just
@@ -90,9 +103,15 @@ internal abstract class LayeredWidgetForm : Form
     // translucent-white hover tint a Fence's own icon-grid cells use (see PaintButtonHoverTint),
     // just for Settings/ChromeButton/ContentButton instead. Recomputed on every OnMouseMove/
     // OnMouseLeave (see UpdateButtonHover), repainting only on an actual change.
-    private enum HoveredButtonKind { None, Settings, Extra, Content }
+    private enum HoveredButtonKind { None, Settings, CopySettings, Extra, Content }
     private HoveredButtonKind _hoveredButtonKind = HoveredButtonKind.None;
     private int _hoveredButtonIndex = -1;
+
+    // "Copy Settings To" is icon-only (a hand-drawn paint-brush glyph, no text label - see
+    // PaintCopySettingsButton), so it needs the same tooltip affordance LayoutLauncherWidget/
+    // WidgetManagerWidget's own icon-only row buttons already needed - shown/hidden from the same
+    // UpdateButtonHover pass that already drives every base button's hover tint.
+    private readonly PaintedTooltip _copySettingsTooltip = new();
 
     // Fixed anchor a drag/resize measures against every tick, instead of trusting the OS's own
     // incrementally-proposed rect (drift/stickiness otherwise) - captured once, from GetCurrentBody,
@@ -148,6 +167,32 @@ internal abstract class LayeredWidgetForm : Form
     // one widget type (FenceManager, say) needing to know the others exist or hold a bolted-on
     // bounds-tracking property per widget type.
     private static readonly List<LayeredWidgetForm> _liveWidgets = new();
+
+    /// <summary>Which live widget (if any) screenPoint currently sits over - used by
+    /// CopySettingsOverlay for continuous hover-tracking while it's itself the topmost window on
+    /// screen, which rules out the usual WindowFromPoint+GetAncestor technique
+    /// (WindowPickerOverlay/EyedropperOverlay's own click-time approach): that would only ever see
+    /// the overlay's own handle, since nothing can be topmost above a full-screen click-catcher.
+    /// Geometric containment against each widget's own live GetWindowRect instead - no P/Invoke
+    /// beyond what NativeMethods already exposes. Known, accepted limitation: two widgets
+    /// overlapping at screenPoint aren't Z-order-resolved, just first-match in _liveWidgets' own
+    /// (insertion) order - the same kind of rare-edge-case tradeoff this app already documents
+    /// elsewhere rather than fully solving.</summary>
+    internal static LayeredWidgetForm? FindAt(Point screenPoint)
+    {
+        foreach (var widget in _liveWidgets)
+        {
+            if (!widget.Visible)
+                continue;
+            if (NativeMethods.GetWindowRect(widget.Handle, out var rect)
+                && screenPoint.X >= rect.Left && screenPoint.X < rect.Right
+                && screenPoint.Y >= rect.Top && screenPoint.Y < rect.Bottom)
+            {
+                return widget;
+            }
+        }
+        return null;
+    }
 
     protected LayeredWidgetForm(float initialOpacity, FenceManager fences)
     {
@@ -433,6 +478,52 @@ internal abstract class LayeredWidgetForm : Form
         RenderAndPresent();
     }
 
+    /// <summary>"Copy Settings To" (see CopySettingsOverlay) - applies source's own Base settings
+    /// (every IWidgetStyle property, plus HideTitle - the Form's own abstract property, not part of
+    /// IWidgetStyle, but still a Base-flyout setting) onto this widget, entirely through the Style/
+    /// HideTitle interfaces, so no downcast to any concrete model type is needed here. Deliberately
+    /// never touches position/size/title text/Visible - those are this widget's own identity/
+    /// placement, not "settings" a paint-bucket tool should overwrite.
+    ///
+    /// Additional settings (a Fence's own Hide Shortcut Names/OCD Sizing, Layout Launcher's own Rows
+    /// Shown/Always Max Rows) only come along when source is the exact same concrete widget type -
+    /// see CopyAdditionalSettingsFrom. Across different types (a fence onto Layout Launcher, say)
+    /// only the Base settings above apply.</summary>
+    internal void CopySettingsFrom(LayeredWidgetForm source)
+    {
+        Style.TintColor = source.Style.TintColor;
+        Style.TintIsExact = source.Style.TintIsExact;
+        Style.HeaderDarkness = source.Style.HeaderDarkness;
+        Style.Opacity = source.Style.Opacity;
+        Style.FullOpacityOnHover = source.Style.FullOpacityOnHover;
+        Style.TintStrength = source.Style.TintStrength;
+        Style.Margin = source.Style.Margin;
+        Style.CornerRadius = source.Style.CornerRadius;
+        Style.TitleFontSize = source.Style.TitleFontSize;
+        Style.TitleAlignment = source.Style.TitleAlignment;
+        Style.HeaderBorderMode = source.Style.HeaderBorderMode;
+        Style.LightBorder = source.Style.LightBorder;
+        HideTitle = source.HideTitle;
+
+        if (GetType() == source.GetType())
+            CopyAdditionalSettingsFrom(source);
+
+        PersistStyle();
+        RenderOpacity.SnapToTarget();
+        RenderAndPresent();
+    }
+
+    /// <summary>A subclass's own per-instance "Additional" settings (see BuildAdditionalSettingsRows)
+    /// worth carrying over during a same-type Copy Settings To - only ever called once
+    /// CopySettingsFrom has already confirmed source is the exact same concrete type as this widget,
+    /// so an override can safely access source's own private fields directly (C# privacy is
+    /// per-type, not per-instance) without an `is` cast of its own. No-op by default - Widget
+    /// Manager's own Additional flyout (Start with Windows/Show Hidden Files) is system state, not
+    /// per-instance model data, so it has nothing to copy and doesn't override this.</summary>
+    protected virtual void CopyAdditionalSettingsFrom(LayeredWidgetForm source)
+    {
+    }
+
     /// <summary>Rows specific to a subclass's own feature - shown in a flyout labeled "Additional"
     /// below "Base" (see BuildSettingsRows). Kept separate from the shared rows in BuildBaseSettingsRows
     /// rather than folded into one combined list, so a subclass with nothing of its own (Layout
@@ -646,6 +737,14 @@ internal abstract class LayeredWidgetForm : Form
         // ThemedActiveBorder is how an activated widget reads at all, so Header Border Mode only
         // replaces the plain inactive-state ThemedBorder, never this.
         var borderColor = ShowsButtons ? ThemedActiveBorder : (Style.HeaderBorderMode ? ThemedTitle : ThemedBorder);
+        // Whether this stroke should wrap the header's own top edge too, or stop short of it -
+        // ShowsButtons and Header Border Mode both legitimately want the header included (an
+        // activated widget's accent border, or Header Border Mode's own "tie every element
+        // together" scheme, both cover the whole widget). Otherwise - the plain, unengaged,
+        // Header-Border-Mode-off state - the header should only ever get a border from Light Border
+        // choosing to draw one below, not unconditionally from this stroke just because it happens
+        // to wrap the whole body shape.
+        var includeHeaderEdge = !TitleVisible || ShowsButtons || Style.HeaderBorderMode;
         using (var borderPen = new Pen(borderColor, ShowsButtons ? ActiveBorderWidth : 1f))
         {
             borderPen.LineJoin = LineJoin.Round;
@@ -656,7 +755,19 @@ internal abstract class LayeredWidgetForm : Form
             // it was getting clipped by the window's own bitmap bounds. Inset keeps the whole stroke
             // within the body itself, which needs no such margin on any edge.
             borderPen.Alignment = PenAlignment.Inset;
-            g.DrawPath(borderPen, body);
+            // Two different owned-path lifetimes here (body's own using-declared disposal vs. a
+            // fresh path scoped to just this branch), so this reuses body directly rather than
+            // assigning either into one shared `using` local, which would double-Dispose body once
+            // this method's own top-level `using var body` later runs too.
+            if (includeHeaderEdge)
+            {
+                g.DrawPath(borderPen, body);
+            }
+            else
+            {
+                using var bodyOnlyPath = RoundedRectPath.Bottom(ToWindow(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1)), cornerRadius, TitleRowHeight);
+                g.DrawPath(borderPen, bodyOnlyPath);
+            }
         }
 
         // Light Border - see IWidgetStyle.LightBorder's own doc comment - a separate stroke around
@@ -687,11 +798,17 @@ internal abstract class LayeredWidgetForm : Form
         if (ShowsButtons)
         {
             PaintSettingsButton(g, contentWidth);
+            PaintCopySettingsButton(g, contentWidth);
             PaintExtraButtons(g, contentWidth);
         }
 
         PaintList(g, contentWidth, contentHeight);
         PaintContentButtons(g, contentWidth, contentHeight);
+
+        // Last, so it sits on top of everything else this method just painted - same reasoning as
+        // every other row/button tooltip in this app.
+        _copySettingsTooltip.Paint(g, Font, SettingsMenuTooltipColor, ToWindow(new Rectangle(0, 0, contentWidth, contentHeight)),
+            Style.HeaderBorderMode ? ThemedTitle : null);
     }
 
     private void PaintSettingsButton(Graphics g, int contentWidth)
@@ -723,6 +840,67 @@ internal abstract class LayeredWidgetForm : Form
         using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             g.DrawString("Settings", Font, textBrush, buttonRect, textFormat);
         g.TextRenderingHint = previousTextHint;
+    }
+
+    private void PaintCopySettingsButton(Graphics g, int contentWidth)
+    {
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        var buttonRect = ToWindow(GetCopySettingsButtonRect(contentWidth, onLeft));
+
+        // Same opaque-backing reasoning as PaintSettingsButton's own comment.
+        using (var buttonPath = RoundedRectPath.Full(buttonRect, 6))
+        {
+            using (var buttonFill = new SolidBrush(ThemedField))
+                g.FillPath(buttonFill, buttonPath);
+            PaintHeaderBorderModeOutline(g, buttonPath);
+        }
+
+        if (_hoveredButtonKind == HoveredButtonKind.CopySettings)
+            PaintButtonHoverTint(g, buttonRect);
+
+        PaintPaintBrushGlyph(g, buttonRect);
+    }
+
+    /// <summary>"Copy Settings To" - a hand-drawn paint brush: a diagonal, round-capped handle with
+    /// a small tilted rounded-rect "head" (the ferrule/bristles) at its far end. No icon asset
+    /// library in this app (see WarningIcon's own comment), so this is drawn the same "just the
+    /// shape" way as every other glyph here (WidgetManagerWidget's own Plus/Wrench/Cog) rather than
+    /// an embedded image. Icon-only, no text label - the button is too small for "Copy Settings To"
+    /// to fit, hence the tooltip (see _copySettingsTooltip).</summary>
+    private static void PaintPaintBrushGlyph(Graphics g, Rectangle rect)
+    {
+        var cx = rect.X + rect.Width / 2f;
+        var cy = rect.Y + rect.Height / 2f;
+        var scale = Math.Min(rect.Width, rect.Height);
+
+        var previousSmoothing = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // 45-degree diagonal - the handle's own grip sits down-left, the brush head up-right.
+        const float dirX = -0.70710678f, dirY = 0.70710678f;
+        var handleHalf = scale * 0.32f;
+        var gripX = cx + dirX * handleHalf;
+        var gripY = cy + dirY * handleHalf;
+        var headX = cx - dirX * handleHalf * 0.55f;
+        var headY = cy - dirY * handleHalf * 0.55f;
+
+        using (var handlePen = new Pen(Color.WhiteSmoke, Math.Max(1.4f, scale * 0.1f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            g.DrawLine(handlePen, gripX, gripY, headX, headY);
+
+        // Brush head - a small rounded rectangle tilted onto the same diagonal as the handle, its
+        // own center pushed a bit further along the handle's own direction so it reads as the
+        // handle's continuation rather than a separate shape floating at its tip.
+        var headLength = scale * 0.42f;
+        var headWidth = scale * 0.26f;
+        var state = g.Save();
+        g.TranslateTransform(headX - dirX * headLength * 0.15f, headY - dirY * headLength * 0.15f);
+        g.RotateTransform(45f);
+        using (var headPath = RoundedRectPath.Full(new Rectangle((int)(-headLength / 2), (int)(-headWidth / 2), (int)headLength, (int)headWidth), (int)(headWidth * 0.4f)))
+        using (var headBrush = new SolidBrush(Color.WhiteSmoke))
+            g.FillPath(headBrush, headPath);
+        g.Restore(state);
+
+        g.SmoothingMode = previousSmoothing;
     }
 
     /// <summary>The same translucent-white tint a Fence's own icon-grid hover uses (see FenceForm.
@@ -778,14 +956,15 @@ internal abstract class LayeredWidgetForm : Form
     // here instead of each subclass keeping its own "which button is currently armed" field.
     private int? _armedExtraButtonIndex;
 
-    /// <summary>Chains outward from the Settings button the same way a Fence's own New/Delete buttons
-    /// do - index 0 sits immediately next to Settings, index 1 next to that, and so on. Each button
-    /// uses its own declared Width (see ChromeButton) rather than a fixed size, so a short Close
-    /// glyph and a much wider "Manage Layouts..." label can both chain correctly.</summary>
+    /// <summary>Chains outward from the Copy Settings button (itself chained off Settings - see
+    /// GetCopySettingsButtonRect) the same way a Fence's own New/Delete buttons do - index 0 sits
+    /// immediately next to Copy Settings, index 1 next to that, and so on. Each button uses its own
+    /// declared Width (see ChromeButton) rather than a fixed size, so a short Close glyph and a much
+    /// wider "Manage Layouts..." label can both chain correctly.</summary>
     protected Rectangle GetExtraButtonRect(int contentWidth, bool onLeft, int index)
     {
         var buttons = ExtraButtons;
-        var previous = GetSettingsButtonRect(contentWidth, onLeft);
+        var previous = GetCopySettingsButtonRect(contentWidth, onLeft);
         var current = previous;
         for (var i = 0; i <= index; i++)
         {
@@ -813,6 +992,43 @@ internal abstract class LayeredWidgetForm : Form
         }
         index = -1;
         return false;
+    }
+
+    // Same arm-then-fire pattern as _armedExtraButtonIndex below, for the Copy Settings button - a
+    // bool rather than an index since there's only ever the one button, unlike ExtraButtons' own
+    // per-subclass list.
+    private bool _armedCopySettingsButton;
+
+    /// <summary>Arms the Copy Settings button if contentPoint lands on it - a subclass's own
+    /// OnMouseDown calls this right after its own Settings-button check, before TryArmExtraButton
+    /// (see each subclass's own OnMouseDown for the exact ordering).</summary>
+    protected bool TryArmCopySettingsButton(Point contentPoint)
+    {
+        var contentWidth = GetContentSize().Width;
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        if (!GetCopySettingsButtonRect(contentWidth, onLeft).Contains(contentPoint))
+            return false;
+        _armedCopySettingsButton = true;
+        return true;
+    }
+
+    /// <summary>Fires the Copy Settings button if it was armed (see TryArmCopySettingsButton) and the
+    /// mouse is still over it on release - opens the cross-widget picker overlay (see
+    /// CopySettingsOverlay), with this widget as the copy source.</summary>
+    protected void FireArmedCopySettingsButton(Point contentPoint)
+    {
+        if (!_armedCopySettingsButton)
+            return;
+        _armedCopySettingsButton = false;
+
+        var contentWidth = GetContentSize().Width;
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        if (!GetCopySettingsButtonRect(contentWidth, onLeft).Contains(contentPoint))
+            return;
+
+        var overlay = new CopySettingsOverlay(this);
+        overlay.FormClosed += (_, _) => overlay.Dispose();
+        overlay.Show();
     }
 
     /// <summary>Arms whichever extra button contentPoint lands on, if any - a subclass's own
@@ -1533,6 +1749,20 @@ internal abstract class LayeredWidgetForm : Form
             : new Rectangle(contentWidth - SettingsButtonWidth, y, SettingsButtonWidth, SettingsButtonHeight);
     }
 
+    protected virtual int CopySettingsButtonWidth => 22;
+
+    /// <summary>"Copy Settings To" - chains immediately outward from the Settings button itself, the
+    /// same way GetExtraButtonRect's own per-button math chains outward from index 0 (see that
+    /// method's own comment) - which now starts from here instead of straight off Settings, so every
+    /// subclass's own ExtraButtons (a Fence's Duplicate/Delete, Layout Launcher/Widget Manager's "×")
+    /// shift outward by one slot automatically, with no changes needed in any of them.</summary>
+    protected Rectangle GetCopySettingsButtonRect(int contentWidth, bool onLeft)
+    {
+        var settings = GetSettingsButtonRect(contentWidth, onLeft);
+        var x = onLeft ? settings.Right + SettingsButtonGap : settings.X - SettingsButtonGap - CopySettingsButtonWidth;
+        return new Rectangle(x, settings.Y, CopySettingsButtonWidth, SettingsButtonHeight);
+    }
+
     /// <summary>Measures the actual options menu (BuildSettingsRows) against the screen this window
     /// is currently on, using the button's default top-right placement as the anchor - i.e. "would
     /// the menu fit opening to the right of a right-corner button".</summary>
@@ -1614,12 +1844,15 @@ internal abstract class LayeredWidgetForm : Form
     }
 
     /// <summary>Recomputes which button (if any) contentPoint sits over, repainting only on an actual
-    /// change - null means "not hovering the client area at all" (see OnMouseLeave). Settings/Extra
-    /// take priority over Content since they can visually overlap in a very small/narrow widget.</summary>
+    /// change - null means "not hovering the client area at all" (see OnMouseLeave). Settings/
+    /// CopySettings/Extra take priority over Content since they can visually overlap in a very
+    /// small/narrow widget. Also drives _copySettingsTooltip - the only base-owned button that's
+    /// icon-only (see PaintPaintBrushGlyph's own comment), so it's the only one that needs one.</summary>
     private void UpdateButtonHover(Point? contentPoint)
     {
         var kind = HoveredButtonKind.None;
         var index = -1;
+        Rectangle copySettingsRect = default;
 
         if (contentPoint is Point point)
         {
@@ -1629,6 +1862,10 @@ internal abstract class LayeredWidgetForm : Form
             if (ShowsButtons && GetSettingsButtonRect(size.Width, onLeft).Contains(point))
             {
                 kind = HoveredButtonKind.Settings;
+            }
+            else if (ShowsButtons && (copySettingsRect = GetCopySettingsButtonRect(size.Width, onLeft)).Contains(point))
+            {
+                kind = HoveredButtonKind.CopySettings;
             }
             else if (ShowsButtons && TryGetExtraButtonAt(size.Width, onLeft, point, out var extraIndex))
             {
@@ -1642,7 +1879,11 @@ internal abstract class LayeredWidgetForm : Form
             }
         }
 
-        if (kind == _hoveredButtonKind && index == _hoveredButtonIndex)
+        var tooltipChanged = kind == HoveredButtonKind.CopySettings
+            ? _copySettingsTooltip.Show("Copy Settings To", ToWindow(copySettingsRect))
+            : _copySettingsTooltip.Hide();
+
+        if (kind == _hoveredButtonKind && index == _hoveredButtonIndex && !tooltipChanged)
             return;
 
         _hoveredButtonKind = kind;
@@ -1726,7 +1967,11 @@ internal abstract class LayeredWidgetForm : Form
             return null;
 
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
-        var regions = new List<Rectangle> { ToWindow(GetSettingsButtonRect(contentWidth, onLeft)) };
+        var regions = new List<Rectangle>
+        {
+            ToWindow(GetSettingsButtonRect(contentWidth, onLeft)),
+            ToWindow(GetCopySettingsButtonRect(contentWidth, onLeft)),
+        };
 
         var buttons = ExtraButtons;
         for (var i = 0; i < buttons.Count; i++)

@@ -56,7 +56,7 @@ public sealed class FenceManager : IDisposable
         var model = new FenceModel
         {
             Name = $"Fence {_models.Count + 1}",
-            Bounds = NextDefaultBounds(),
+            Bounds = CenteredBounds(),
         };
         _models.Add(model);
         ShowFence(model);
@@ -92,6 +92,7 @@ public sealed class FenceManager : IDisposable
             TitleFontSize = source.TitleFontSize,
             TitleAlignment = source.TitleAlignment,
             HeaderBorderMode = source.HeaderBorderMode,
+            LightBorder = source.LightBorder,
         };
         _models.Add(model);
         ShowFence(model);
@@ -391,12 +392,28 @@ public sealed class FenceManager : IDisposable
             form.SetVisible(visible);
     }
 
+    private static readonly Size DefaultFenceSize = new(240, 200);
+
     private Rectangle NextDefaultBounds(Size? size = null)
     {
         var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
         var offset = (_forms.Count % 8) * 24;
-        var resolvedSize = size ?? new Size(240, 200);
+        var resolvedSize = size ?? DefaultFenceSize;
         return new Rectangle(workArea.Left + 80 + offset, workArea.Top + 80 + offset, resolvedSize.Width, resolvedSize.Height);
+    }
+
+    /// <summary>Where a brand-new fence (CreateFence - "Add Fence"/what used to be the tray's own
+    /// "New Fence") starts out - centered on the primary monitor's working area, rather than
+    /// NextDefaultBounds' own cascading top-left corner. CreateFenceLike/AddRecycleBin still use
+    /// NextDefaultBounds - a duplicate cascading near where you started, and the one-off Recycle Bin
+    /// singleton, don't call for landing dead center the same way a plain new fence does.</summary>
+    private static Rectangle CenteredBounds()
+    {
+        var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        return new Rectangle(
+            workArea.Left + (workArea.Width - DefaultFenceSize.Width) / 2,
+            workArea.Top + (workArea.Height - DefaultFenceSize.Height) / 2,
+            DefaultFenceSize.Width, DefaultFenceSize.Height);
     }
 
     private void ShowFence(FenceModel model)

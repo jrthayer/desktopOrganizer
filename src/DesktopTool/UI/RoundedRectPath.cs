@@ -45,4 +45,27 @@ internal static class RoundedRectPath
         path.CloseFigure();
         return path;
     }
+
+    /// <summary>The mirror of Top, for stroking rather than filling: rounded on the bottom two
+    /// corners only, with NO top edge at all (not closed back across the top the way Full/Top both
+    /// are) - its left/right edges start at topInset rather than bounds.Y. For a widget's own body
+    /// border that needs to stop short of a separately-bordered header instead of implicitly
+    /// wrapping it too - see LayeredWidgetForm.PaintChrome's own body-border stroke.</summary>
+    public static GraphicsPath Bottom(Rectangle bounds, int radius, int topInset)
+    {
+        var path = new GraphicsPath();
+        if (radius <= 0)
+        {
+            path.AddLine(bounds.X, bounds.Y + topInset, bounds.X, bounds.Bottom);
+            path.AddLine(bounds.X, bounds.Bottom, bounds.Right, bounds.Bottom);
+            path.AddLine(bounds.Right, bounds.Bottom, bounds.Right, bounds.Y + topInset);
+            return path;
+        }
+        int d = radius * 2;
+        path.AddLine(bounds.X, bounds.Y + topInset, bounds.X, bounds.Bottom - radius);
+        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 180, -90);
+        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 90, -90);
+        path.AddLine(bounds.Right, bounds.Bottom - radius, bounds.Right, bounds.Y + topInset);
+        return path;
+    }
 }

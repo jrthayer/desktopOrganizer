@@ -40,8 +40,9 @@ programs and place each one's window on a chosen monitor and position.
 **Save Current Layout** builds a profile straight from whatever's
 currently open and where it's sitting, instead of picking each program by
 hand through **Manage Layouts...**. Both live on the **Layout Launcher**
-widget (tray menu > Widgets > Layout Launcher), which also lists every
-saved layout for one-click run.
+widget, which also lists every saved layout for one-click run. Toggled via
+its own row on the [Widget Manager](#widget-manager) widget (tray menu >
+Widget Manager).
 
 See [`src/DesktopTool/Features/Layouts/README.md`](src/DesktopTool/Features/Layouts/README.md)
 for the full feature writeup, the layout entry model, and known limitations.
@@ -58,9 +59,9 @@ deleting by hand via Manage Layouts if you notice it.
 ### Widget Manager
 
 A persistent on-screen panel listing the app's three toggleable widgets -
-Fences, Snap Lines, and Layout Launcher - each with an on/off switch plus
-a row-specific action button (**Add Fence** / **Edit** / **Edit
-Layouts**), reachable via tray menu > Widgets > Widget Manager.
+Fences, Layout Launcher, and Snap Lines - each with an on/off switch plus
+a row-specific action button (**Add Fence** / **Edit Layouts** / **Edit**),
+reachable via the tray menu's own top-level **Widget Manager** item.
 
 See [`src/DesktopTool/Features/WidgetManager/README.md`](src/DesktopTool/Features/WidgetManager/README.md)
 for the full feature writeup and known limitations. All of its code lives
@@ -89,7 +90,11 @@ All of its code lives under [`src/DesktopTool/UI`](src/DesktopTool/UI).
 
 ## Tray menu
 
-- **New Fence** — creates a new, empty fence.
+- **Widget Manager** — at the top, since it's the entry point into most of
+  what used to be separate tray items (see [Widget Manager](#widget-manager)
+  above) — creating a fence, editing snap lines, and showing/hiding the
+  Layout Launcher all live on its own rows instead now. Toggles the Widget
+  Manager widget itself.
 - **Show/Hide All** — toggles every fence's visibility at once; also
   triggered by double-clicking the tray icon.
 - **Start with Windows** — adds (or removes) Desktop Tool from your user's
@@ -103,18 +108,10 @@ All of its code lives under [`src/DesktopTool/UI`](src/DesktopTool/UI).
   turning it on reveals every hidden file on your machine, not just fenced
   ones, and the checkbox always reflects its actual current state even if
   changed from Explorer's own Folder Options instead.
-- **Manage Snap Lines...** — opens the snap-line editor (see
-  [Fences: Snap lines](src/DesktopTool/Features/Fences/README.md#snap-lines)).
 - **Add Recycle Bin** — adds the synthetic Recycle Bin fence item (see
   [Fences: Recycle Bin](src/DesktopTool/Features/Fences/README.md#recycle-bin)) to a
   new, dedicated fence. Hidden once one already exists anywhere, since only
   one is allowed.
-- **Widgets > Layout Launcher** — toggles the Layout Launcher widget, a
-  persistent on-screen panel that lists every saved layout (click to run
-  one) plus **Save Current Layout** and **Manage Layouts...** (see
-  [Layouts](#layouts) above).
-- **Widgets > Widget Manager** — toggles the Widget Manager widget (see
-  [Widget Manager](#widget-manager) above).
 
 **Limitations:** the Show Hidden Files setting itself takes effect
 immediately, but the desktop's own icon view doesn't visibly pick it up

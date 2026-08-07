@@ -152,6 +152,19 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
         }
     }
 
+    /// <summary>Repaints the row list against Fences/Layout Launcher's own live current state -
+    /// needed once, right after TrayApplicationContext finishes constructing every widget and
+    /// calling FenceManager.LoadAndShowAll/LayoutLauncherWidget.Show. This widget's own constructor
+    /// already forces one RenderAndPresent to create its handle, but that runs before those two
+    /// calls - at that point no fence has been shown yet and the Layout Launcher widget hasn't been
+    /// shown either, so Fences.AnyVisible/layoutLauncher.Visible both read false and get baked into
+    /// the very first pushed bitmap. Nothing else repaints this widget afterward on its own (a
+    /// layered window's visible pixels are exactly whatever was last pushed via
+    /// UpdateLayeredWindow, not re-derived from a WM_PAINT the OS might send), so without this call
+    /// the Fences/Layout Launcher rows would keep showing stale "Off" until some unrelated repaint
+    /// (hovering a row, say) happened to catch them up.</summary>
+    public void RefreshRowStates() => RenderAndPresent();
+
     /// <summary>Shows (persisting Visible) if currently hidden, hides (persisting Visible) if
     /// currently shown - what the tray's "Widget Manager" checkbox toggles.</summary>
     public void ToggleVisible()
@@ -250,6 +263,7 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
         var contentPoint = ToContent(windowPoint);
         var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
         if (ShowsButtons && (GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
+            || GetCopySettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
             || TryGetExtraButtonAt(contentWidth, onLeft, contentPoint, out _)))
             return HTCLIENT;
 
@@ -296,6 +310,8 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
             _settingsButtonArmed = true;
             return;
         }
+        if (ShowsButtons && TryArmCopySettingsButton(contentPoint))
+            return;
         if (ShowsButtons && TryArmExtraButton(contentPoint))
             return;
         if (TryHandleListMouseDown(contentPoint))
@@ -350,6 +366,7 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
             return;
         }
 
+        FireArmedCopySettingsButton(contentPoint);
         FireArmedExtraButton(contentPoint);
         EndListScrollDrag();
 
@@ -394,10 +411,39 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
     // Header Darkness, Opacity, Full Opacity When Active, Tint Strength, Margin, Corner Radius, Font
     // Size, Align, Header Border Mode) is mutated directly against Style (== _model) by the base
     // itself now - this widget doesn't need a dedicated SetHeaderDarkness/SetOpacity/etc. override of
-    // its own for any of them, just this one persistence hook. No BuildAdditionalSettingsRows
-    // override either - unlike Layout Launcher's Rows Shown/Always Max Rows, there's nothing about a
-    // fixed, always-three-row list worth exposing as its own setting.
+    // its own for any of them, just this one persistence hook.
     protected override void PersistStyle() => Persist();
+
+    private const int CmdToggleStartWithWindows = 1;
+    private const int CmdToggleShowHiddenFiles = 2;
+
+    /// <summary>Start with Windows/Show Hidden Files - the same two system-level toggles the tray
+    /// menu itself still shows, mirrored here now that Widget Manager is the entry point for most of
+    /// what used to live only in the tray (see TrayApplicationContext). Checked reads
+    /// StartupManager.IsEnabled/HiddenFilesManager.IsEnabled fresh on every open, same as the tray's
+    /// own items - both are system state Desktop Tool doesn't own, so a change made outside this menu
+    /// (or the tray's own copy of these two) is never left showing stale here either.</summary>
+    protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => new List<DropdownMenu.Row>
+    {
+        new(CmdToggleStartWithWindows, "Start with Windows", HasCheckbox: true, IsChecked: () => StartupManager.IsEnabled),
+        new(CmdToggleShowHiddenFiles, "Show Hidden Files", HasCheckbox: true, IsChecked: () => HiddenFilesManager.IsEnabled),
+    };
+
+    protected override void HandleSettingsCommand(int id)
+    {
+        switch (id)
+        {
+            case CmdToggleStartWithWindows:
+                StartupManager.SetEnabled(!StartupManager.IsEnabled);
+                break;
+            case CmdToggleShowHiddenFiles:
+                HiddenFilesManager.SetEnabled(!HiddenFilesManager.IsEnabled);
+                break;
+            default:
+                base.HandleSettingsCommand(id);
+                break;
+        }
+    }
 
     protected override Rectangle GetListArea(int contentWidth, int contentHeight)
     {
@@ -594,7 +640,7 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
         g.TextRenderingHint = previousTextHint;
 
         PaintRowButton(g, GetRowButtonRect(rowRect), Rows[index].ButtonIcon);
-        PaintRowSwitch(g, GetRowSwitchRect(rowRect), IsRowOn(index));
+        PaintRowSwitch(g, GetRowSwitchRect(rowRect), IsRowOn(index), rowBackground);
     }
 
     /// <summary>Dispatches to the row's own icon glyph - transparent, no button-shaped fill of its
@@ -672,16 +718,17 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
     /// reuse (every other checkbox-shaped control here, DropdownMenu's own HasCheckbox rows
     /// included, is a plain checkbox, not a switch), so this is a new glyph in the same "no icon
     /// asset library, just draw the shape" style as WarningIcon/LayoutLauncherWidget's own
-    /// PaintCopyGlyph/PaintDeleteGlyph. Filled with the widget's own live Accent color when on (the
-    /// same color a checked swatch ring/slider fill/thumb already use elsewhere in this app), just
-    /// outlined in ThemedCheckboxBorder when off - "On"/"Off" text, always WhiteSmoke regardless of
-    /// fill so it stays legible against Accent too, says which either way.</summary>
-    private void PaintRowSwitch(Graphics g, Rectangle rect, bool on)
+    /// PaintCopyGlyph/PaintDeleteGlyph. On is a solid white pill with its "On" text punched out in
+    /// the row's own background color (rowBackground - the same alternating ThemedListRow/
+    /// ThemedListRowDark fill the row itself sits on), so the label reads as a cutout rather than
+    /// printed text sitting on top; off stays outlined only, in ThemedCheckboxBorder, with plain
+    /// WhiteSmoke text - unlike on, off has no fill of its own for the label to contrast against.</summary>
+    private void PaintRowSwitch(Graphics g, Rectangle rect, bool on, Color rowBackground)
     {
         using var path = RoundedRectPath.Full(rect, rect.Height / 2);
         if (on)
         {
-            using var fill = new SolidBrush(Accent);
+            using var fill = new SolidBrush(Color.White);
             g.FillPath(fill, path);
         }
         else
@@ -692,7 +739,7 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
 
         var previousTextHint = g.TextRenderingHint;
         g.TextRenderingHint = TextRenderingHint.AntiAlias;
-        using (var textBrush = new SolidBrush(Color.WhiteSmoke))
+        using (var textBrush = new SolidBrush(on ? rowBackground : Color.WhiteSmoke))
         using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             g.DrawString(on ? "On" : "Off", SwitchFont, textBrush, rect, textFormat);
         g.TextRenderingHint = previousTextHint;

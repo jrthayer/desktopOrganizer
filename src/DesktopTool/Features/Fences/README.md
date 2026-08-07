@@ -4,8 +4,10 @@ Desktop Tool's original feature: draggable, resizable, translucent "fence"
 regions (Stardock Fences-style) that group desktop icons. All of this
 feature's code lives under this folder — `Fences/` for the model/manager
 layer, `Fences/UI/` for its windows and controls, `Fences/Native/` for the
-Win32 interop it's built on. Entry points into it (the tray menu items that
-create/manage fences) live in the app-wide [`TrayApplicationContext`](../../TrayApplicationContext.cs)
+Win32 interop it's built on. Entry points into it (Show/Hide All and Add
+Recycle Bin in the tray menu; everything else - creating a fence, editing
+snap lines - lives on [Widget Manager](../WidgetManager/README.md)'s own
+rows instead) live in the app-wide [`TrayApplicationContext`](../../TrayApplicationContext.cs)
 — see the base [README](../../../../README.md) for those.
 
 ## Fences
@@ -96,7 +98,8 @@ Fences' or a design tool's own alignment guides:
   same time hides the fence-edge snapping for that drag, leaving just your
   custom lines active, if a screen full of fences is making snapping feel
   too eager.
-- **Manage Snap Lines...** (tray menu) opens an edit overlay: click and
+- **Manage Snap Lines...** (Snap Lines' own **Edit** button on
+  [Widget Manager](../WidgetManager/README.md)) opens an edit overlay: click and
   drag directly on a line to move it, or use the corner box to add a new
   one, set its orientation, position (typed in directly, or relative to a
   screen edge via the From Top/Bottom/Left/Right dropdown), and which
