@@ -210,9 +210,8 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             _model.Height = rect.Bottom - rect.Top - TopBand - BottomBand;
             Persist();
 
-            // A manual resize (or even just a move, harmlessly) can leave the body a height Rows
-            // Shown no longer implies, without ever touching Rows Shown itself - see SyncRowsShownToMax's
-            // own comment on why this always re-applies rather than only reacting to a value change.
+            // See SyncRowsShownToMax's own comment - a no-op in practice here since a drag never
+            // changes the saved-layout count, kept only for consistency with its other call sites.
             SyncRowsShownToMax();
         }
 
@@ -426,7 +425,8 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
                 IsEnabled: () => !_model.AlwaysMaxRows),
             new(CmdToggleAlwaysMaxRows, "Always Max Rows", HasCheckbox: true,
                 IsChecked: () => _model.AlwaysMaxRows,
-                Tooltip: "Rows Shown always tracks the current number of saved layouts"),
+                Tooltip: "Rows Shown always tracks the current number of saved layouts - the list "
+                    + "grows/shrinks with it, without resizing the widget itself"),
         };
     }
 
@@ -468,22 +468,24 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     /// instead of the list's own remaining space.</summary>
     private int HeightForRows(int rows) => NonListOverhead(_model.Width) + rows * ListRowHeight;
 
-    /// <summary>Keeps Rows Shown, and the widget's own actual size, pinned to the current saved-layout
-    /// count while AlwaysMaxRows is on - a no-op otherwise. Unlike SetRowsShown, this always
-    /// re-applies the height even when RowsShown's own value didn't change, since the widget's actual
-    /// size can drift away from what RowsShown implies without RowsShown itself ever changing - a
-    /// manual drag-resize (see OnDragEnd's own call to this) moves the window directly, bypassing
-    /// RowsShown entirely, which SetRowsShown's early-exit-when-unchanged guard would otherwise leave
-    /// uncorrected. Called once when the toggle is first turned on, again anywhere this widget itself
+    /// <summary>Keeps Rows Shown pinned to the current saved-layout count while AlwaysMaxRows is on -
+    /// a no-op otherwise. Unlike SetRowsShown, this only ever touches GetListArea's own row cap, not
+    /// the widget's actual body size (see SetRowsShown's own doc comment for why that resize exists
+    /// for a manual stepper change but not for this) - the list container grows/shrinks with the
+    /// saved-layout count, scrolling if the body isn't tall enough for all of them and leaving blank
+    /// space below it if the body is taller than it needs, same as GetListArea's own doc comment
+    /// already describes for a widget whose body just happens to be a different height than RowsShown
+    /// implies. Called once when the toggle is first turned on, again anywhere this widget itself
     /// adds/removes a layout (Save Current Layout, a row's own Copy/Delete), and after every drag
-    /// (move or resize) ends.</summary>
+    /// (move or resize) ends - harmless in the last case since a drag never actually changes the
+    /// saved-layout count, kept only so nothing needs to reason about whether it might.</summary>
     private void SyncRowsShownToMax()
     {
         if (!_model.AlwaysMaxRows)
             return;
         _model.RowsShown = Math.Max(1, ListRowCount);
         Persist();
-        SetBodyHeight(HeightForRows(_model.RowsShown));
+        RenderAndPresent();
     }
 
     /// <summary>Sets the widget's own persisted+actual body height directly, keeping its top edge

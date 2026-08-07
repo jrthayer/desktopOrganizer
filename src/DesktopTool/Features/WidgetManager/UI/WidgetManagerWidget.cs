@@ -416,15 +416,29 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
 
     private const int CmdToggleStartWithWindows = 1;
     private const int CmdToggleShowHiddenFiles = 2;
+    private const int CmdToggleAlwaysMaxRows = 3;
 
-    /// <summary>Start with Windows/Show Hidden Files - the same two system-level toggles the tray
-    /// menu itself still shows, mirrored here now that Widget Manager is the entry point for most of
-    /// what used to live only in the tray (see TrayApplicationContext). Checked reads
+    /// <summary>Rows Shown/Always Max Rows first - same stepper-plus-checkbox pair as
+    /// LayoutLauncherWidget's own additional rows (see its own doc comment for why a stepper rather
+    /// than a checkbox), just capped at RowCountFixed instead of a variable saved-profile count -
+    /// then Start with Windows/Show Hidden Files, the same two system-level toggles the tray menu
+    /// itself still shows, mirrored here now that Widget Manager is the entry point for most of what
+    /// used to live only in the tray (see TrayApplicationContext). Checked reads
     /// StartupManager.IsEnabled/HiddenFilesManager.IsEnabled fresh on every open, same as the tray's
     /// own items - both are system state Desktop Tool doesn't own, so a change made outside this menu
     /// (or the tray's own copy of these two) is never left showing stale here either.</summary>
     protected override IReadOnlyList<DropdownMenu.Row>? BuildAdditionalSettingsRows() => new List<DropdownMenu.Row>
     {
+        new(0, "Rows Shown", IsHeader: true),
+        new(0, string.Empty, IsStepper: true,
+            StepperValue: () => _model.RowsShown,
+            OnStepperChange: rows => SetRowsShown(Math.Clamp(rows, 1, RowCountFixed)),
+            StepperMin: 1, StepperMax: RowCountFixed, StepperStep: 1, StepperSuffix: "",
+            IsEnabled: () => !_model.AlwaysMaxRows),
+        new(CmdToggleAlwaysMaxRows, "Always Max Rows", HasCheckbox: true,
+            IsChecked: () => _model.AlwaysMaxRows,
+            Tooltip: "Rows Shown always shows every row - the list grows to fit them without "
+                + "resizing the widget itself"),
         new(CmdToggleStartWithWindows, "Start with Windows", HasCheckbox: true, IsChecked: () => StartupManager.IsEnabled),
         new(CmdToggleShowHiddenFiles, "Show Hidden Files", HasCheckbox: true, IsChecked: () => HiddenFilesManager.IsEnabled),
     };
@@ -433,6 +447,11 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
     {
         switch (id)
         {
+            case CmdToggleAlwaysMaxRows:
+                _model.AlwaysMaxRows = !_model.AlwaysMaxRows;
+                Persist();
+                SyncRowsShownToMax();
+                break;
             case CmdToggleStartWithWindows:
                 StartupManager.SetEnabled(!StartupManager.IsEnabled);
                 break;
@@ -445,10 +464,65 @@ internal sealed class WidgetManagerWidget : LayeredWidgetForm
         }
     }
 
+    /// <summary>Applies a Rows Shown change - same "resize the widget itself by exactly a row's
+    /// worth of height" behavior as LayoutLauncherWidget.SetRowsShown (see its own doc comment for
+    /// why an absolute target height, not a delta).</summary>
+    private void SetRowsShown(int rows)
+    {
+        if (rows == _model.RowsShown)
+            return;
+        _model.RowsShown = rows;
+        Persist();
+        SetBodyHeight(HeightForRows(rows));
+    }
+
+    /// <summary>Keeps Rows Shown pinned to RowCountFixed while AlwaysMaxRows is on - a no-op
+    /// otherwise. Unlike SetRowsShown, this never resizes the widget's own body (see
+    /// LayoutLauncherWidget.SyncRowsShownToMax's own doc comment for the same distinction there) -
+    /// only meaningful right when the toggle is turned on, since this widget's own row count never
+    /// changes on its own the way a saved-layout count can.</summary>
+    private void SyncRowsShownToMax()
+    {
+        if (!_model.AlwaysMaxRows)
+            return;
+        _model.RowsShown = RowCountFixed;
+        Persist();
+        RenderAndPresent();
+    }
+
+    /// <summary>The body height that fits exactly n rows, at this widget's own fixed header/padding
+    /// overhead - same formula GetListArea itself measures against, just solved for total height.</summary>
+    private int HeightForRows(int rows) =>
+        (_model.HideTitle ? 0 : HeaderHeight) + ListVerticalPadding * 2 + rows * ListRowHeightConst;
+
+    /// <summary>Sets the widget's own persisted+actual body height directly, keeping its top edge
+    /// fixed (only the bottom edge moves) - same SetWindowPos approach as LayoutLauncherWidget's own
+    /// SetBodyHeight.</summary>
+    private void SetBodyHeight(int height)
+    {
+        var bodyX = _model.X ?? (Screen.PrimaryScreen!.WorkingArea.Width - _model.Width) / 2;
+        var bodyY = _model.Y ?? (Screen.PrimaryScreen!.WorkingArea.Height - DefaultBodyHeight) / 2;
+        var newHeight = Math.Max(1, height);
+        _model.Height = newHeight;
+        Persist();
+
+        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, bodyX - OuterMargin, bodyY - TopBand,
+            _model.Width + OuterMargin * 2, newHeight + TopBand + BottomBand,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+
+        RenderAndPresent();
+    }
+
+    /// <summary>Everything between the header and the list's own bottom padding - the list itself
+    /// never grows taller than min(RowsShown, RowCountFixed) rows (see WidgetManagerModel.RowsShown),
+    /// so a taller body than that just leaves blank space below the list rather than stretching it,
+    /// same as LayoutLauncherWidget.GetListArea's own doc comment describes for its own list.</summary>
     protected override Rectangle GetListArea(int contentWidth, int contentHeight)
     {
         var top = (_model.HideTitle ? 0 : HeaderHeight) + ListVerticalPadding;
-        var height = Math.Max(ListRowHeight, contentHeight - top - ListVerticalPadding);
+        var available = Math.Max(ListRowHeight, contentHeight - top - ListVerticalPadding);
+        var wanted = Math.Min(_model.RowsShown, RowCountFixed) * ListRowHeight;
+        var height = Math.Max(ListRowHeight, Math.Min(available, wanted));
         return new Rectangle(ListHorizontalPadding, top, contentWidth - ListHorizontalPadding * 2, height);
     }
 
