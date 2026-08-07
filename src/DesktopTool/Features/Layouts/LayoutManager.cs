@@ -49,6 +49,7 @@ public sealed class LayoutManager
     public void DeleteLayout(Guid id)
     {
         _profiles.RemoveAll(p => p.Id == id);
+        _launchErrors.Remove(id);
         Save();
     }
 
@@ -92,13 +93,44 @@ public sealed class LayoutManager
         CustomHeight = entry.CustomHeight,
     };
 
-    /// <summary>Fire-and-forget from the caller's perspective (a tray click handler) - errors from
-    /// an individual entry are already swallowed inside WindowPlacer itself (one bad program in a
-    /// layout shouldn't block the rest), so there's nothing further to catch here.</summary>
-    public Task RunLayoutAsync(Guid id)
+    /// <summary>Raised once RunLayoutAsync finishes with at least one entry that never actually
+    /// launched (see WindowPlacer.RunAsync's own doc comment) - the profile's own name plus the
+    /// program file name(s) that failed, for whoever wants to surface it (the tray's own balloon
+    /// notification, currently the only subscriber - see TrayApplicationContext).</summary>
+    public event EventHandler<(string ProfileName, IReadOnlyList<string> FailedPrograms)>? LaunchFailed;
+
+    /// <summary>The program file names that failed to launch the last time this profile was run - see
+    /// GetLaunchError. In-memory only, deliberately not persisted to disk: a stale error from a
+    /// previous session isn't meaningful once the underlying cause (a moved file, say) might already
+    /// be fixed, and there's no "last run" concept in the saved JSON to hang it off anyway.</summary>
+    private readonly Dictionary<Guid, IReadOnlyList<string>> _launchErrors = new();
+
+    /// <summary>The program file names that failed to launch the last time this profile was run, or
+    /// null if it hasn't been run this session, or its last run had no failures - for a caller that
+    /// wants to show an error indicator on the layout itself (Layout Launcher's own row - see
+    /// LayoutLauncherWidget.PaintListRow/GetRowTooltipTarget) rather than just the one-shot
+    /// LaunchFailed notification.</summary>
+    public IReadOnlyList<string>? GetLaunchError(Guid id) => _launchErrors.TryGetValue(id, out var failures) ? failures : null;
+
+    /// <summary>Fire-and-forget-safe from the caller's perspective (a tray click handler, say) -
+    /// nothing here throws; a bad entry is reported through LaunchFailed/GetLaunchError above rather
+    /// than an exception, and one bad program in a layout never blocks the rest from running.</summary>
+    public async Task RunLayoutAsync(Guid id)
     {
         var profile = _profiles.Find(p => p.Id == id);
-        return profile is null ? Task.CompletedTask : WindowPlacer.RunAsync(profile.Entries);
+        if (profile is null)
+            return;
+
+        var failures = await WindowPlacer.RunAsync(profile.Entries);
+        if (failures.Count > 0)
+        {
+            _launchErrors[id] = failures;
+            LaunchFailed?.Invoke(this, (profile.Name, failures));
+        }
+        else
+        {
+            _launchErrors.Remove(id);
+        }
     }
 
     private void Save() => _store.Save(_profiles);

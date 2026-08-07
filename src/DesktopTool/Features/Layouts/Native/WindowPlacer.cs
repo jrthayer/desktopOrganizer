@@ -148,8 +148,11 @@ internal static class WindowPlacer
     /// <summary>Launches every entry up front (not one at a time, then waits) so a layout with
     /// several slow-starting apps doesn't take launch-time times entry-count to finish, then polls
     /// all of them together until each either shows up or the shared deadline passes. An entry
-    /// that fails to launch, or whose window never appears in time, is silently skipped - one bad
-    /// entry shouldn't stop the rest of the layout from running.
+    /// that fails to launch, or whose window never appears in time, doesn't stop the rest of the
+    /// layout from running - but is no longer silently skipped either; its own program file name is
+    /// collected into the returned list so a caller can actually tell (see LayoutManager.
+    /// RunLayoutAsync's own LaunchFailed event) instead of the failure being indistinguishable from
+    /// "ran fine, just slow to place."
     ///
     /// Every entry always gets a fresh launch, never an already-running window handed to it - a
     /// layout is meant to reliably produce the same set of windows on every run, and reusing
@@ -162,10 +165,11 @@ internal static class WindowPlacer
     /// Notepad windows, say) would each independently pick "the largest matching window" and both
     /// grab the same one, leaving the other never placed. See LayoutEntry.WindowTitleHint for how
     /// ties between several unclaimed candidates are broken.</summary>
-    public static async Task RunAsync(IReadOnlyList<LayoutEntry> entries)
+    public static async Task<IReadOnlyList<string>> RunAsync(IReadOnlyList<LayoutEntry> entries)
     {
         var claimed = new HashSet<IntPtr>();
         var pending = new List<(LayoutEntry Entry, string ExeName, HashSet<IntPtr> Before)>();
+        var failures = new List<string>();
 
         // Two entries for the same exe can't be launched together: both would be polling for a
         // new window (see "pending" below), and a freshly-added entry has no reliable
@@ -216,8 +220,11 @@ internal static class WindowPlacer
             }
             catch (Win32Exception)
             {
-                // Same "file may have been moved/deleted" shrug FenceForm.OpenItem already gives -
-                // nothing to place if it never launched.
+                // Same "file may have been moved/deleted" case FenceForm.OpenItem already shrugs
+                // off - nothing to place if it never launched. Recorded now (rather than silently
+                // dropped) so the caller can actually surface it instead of a program just quietly
+                // never showing up.
+                failures.Add(Path.GetFileName(entry.ProgramPath));
                 LaunchNext(exeName);
                 return;
             }
@@ -270,6 +277,15 @@ internal static class WindowPlacer
                 LaunchNext(exeName);
             }
         }
+
+        // Whatever's still pending never got a window placed within the deadline (launched fine,
+        // but nothing matching ever showed up); whatever's still queued never even got launched at
+        // all (its predecessor for the same exe was still pending when time ran out) - both read as
+        // "didn't launch" from the caller's own perspective, same as an outright Win32Exception.
+        failures.AddRange(pending.Select(p => Path.GetFileName(p.Entry.ProgramPath)));
+        failures.AddRange(queuedEntries.Values.SelectMany(q => q).Select(entry => Path.GetFileName(entry.ProgramPath)));
+
+        return failures;
     }
 
     /// <summary>Picks one still-unclaimed window out of candidates for a single entry, and marks it

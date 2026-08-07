@@ -45,7 +45,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     // duplicate/delete it instead. Same arm-then-fire pattern as every other button on this base
     // (armed on OnMouseDown, fired on the matching OnMouseUp only if the cursor is still over the
     // same target), just local to this widget rather than a LayeredWidgetForm mechanism.
-    private enum RowAction { None, Run, Copy, Delete }
+    private enum RowAction { None, Run, Copy, Delete, Error }
     private RowAction _armedRowAction = RowAction.None;
     private int _armedRowIndex = -1;
 
@@ -605,9 +605,28 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         return true;
     }
 
+    private const int ErrorIconSize = 14;
+    private const int ErrorIconLeftPadding = 6;
+    private const int ErrorIconTextGap = 4;
+
+    /// <summary>Whether this row's own layout is currently flagged with a launch error (see
+    /// LayoutManager.GetLaunchError) - checked often enough (click routing, tooltip routing,
+    /// painting, text layout) to be worth its own one-line lookup.</summary>
+    private bool RowHasError(int index) => _manager.GetLaunchError(_manager.Profiles[index].Id) is not null;
+
+    /// <summary>The small error badge's own rect, flush against the row's left padding - only
+    /// meaningful while RowHasError(index) is true.</summary>
+    private static Rectangle GetRowErrorIconRect(Rectangle rowRect)
+    {
+        var y = rowRect.Y + (rowRect.Height - ErrorIconSize) / 2;
+        return new Rectangle(rowRect.X + ErrorIconLeftPadding, y, ErrorIconSize, ErrorIconSize);
+    }
+
     /// <summary>What clicking contentPoint would do right now - RowAction.None if it doesn't land on
-    /// a row at all. The row body counts as Run everywhere except its two buttons - clicking still
-    /// works from anywhere in the row, unlike the Run tooltip below, which is deliberately narrower.</summary>
+    /// a row at all. The row body counts as Run everywhere except its two buttons (and the error
+    /// badge, when RowHasError - clicking that jumps to the editor instead, same as Manage
+    /// Layouts...) - clicking still works from anywhere else in the row, unlike the Run tooltip
+    /// below, which is deliberately narrower.</summary>
     private (RowAction Action, int Index) GetRowActionAt(Point contentPoint)
     {
         if (!TryGetRowAt(contentPoint, out var index, out var rowRect))
@@ -618,17 +637,20 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             return (RowAction.Copy, index);
         if (deleteRect.Contains(contentPoint))
             return (RowAction.Delete, index);
+        if (RowHasError(index) && GetRowErrorIconRect(rowRect).Contains(contentPoint))
+            return (RowAction.Error, index);
         return (RowAction.Run, index);
     }
 
     /// <summary>The row's own name-label area - full reserved width (up to where the Copy button
-    /// starts), regardless of how much of it the name text actually fills. Used both for
-    /// PaintListRow's own drawing rect (so a long name still ellipsis-trims against the full
-    /// available width) and as the outer clamp for GetRowTextHitRect below.</summary>
-    private static Rectangle GetRowTextArea(Rectangle rowRect)
+    /// starts, and shifted right past the error badge when RowHasError(index)), regardless of how
+    /// much of it the name text actually fills. Used both for PaintListRow's own drawing rect (so a
+    /// long name still ellipsis-trims against the full available width) and as the outer clamp for
+    /// GetRowTextHitRect below.</summary>
+    private Rectangle GetRowTextArea(Rectangle rowRect, int index)
     {
         var (copyRect, _) = GetRowButtonRects(rowRect);
-        var x = rowRect.X + 8;
+        var x = rowRect.X + (RowHasError(index) ? ErrorIconLeftPadding + ErrorIconSize + ErrorIconTextGap : 8);
         var width = Math.Max(0, copyRect.X - 4 - x);
         return new Rectangle(x, rowRect.Y, width, rowRect.Height);
     }
@@ -638,16 +660,16 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
     /// GetRowTooltipTarget) means the glyphs themselves, not the row's own blank space around them.</summary>
     private Rectangle GetRowTextHitRect(Rectangle rowRect, int index)
     {
-        var area = GetRowTextArea(rowRect);
+        var area = GetRowTextArea(rowRect, index);
         var textWidth = TextRenderer.MeasureText(_manager.Profiles[index].Name, Font, Size.Empty,
             TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
         return new Rectangle(area.X, area.Y, Math.Min(area.Width, textWidth), area.Height);
     }
 
-    /// <summary>What the tooltip should show for contentPoint, if anything - Copy/Delete cover their
-    /// whole button same as click does, but Run only counts while actually over the name text (see
-    /// GetRowTextHitRect), not the row's own blank space, unlike GetRowActionAt's click handling
-    /// (which stays whole-row for Run).</summary>
+    /// <summary>What the tooltip should show for contentPoint, if anything - Copy/Delete/the error
+    /// badge (when present) cover their whole target the same as click does, but Run only counts
+    /// while actually over the name text (see GetRowTextHitRect), not the row's own blank space,
+    /// unlike GetRowActionAt's click handling (which stays whole-row for Run).</summary>
     private (RowAction Action, int Index, Rectangle TargetRect)? GetRowTooltipTarget(Point contentPoint)
     {
         if (!TryGetRowAt(contentPoint, out var index, out var rowRect))
@@ -658,6 +680,13 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             return (RowAction.Copy, index, copyRect);
         if (deleteRect.Contains(contentPoint))
             return (RowAction.Delete, index, deleteRect);
+
+        if (RowHasError(index))
+        {
+            var errorRect = GetRowErrorIconRect(rowRect);
+            if (errorRect.Contains(contentPoint))
+                return (RowAction.Error, index, errorRect);
+        }
 
         var textHitRect = GetRowTextHitRect(rowRect, index);
         return textHitRect.Contains(contentPoint) ? (RowAction.Run, index, textHitRect) : null;
@@ -670,6 +699,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         {
             RowAction.Copy => $"Copy \"{name}\"",
             RowAction.Delete => $"Delete \"{name}\"",
+            RowAction.Error => $"Didn't launch: {string.Join(", ", _manager.GetLaunchError(_manager.Profiles[index].Id) ?? Array.Empty<string>())}",
             _ => $"Run \"{name}\"",
         };
     }
@@ -694,12 +724,15 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
             RenderAndPresent();
     }
 
-    /// <summary>Run just launches it (fire-and-forget - see LayoutManager.RunLayoutAsync's own doc
-    /// comment on why that's fine from a plain click handler); Copy duplicates it in place (see
+    /// <summary>Run launches it and repaints once that finishes (see RunLayoutAndRepaint - a launch
+    /// failure needs a prompt repaint of its own, to show the error badge as soon as it's known, not
+    /// just whenever something else happens to trigger one); Copy duplicates it in place (see
     /// LayoutManager.DuplicateLayout); Delete confirms first, same wording/icon as LayoutEditorForm's
-    /// own DeleteSelectedProfile. Copy/Delete sync Rows Shown to the new count when AlwaysMaxRows is
-    /// on (a no-op otherwise - see SyncRowsShownToMax) and repaint either way, since the list's own
-    /// row count just changed; Run doesn't need either.</summary>
+    /// own DeleteSelectedProfile; Error (only reachable when RowHasError) jumps to the editor for
+    /// that profile, same as Manage Layouts... itself, so "what's wrong" is a click away instead of
+    /// just a tooltip. Copy/Delete sync Rows Shown to the new count when AlwaysMaxRows is on (a no-op
+    /// otherwise - see SyncRowsShownToMax) and repaint either way, since the list's own row count just
+    /// changed.</summary>
     private void FireRowAction(RowAction action, int index)
     {
         if (index < 0 || index >= _manager.Profiles.Count)
@@ -709,7 +742,7 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
         switch (action)
         {
             case RowAction.Run:
-                _ = _manager.RunLayoutAsync(profile.Id);
+                RunLayoutAndRepaint(profile.Id);
                 break;
             case RowAction.Copy:
                 _manager.DuplicateLayout(profile.Id);
@@ -726,7 +759,21 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
                     RenderAndPresent();
                 }
                 break;
+            case RowAction.Error:
+                ManageLayoutsRequested?.Invoke(this, profile.Id);
+                break;
         }
+    }
+
+    /// <summary>Fire-and-forget from FireRowAction's own perspective (same as LayoutManager.
+    /// RunLayoutAsync's own doc comment on why that's fine), just with a repaint tacked on once it
+    /// resolves - LayoutManager.GetLaunchError won't reflect this run's own result until the Task
+    /// actually finishes, so without this the row's error badge would only appear whenever some
+    /// unrelated repaint happened to follow (the next hover, say) rather than promptly.</summary>
+    private async void RunLayoutAndRepaint(Guid id)
+    {
+        await _manager.RunLayoutAsync(id);
+        RenderAndPresent();
     }
 
     /// <summary>Name text, plus Copy (duplicate) and Delete ("x") buttons at the row's own right edge -
@@ -741,18 +788,31 @@ internal sealed class LayoutLauncherWidget : LayeredWidgetForm
 
         var (copyRect, deleteRect) = GetRowButtonRects(rowRect);
 
+        if (RowHasError(index))
+            PaintErrorIcon(g, GetRowErrorIconRect(rowRect));
+
         var previousTextHint = g.TextRenderingHint;
         g.TextRenderingHint = TextRenderingHint.AntiAlias;
         using (var textBrush = new SolidBrush(Color.WhiteSmoke))
         using (var textFormat = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
         {
-            g.DrawString(_manager.Profiles[index].Name, Font, textBrush, GetRowTextArea(rowRect), textFormat);
+            g.DrawString(_manager.Profiles[index].Name, Font, textBrush, GetRowTextArea(rowRect, index), textFormat);
         }
         g.TextRenderingHint = previousTextHint;
 
         PaintCopyGlyph(g, copyRect, rowBackground);
         PaintDeleteGlyph(g, deleteRect);
     }
+
+    /// <summary>The same hand-drawn caution triangle (see WarningIcon) Manage Layouts' own profile
+    /// list already uses for a missing-monitor entry (see LayoutEditorForm.DrawProfileListItem) - a
+    /// profile reads as "has a problem" the same way in both places, rather than each inventing its
+    /// own icon. The only indicator that a layout's last run left at least one program un-launched
+    /// (see LayoutManager.GetLaunchError); hovering it shows which ones (see RowActionTooltipText),
+    /// clicking it jumps straight to the editor for that profile (see FireRowAction) instead of
+    /// running it again blind. Colored the same WhiteSmoke as the row's own name text, not
+    /// AppTheme.Warning's gold tint, so it reads as part of the row.</summary>
+    private void PaintErrorIcon(Graphics g, Rectangle rect) => WarningIcon.Paint(g, rect, Color.WhiteSmoke);
 
     /// <summary>The classic two-overlapping-squares "duplicate" glyph - same hand-drawn approach as
     /// FenceForm's own Copy Fence button (no icon asset library in this app), just scaled down to fit

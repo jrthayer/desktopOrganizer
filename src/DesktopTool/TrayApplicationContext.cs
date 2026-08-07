@@ -27,6 +27,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     public TrayApplicationContext()
     {
         _layoutManager.Load();
+        _layoutManager.LaunchFailed += OnLayoutLaunchFailed;
 
         var layoutLauncherModel = _layoutLauncherStore.Load();
         _layoutLauncher = new LayoutLauncherWidget(_layoutManager, _fenceManager, layoutLauncherModel, _layoutLauncherStore);
@@ -124,6 +125,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnAddRecycleBin(object? sender, EventArgs e) =>
         _fenceManager.AddRecycleBin();
+
+    /// <summary>The only current subscriber to LayoutManager.LaunchFailed - a balloon tip is enough
+    /// for something that isn't blocking (the rest of the layout still ran), and doesn't need its own
+    /// dialog to dismiss. Named programs, not just a generic "something failed" - see WindowPlacer.
+    /// RunAsync's own doc comment for the two ways an entry ends up here (never launched at all, or
+    /// launched but no window ever showed up in time).</summary>
+    private void OnLayoutLaunchFailed(object? sender, (string ProfileName, IReadOnlyList<string> FailedPrograms) e)
+    {
+        var programs = string.Join(", ", e.FailedPrograms);
+        _trayIcon.ShowBalloonTip(5000, $"Layout \"{e.ProfileName}\" didn't fully start",
+            $"Didn't launch: {programs}", ToolTipIcon.Warning);
+    }
 
     private void OpenLayoutEditor(Guid? initialProfileId)
     {

@@ -20,7 +20,7 @@ internal sealed class LayoutEditorForm : Form
     private readonly Button _deleteProfileButton;
 
     private readonly ListBox _entryList;
-    private readonly Label _monitorWarningBanner;
+    private readonly WarningBanner _warningBanner;
     private readonly Button _removeEntryButton;
     private readonly TextBox _programPathBox;
     private readonly ComboButton _monitorCombo;
@@ -73,6 +73,10 @@ internal sealed class LayoutEditorForm : Form
     public LayoutEditorForm(LayoutManager manager, Guid? initialProfileId = null)
     {
         _manager = manager;
+        // Layout Launcher's own row can trigger a run (and so a launch error) while this window is
+        // already open - without this, DrawProfileListItem's caution glyph would only catch up the
+        // next time something else happened to repaint the list (reselecting a profile, say).
+        _manager.LaunchFailed += OnLaunchFailed;
 
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         ShowInTaskbar = false;
@@ -109,9 +113,9 @@ internal sealed class LayoutEditorForm : Form
         var separator = new Panel { Location = new Point(206, 12), Width = 1, Height = 474, BackColor = AppTheme.Border };
 
         var entriesLabel = new Label { Text = "Programs", Location = new Point(222, 12), AutoSize = true };
-        // Shortened from the full 130px it used to occupy - see _monitorWarningBanner, which sits
+        // Shortened from the full 130px it used to occupy - see _warningBanner, which sits
         // in the reclaimed space directly below and only becomes visible when the selected profile
-        // actually has an entry to warn about. A bit shorter still than that banner's own first cut
+        // actually has something to warn about. A bit shorter still than that banner's own first cut
         // (90 vs 104) to leave room for the banner to wrap onto a second line without colliding
         // with the Select Window/Remove button row underneath.
         _entryList = CreateList(new Rectangle(222, 32, 362, 90), removable: true);
@@ -122,16 +126,19 @@ internal sealed class LayoutEditorForm : Form
                 RemoveEntryAt(index);
         };
 
-        // Yellow banner shown under the Programs list, only when the selected profile has at
-        // least one entry whose saved TargetMonitor doesn't match any currently connected display
-        // (see IsMonitorMissing) - text/visibility kept in sync by RefreshMonitorWarningBanner,
-        // called whenever the selected profile or an entry's monitor assignment could have changed.
-        // BackColor's alpha channel actually renders (Label is one of the few WinForms controls
-        // that supports a translucent BackColor out of the box), giving the tinted-not-solid look
-        // against AppTheme.Body behind it. AutoEllipsis left at its false default so a message
-        // longer than one line wraps instead of truncating with "..." - the two-line-tall Size
-        // above is sized for that wrapped case.
-        _monitorWarningBanner = new Label
+        // Yellow banner shown under the Programs list, when the selected profile has at least one
+        // entry whose saved TargetMonitor doesn't match any currently connected display (see
+        // IsMonitorMissing) and/or its last run left at least one program un-launched (see
+        // LayoutManager.GetLaunchError) - text/visibility kept in sync by RefreshWarningBanner,
+        // called whenever the selected profile, an entry's monitor assignment, or a run's outcome
+        // could have changed. Both problems show at once (one line each) rather than one hiding the
+        // other. BackColor's alpha channel actually renders (Label is one of the few WinForms
+        // controls that supports a translucent BackColor out of the box), giving the tinted-not-solid
+        // look against AppTheme.Body behind it - WarningBanner's own OnPaint relies on that same
+        // default OnPaintBackground blend, drawing only the icon and text itself. AutoEllipsis left
+        // at its false default so a message longer than one line wraps instead of truncating with
+        // "..." - the two-line-tall Size above is sized for that wrapped case.
+        _warningBanner = new WarningBanner
         {
             Location = new Point(222, 126),
             Size = new Size(362, 40),
@@ -257,7 +264,7 @@ internal sealed class LayoutEditorForm : Form
         Controls.AddRange(new Control[]
         {
             profilesLabel, _profileList, newProfileButton, _deleteProfileButton, nameLabel, _profileNameBox,
-            separator, entriesLabel, _entryList, _monitorWarningBanner, selectWindowButton, _removeEntryButton, entrySeparator,
+            separator, entriesLabel, _entryList, _warningBanner, selectWindowButton, _removeEntryButton, entrySeparator,
             pathLabel, _programPathBox, browseButton, monitorLabel, _monitorCombo, placementLabel, _placementCombo,
             _urlLabel, _urlList, _urlInputBox, _addUrlButton,
             _commandLabel, _commandList, _commandInputBox, _addCommandButton,
@@ -291,6 +298,23 @@ internal sealed class LayoutEditorForm : Form
         base.OnHandleCreated(e);
         var useDarkMode = 1;
         NativeMethods.DwmSetWindowAttribute(Handle, NativeMethods.DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDarkMode, sizeof(int));
+    }
+
+    private void OnLaunchFailed(object? sender, (string ProfileName, IReadOnlyList<string> FailedPrograms) e)
+    {
+        _profileList.Invalidate();
+        // Safe to call regardless of which profile just ran - RefreshWarningBanner only ever reads
+        // the currently selected profile's own GetLaunchError, so a run triggered elsewhere (the
+        // Layout Launcher widget, say, while this editor happens to be open) only touches the banner
+        // if that's the profile actually selected right now.
+        RefreshWarningBanner();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _manager.LaunchFailed -= OnLaunchFailed;
+        base.Dispose(disposing);
     }
 
     /// <summary>removable draws a small "x" at the right edge of every row (see
@@ -337,11 +361,13 @@ internal sealed class LayoutEditorForm : Form
         }
     }
 
-    /// <summary>Same as DrawListItem, but reserves a strip at the row's left edge for a small
-    /// caution glyph on any profile with at least one entry whose saved monitor isn't currently
-    /// connected (see IsMonitorMissing) - an instance method (needs _manager), unlike every other
-    /// draw handler here, since ProfileHasMissingMonitor has to read live profile/screen data
-    /// rather than anything baked into the list's own Items strings.</summary>
+    /// <summary>Same as DrawListItem, but reserves a strip at the row's left edge for a small caution
+    /// glyph on any profile with at least one entry whose saved monitor isn't currently connected
+    /// (see IsMonitorMissing), or whose last run left at least one program un-launched (see
+    /// LayoutManager.GetLaunchError - the same glyph Layout Launcher's own row uses, so a profile
+    /// reads as "has a problem" the same way in both places) - an instance method (needs _manager),
+    /// unlike every other draw handler here, since both checks read live profile/screen/run-result
+    /// data rather than anything baked into the list's own Items strings.</summary>
     private void DrawProfileListItem(object? sender, DrawItemEventArgs e)
     {
         var list = (ListBox)sender!;
@@ -352,12 +378,12 @@ internal sealed class LayoutEditorForm : Form
         if (e.Index < 0 || e.Index >= list.Items.Count || e.Index >= _manager.Profiles.Count)
             return;
 
+        var profile = _manager.Profiles[e.Index];
         var textRect = new Rectangle(e.Bounds.X + 4, e.Bounds.Y, e.Bounds.Width - 4, e.Bounds.Height);
-        if (ProfileHasMissingMonitor(_manager.Profiles[e.Index]))
+        if (ProfileHasMissingMonitor(profile) || _manager.GetLaunchError(profile.Id) is not null)
         {
             var iconRect = new Rectangle(e.Bounds.X + 4, e.Bounds.Y, 16, e.Bounds.Height);
-            TextRenderer.DrawText(e.Graphics, "⚠", list.Font, iconRect, AppTheme.Warning,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+            WarningIcon.Paint(e.Graphics, iconRect, AppTheme.Text);
             textRect = new Rectangle(e.Bounds.X + 22, e.Bounds.Y, e.Bounds.Width - 22, e.Bounds.Height);
         }
 
@@ -476,7 +502,7 @@ internal sealed class LayoutEditorForm : Form
         _isPopulating = false;
 
         RefreshEntryList();
-        RefreshMonitorWarningBanner();
+        RefreshWarningBanner();
     }
 
     /// <summary>True for an entry whose saved TargetMonitor was actually set (not just defaulting
@@ -484,26 +510,42 @@ internal sealed class LayoutEditorForm : Form
     /// display's DeviceName - e.g. a monitor that's since been unplugged, or a transient
     /// virtual/RDP display that was attached when the layout was captured. Shared by
     /// DrawProfileListItem's caution icon, DescribeEntry's Programs-list row text, SelectEntry's
-    /// Monitor combo, and RefreshMonitorWarningBanner - all four need to agree on exactly the same
+    /// Monitor combo, and RefreshWarningBanner - all four need to agree on exactly the same
     /// definition of "missing" or they'd tell the user conflicting things about the same entry.</summary>
     private bool IsMonitorMissing(LayoutEntry entry) =>
         !string.IsNullOrEmpty(entry.TargetMonitor) && _screens.All(s => s.DeviceName != entry.TargetMonitor);
 
     private bool ProfileHasMissingMonitor(LayoutProfile profile) => profile.Entries.Any(IsMonitorMissing);
 
-    /// <summary>Keeps _monitorWarningBanner in sync with the selected profile's current entries -
-    /// called after anything that could change which entries count as missing-monitor: selecting a
-    /// different profile, committing an entry's monitor fix, or removing/adding an entry.</summary>
-    private void RefreshMonitorWarningBanner()
+    /// <summary>Keeps _warningBanner in sync with the selected profile's current problems - missing-
+    /// monitor entries (see IsMonitorMissing) and/or the last run's launch failures (see
+    /// LayoutManager.GetLaunchError) - called after anything that could change either: selecting a
+    /// different profile, committing an entry's monitor fix, adding/removing an entry, or a run
+    /// finishing (see RunSelectedProfile/OnLaunchFailed). Both show at once, one line each, rather
+    /// than one hiding the other.</summary>
+    private void RefreshWarningBanner()
     {
-        var missingCount = _selectedProfile?.Entries.Count(IsMonitorMissing) ?? 0;
-        _monitorWarningBanner.Visible = missingCount > 0;
-        _monitorWarningBanner.Text = missingCount switch
+        if (_selectedProfile is not { } profile)
         {
-            0 => string.Empty,
-            1 => "1 program is set to a monitor that's no longer connected. Pick its correct monitor below.",
-            _ => $"{missingCount} programs are set to a monitor that's no longer connected. Pick their correct monitor below.",
-        };
+            _warningBanner.Visible = false;
+            return;
+        }
+
+        var messages = new List<string>();
+
+        var missingCount = profile.Entries.Count(IsMonitorMissing);
+        if (missingCount > 0)
+        {
+            messages.Add(missingCount == 1
+                ? "1 program is set to a monitor that's no longer connected. Pick its correct monitor below."
+                : $"{missingCount} programs are set to a monitor that's no longer connected. Pick their correct monitor below.");
+        }
+
+        if (_manager.GetLaunchError(profile.Id) is { Count: > 0 } failedPrograms)
+            messages.Add($"Didn't launch on the last run: {string.Join(", ", failedPrograms)}.");
+
+        _warningBanner.Visible = messages.Count > 0;
+        _warningBanner.Text = string.Join("\n", messages);
     }
 
     private void AddProfile()
@@ -700,7 +742,7 @@ internal sealed class LayoutEditorForm : Form
             profile.Entries.Add(entry);
             _manager.UpdateLayout(profile);
             RefreshEntryList();
-            RefreshMonitorWarningBanner();
+            RefreshWarningBanner();
             _entryList.SelectedIndex = profile.Entries.Count - 1;
             _runButton.Enabled = true;
         };
@@ -718,7 +760,7 @@ internal sealed class LayoutEditorForm : Form
         profile.Entries.RemoveAt(index);
         _manager.UpdateLayout(profile);
         RefreshEntryList();
-        RefreshMonitorWarningBanner();
+        RefreshWarningBanner();
         _profileList.Invalidate();
         _runButton.Enabled = profile.Entries.Count > 0;
     }
@@ -856,7 +898,7 @@ internal sealed class LayoutEditorForm : Form
         _entryList.Items[index] = DescribeEntry(entry);
         _isPopulating = false;
 
-        RefreshMonitorWarningBanner();
+        RefreshWarningBanner();
         _profileList.Invalidate();
     }
 
@@ -873,6 +915,13 @@ internal sealed class LayoutEditorForm : Form
         finally
         {
             _runButton.Enabled = true;
+            // Whether this run left a launch error behind (see LayoutManager.GetLaunchError) or
+            // cleared one from a previous attempt, DrawProfileListItem's own caution glyph and
+            // _warningBanner both need to catch up - nothing else after a Run click would otherwise
+            // trigger either (OnLaunchFailed only fires on failure, not on a clean run that clears a
+            // previous one).
+            _profileList.Invalidate();
+            RefreshWarningBanner();
         }
     }
 
@@ -929,7 +978,7 @@ internal sealed class LayoutEditorForm : Form
 
             // Unlike base.OnPaint (which paints a transparent background by compositing against
             // the parent - the same SupportsTransparentBackColor behavior Label gets for free, see
-            // _monitorWarningBanner's own comment), this override draws nothing at all unless told
+            // _warningBanner's own comment), this override draws nothing at all unless told
             // to - skip this fill and whatever was rendered here last (another control's text,
             // stale double-buffer content) stays showing through underneath the glyph/text drawn
             // below instead of being cleared first.
@@ -950,6 +999,27 @@ internal sealed class LayoutEditorForm : Form
             var textRect = new Rectangle(boxRect.Right + 4, 0, Math.Max(0, Width - boxRect.Right - 4), Height);
             TextRenderer.DrawText(e.Graphics, Text, Font, textRect, AppTheme.DisabledText,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    /// <summary>The yellow problem-banner Label (_warningBanner) - draws WarningIcon (the same
+    /// hand-drawn caution triangle used by DrawProfileListItem and Layout Launcher's own row) at the
+    /// left edge before the text, so this reads as the same kind of warning as those rather than
+    /// plain unmarked text. Only overrides OnPaint, not OnPaintBackground - the base Label already
+    /// blends BackColor's alpha channel against whatever's behind it there (see _warningBanner's own
+    /// comment), so this only needs to add the icon and lay the text out in the space left over.</summary>
+    private sealed class WarningBanner : Label
+    {
+        private const int IconSize = 18;
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var iconRect = new Rectangle(Padding.Left, (Height - IconSize) / 2, IconSize, IconSize);
+            WarningIcon.Paint(e.Graphics, iconRect, ForeColor);
+
+            var textRect = new Rectangle(iconRect.Right + 6, 0, Math.Max(0, Width - iconRect.Right - 6 - Padding.Right), Height);
+            TextRenderer.DrawText(e.Graphics, Text, Font, textRect, ForeColor,
+                TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
     }
 }
