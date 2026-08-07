@@ -5,19 +5,18 @@ namespace DesktopTool.Features.Layouts;
 /// <summary>Persisted state for the on-screen Layout Launcher widget (see
 /// UI.LayoutLauncherWidget) - the same per-element styling knobs FenceModel carries for a fence
 /// (TintColor/HeaderDarkness/Opacity/FullOpacityOnHover/TintStrength/Margin - see IWidgetStyle),
-/// plus this widget's own position/title/visibility. Unlike FenceModel there's no Id or Files list -
-/// only one of these ever exists, so LayoutLauncherStore persists a single object rather than a
-/// collection the way FenceStore/LayoutStore do. Height is intentionally absent - see
-/// LayoutLauncherWidget's own UpdateContentSize, which always derives it fresh from the current
-/// layout count instead.</summary>
+/// plus this widget's own position/size/title/visibility. Unlike FenceModel there's no Id or Files
+/// list - only one of these ever exists, so LayoutLauncherStore persists a single object rather than
+/// a collection the way FenceStore/LayoutStore do.</summary>
 public sealed class LayoutLauncherModel : IWidgetStyle
 {
-    /// <summary>Null until the widget has actually been moved once - see LayoutLauncherWidget's
-    /// constructor, which centers on the primary screen instead of guessing a fixed default X/Y
-    /// that might not exist on every monitor layout.</summary>
+    /// <summary>Null until the widget has actually been moved/resized once - see
+    /// LayoutLauncherWidget's own CreateParams, which centers on the primary screen at a default size
+    /// instead of guessing a fixed default that might not exist on every monitor layout.</summary>
     public int? X { get; set; }
     public int? Y { get; set; }
     public int Width { get; set; } = 280;
+    public int? Height { get; set; }
 
     public string Title { get; set; } = "Layout Launcher";
 

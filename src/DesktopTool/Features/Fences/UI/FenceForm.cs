@@ -1,10 +1,9 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using DesktopTool.Features.Fences;
 using DesktopTool.Features.Fences.Native;
-using DesktopTool.Features.Snapping;
 using DesktopTool.Native;
 using DesktopTool.UI;
 
@@ -34,11 +33,15 @@ namespace DesktopTool.Features.Fences.UI;
 /// came out as a visible pixel staircase no matter the radius. Per-pixel alpha draws a genuinely
 /// smooth edge, and Windows uses that same alpha for hit-testing, so fully-transparent pixels
 /// (outside the rounded corner) are naturally click-through with no region needed at all.
+///
+/// Move, resize, snap, rename, and the Settings button/dropdown are all LayeredWidgetForm's own now -
+/// this class only supplies the small hooks those need (GetCurrentBody, Title, BuildSettingsRows,
+/// etc.) plus everything genuinely fence-specific: the icon grid itself, OCD Fence Sizing, and the
+/// z-order restack to the bottom (see OnDragEnd).
 /// </summary>
 internal sealed class FenceForm : LayeredWidgetForm
 {
     internal const int TitleBarHeight = 26;
-    private const int ResizeMargin = 12;
     // Extra invisible band around the visible fence, purely so the resize cursor is easier to
     // grab - only possible now that per-pixel alpha (not SetWindowRgn) defines the window's shape,
     // since Windows treats fully-transparent pixels as click-through; a hard region couldn't do
@@ -46,23 +49,21 @@ internal sealed class FenceForm : LayeredWidgetForm
     // alpha (see MarginFillColor) since alpha 0 would be click-through too, defeating the point.
     private const int OuterMarginPx = 13;
 
-    // The settings button (see SettingsButtonWidth/Height) sits above the fence, flush with its
-    // top-right corner, and doesn't fit inside the plain OuterMargin band (13px) with any breathing
-    // room, so the window is extended *only on top* by this much extra - every other edge
-    // (left/right/bottom, and their resize-grab bands) stays exactly OuterMargin. See
-    // GetSettingsButtonRect, CreateParams, GetContentSize, and every other OuterMargin-on-top site
-    // below, all of which use TopMargin instead of OuterMargin for that one edge. Grown by the same
-    // +2 as SettingsButtonGap below, so the breathing room above the button row (between it and this
-    // window's own top edge) stays what it was before that gap grew.
+    // The settings button sits above the fence, flush with its top-right corner, and doesn't fit
+    // inside the plain OuterMargin band (13px) with any breathing room, so the window is extended
+    // *only on top* by this much extra - every other edge (left/right/bottom, and their resize-grab
+    // bands) stays exactly OuterMargin. Grown by the same +2 as SettingsButtonGap, so the breathing
+    // room above the button row (between it and this window's own top edge) stays what it was
+    // before that gap grew.
     private const int SettingsButtonOverhang = 19;
     private const int TopMargin = OuterMarginPx + SettingsButtonOverhang;
     private const int CornerRadius = 22;
 
-    // LayeredWidgetForm's own OuterMargin/TopBand/BottomBand contract, left entirely to this
-    // override rather than generalized in the base - this fence's own split is asymmetric (TopBand
-    // collapses to 0 once flipped rather than mirroring OuterMargin/TopMargin the way BottomBand
-    // does, see its own comment for why), which is Fence-specific reasoning about Fence's own
-    // margin band, not something worth generalizing from a single example.
+    // LayeredWidgetForm's own OuterMargin/TopBand/BottomBand/MaxTopBand contract, left entirely to
+    // this override rather than generalized in the base - this fence's own split is asymmetric
+    // (TopBand collapses to 0 once flipped rather than mirroring OuterMargin/TopMargin the way
+    // BottomBand does, see its own comment for why), which is Fence-specific reasoning about
+    // Fence's own margin band, not something worth generalizing from a single example.
     protected override int OuterMargin => OuterMarginPx;
 
     /// <summary>The margin band on whichever side currently holds the button row - see
@@ -78,65 +79,30 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// from TopMargin down to OuterMargin) reacts to any nonzero margin there at all, not just a
     /// wide one - only removing it outright lets the fence sit flush with the very top of the
     /// screen. The resize-grab hit-test zone on that side still isn't literally zero-width (see
-    /// HitTest's own ResizeMargin addition), just without this extra invisible cushion beyond the
-    /// body's own edge.</summary>
+    /// ResizeHitTest's own ResizeMargin addition), just without this extra invisible cushion beyond
+    /// the body's own edge.</summary>
     protected override int BottomBand => ButtonRowAtBottom ? TopMargin : OuterMargin;
 
-    // Fallback accent (drag-target outline, menu checkmarks, settings button, active-fence border)
-    // for a fence that hasn't been given its own color (FenceModel.TintColor is null) - see
-    // Accent/ShowFenceOptionsMenu's "Fence Color" grid. Plain grayscale rather than the blue this
-    // used to be, matching the rest of the untinted theme's own black/gray palette (DefaultBodyColor
-    // etc. below) instead of standing out as the one accented color in an otherwise colorless
-    // default. Light enough to still read clearly against ThemedBody's near-black fill.
-    private static readonly Color DefaultAccentColor = Color.FromArgb(190, 190, 195);
-    private static readonly Color DefaultBodyColor = Color.FromArgb(255, 32, 32, 36);
-    private static readonly Color DefaultBorderColor = Color.FromArgb(255, 70, 70, 78);
-    private static readonly Color DefaultMenuSelectedColor = Color.FromArgb(255, 55, 55, 62);
-    private static readonly Color DefaultCheckboxBorderColor = Color.FromArgb(255, 150, 150, 158);
-    private const float ActiveBorderWidth = 8f;
+    protected override int MaxTopBand => TopMargin;
 
-    // WM_NCHITTEST/WM_NCLBUTTONDBLCLK/WM_SIZE/WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE and HTCLIENT/
-    // HTCAPTION are LayeredWidgetForm's own now - only the messages/hit-test codes with no shared
-    // home stay declared here.
+    // Every WM_*/HT* message/hit-test code with a shared home (move/resize/rename/caption codes) is
+    // LayeredWidgetForm's own now - only the messages with no shared home stay declared here.
     private const int WM_PAINT = 0x000F;
     private const int WM_ERASEBKGND = 0x0014;
-    private const int WM_RBUTTONUP = 0x0205;
     private const int WM_COMMAND = 0x0111;
 
-    private const int HTLEFT = 10;
-    private const int HTRIGHT = 11;
-    private const int HTTOP = 12;
-    private const int HTTOPLEFT = 13;
-    private const int HTTOPRIGHT = 14;
-    private const int HTBOTTOM = 15;
-    private const int HTBOTTOMLEFT = 16;
-    private const int HTBOTTOMRIGHT = 17;
-    // Non-client, but not a caption - DefWindowProc's own default WM_NCLBUTTONDOWN handling starts a
-    // move only for HTCAPTION specifically, so returning this instead for the title row (see
-    // HitTest's own final fallback) keeps it non-client for everything else that depends on that
-    // (right-click/double-click routing via WM_NCRBUTTONDOWN/WM_NCLBUTTONDBLCLK, hover tracking via
-    // WM_NCMOUSEMOVE) while no longer letting a left-button drag from there move the fence.
-    private const int HTBORDER = 18;
-
-    private const int CmdRename = 1;
+    // CmdToggleHideTitle/CmdToggleFullOpacityOnHover/CmdColorDefault/CmdColorCustom/CmdColorEyedrop/
+    // CmdColorPresetBase are LayeredWidgetForm's own now (negative ids - see its own comment for why
+    // that range can never collide with these).
     private const int CmdRenameItem = 6;
     private const int CmdToggleHideLabels = 7;
-    private const int CmdToggleHideTitle = 8;
     private const int CmdResizeBoth = 9;
     private const int CmdResizeLeftRight = 10;
     private const int CmdResizeTopDown = 11;
     private const int CmdToggleOcdSizing = 12;
-    private const int CmdColorDefault = 13;
-    private const int CmdColorCustom = 14;
-    private const int CmdColorEyedrop = 15;
-    private const int CmdToggleFullOpacityOnHover = 16;
-    // A contiguous block reserved for the preset swatches StyleMenuRows.BuildColorGrid builds from
-    // StyleTint.Presets - avoids one named const per swatch the way the other commands have, since
-    // these are looked up by index rather than individually referenced anywhere.
-    private const int CmdColorPresetBase = 20;
 
     // Not real WM_COMMAND ids - just Row.Id values for the non-clickable section headers in
-    // ShowFenceOptionsMenu's dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command either
+    // BuildSettingsRows' dropdown (DropdownMenu.Row.IsHeader rows don't dispatch a command either
     // way, so these only need to be distinct from real command ids, never looked up).
     private const int TagFenceDimensionsHeader = 1004;
     private const int TagHeaderDarknessHeader = 1005;
@@ -151,14 +117,9 @@ internal sealed class FenceForm : LayeredWidgetForm
     private const int CellHeight = 94;
     private const int ScrollbarWidth = 6;
     private const int ScrollbarMargin = 3;
-    private const int SettingsButtonWidth = 64;
-    private const int SettingsButtonHeight = 22;
-    // Vertical gap between the button row's bottom edge and the fence's own top edge (TopMargin
-    // above reserves enough extra room for this plus a little more breathing space above the
-    // buttons) - a couple pixels more than the bare minimum so there's clearly separate room to grab
-    // for a drag right at the fence's edge, instead of that margin butting straight up against the
-    // buttons themselves.
-    private const int SettingsButtonGap = 6;
+    // SettingsButtonGap (the vertical gap between the button row's bottom edge and the fence's own
+    // top edge) is LayeredWidgetForm's own default (6) now, unchanged from what this used to declare
+    // itself - TopMargin's own extra room above OuterMargin is still sized for it.
     // Shared size for the "+" (copy-this-fence's-settings) and "x" (delete-fence) buttons - both
     // square, same height as Settings, and chained immediately adjacent to it and each other (see
     // GetNewFenceButtonRect/GetDeleteButtonRect) rather than anchored to their own corners.
@@ -172,14 +133,10 @@ internal sealed class FenceForm : LayeredWidgetForm
     private readonly IDesktopAnchorStrategy _anchorStrategy;
     private readonly Font _font = new("Segoe UI", 9f);
     private readonly Dictionary<string, Icon?> _iconCache = new();
-    private EditBox? _renameBox;
     private EditBox? _itemRenameBox;
     private string? _itemRenamePath;
     private string? _contextItem;
     private int _hoverIndex = -1;
-    // IsHovered/IsMoving are LayeredWidgetForm's own now (see TargetOpacity below, which reads
-    // both) - _resizeInProgress (further down) still needs its own separate tracking, since a drag
-    // being a move vs. a resize has no base-level concept.
 
     // Internal drag state for reordering/removing items - this is all local mouse tracking, not
     // OLE drag-and-drop (which is only for accepting drops from outside the app, via
@@ -198,18 +155,14 @@ internal sealed class FenceForm : LayeredWidgetForm
     private int _scrollbarDragStartY;
     private int _scrollbarDragStartOffset;
 
-    // Activation is LayeredWidgetForm's own now - the settings button only shows once the fence has
-    // been clicked (i.e. is the active window), same shared state machine LayoutLauncherWidget's own
-    // gear/close buttons use too (see WidgetActivation's own doc comment).
-
     // A real child Button control was tried here first, but a window painted via UpdateLayeredWindow
     // (see RenderAndPresent/LayeredWindowPresenter) doesn't compose child windows on top of itself -
     // it just never appeared, clickable or not. So this is drawn like everything else on the fence
-    // (see RenderAndPresent) and hit-tested by hand instead: armed on OnMouseDown, fired on the
-    // matching OnMouseUp only if the cursor is still over it, mirroring the arm-then-fire pattern
-    // used for drag-vs-click elsewhere in this file. Firing on down instead of up was tried too,
-    // early in this button's history - opening the dropdown while the mouse button is still
-    // physically down raced with TrackPopupMenuEx's own capture and made it flash open and closed.
+    // (see PaintContent) and hit-tested by hand instead: armed on OnMouseDown, fired on the matching
+    // OnMouseUp only if the cursor is still over it, mirroring the arm-then-fire pattern used for
+    // drag-vs-click elsewhere in this file. Firing on down instead of up was tried too, early in
+    // this button's history - opening the dropdown while the mouse button is still physically down
+    // raced with TrackPopupMenuEx's own capture and made it flash open and closed.
     private bool _settingsButtonArmed;
     // Same arm-then-fire pattern as _settingsButtonArmed above, for the "+"/"x" buttons next to it.
     private bool _newFenceButtonArmed;
@@ -223,169 +176,34 @@ internal sealed class FenceForm : LayeredWidgetForm
     // re-timed/re-flickered) for every pixel of movement while already hovering the same button.
     private string? _visibleButtonTooltip;
 
-    // GetThemeBrush is LayeredWidgetForm's own now (takes ThemedBody explicitly, since the base
-    // doesn't assume which color a subclass themes its rename box/owner-draw menus with) - backs the
-    // rename EditBox (via WM_CTLCOLOREDIT) and every owner-draw popup menu here (fence-options
-    // dropdown and right-click context menus).
-
-    // Whether the drag that's about to start on WM_NCLBUTTONDOWN is a resize (as opposed to a
-    // move) - set from that message's own hit-test code, read back on WM_EXITSIZEMOVE to decide
-    // whether OcdFenceSizing should auto-run "Both" now that the resize is done. WM_EXITSIZEMOVE
-    // fires after a move just as much as a resize, so this is the only reliable way to tell them
-    // apart at that point.
-    private bool _resizeInProgress;
-
-    // LeftDragStartScreenPoint is LayeredWidgetForm's own now - WM_MOVING/WM_SIZING (below) still
-    // compute the proposed rect as _model.Bounds (fixed for the whole drag) plus the *total* cursor
-    // delta since the drag started, instead of trusting the RECT the OS's own loop hands us in
-    // lParam directly. That RECT tracks INCREMENTALLY, not absolutely - once this code writes back a
-    // snapped rect that differs from what was proposed, the OS's internal drag state adopts that
-    // snapped rect as its new baseline, and the next tick's proposal is built from *that* plus only
-    // the latest incremental mouse movement. Every individual snap during a drag permanently bakes
-    // its own clamp into that baseline with no way to undo it, so across a drag that snaps more than
-    // once the cursor and the fence drift further and further apart, compounding with each snap
-    // rather than resetting once you pull free of one. Recomputing the proposal from a fixed start
-    // point every tick sidesteps the OS's own drifted baseline entirely - our snap decisions are
-    // always made against where the cursor truly is relative to where the drag began, so leaving a
-    // snap zone snaps the fence right back to tracking the cursor exactly, with nothing carried over
-    // from any earlier snap.
-
-    // The currently-open fence-options dropdown (see ShowFenceOptionsMenu/DropdownMenu), or null
-    // when none is open. Tracked so a second click on the settings button while one is already open
-    // can dispose the stale instance first, and so Dispose can tear it down along with everything
-    // else if the fence itself goes away while it's still open (e.g. Delete Fence, clicked from
-    // within this very dropdown).
-    private DropdownMenu? _dropdown;
-
-    /// <summary>Whether the settings button should be visible/clickable/drawn as active right now -
-    /// Activation.IsActive alone used to be enough, but DropdownMenu is a real WinForms Form, and
-    /// showing one steals OS activation from this fence exactly like any other window would (a
-    /// native TrackPopupMenuEx menu never did that, which is why this wasn't needed before it).
-    /// Without WidgetActivation's own MenuOpen OR, the instant the dropdown opened, OnDeactivate
-    /// would flip activation back to false and the button/active border would vanish right out from
-    /// under the menu that's still open. This intentionally does NOT touch OnDeactivate itself to
-    /// compensate (e.g. checking whether the newly-active window is our own dropdown there) - an
-    /// earlier version of this fence tried exactly that kind of "inspect who's now active" fixup
-    /// inside OnDeactivate for a similar popup-vs-activation conflict and it was racy across
-    /// multiple fences during activation handoff. MenuOpen is a plain OR'd flag instead, driven only
-    /// by our own deterministic open/close calls (ShowFenceOptionsMenu sets it true alongside
-    /// _dropdown; DropdownMenu.FormClosed clears both).</summary>
-    private bool ShowsSettingsButton => Activation.ShouldShow;
-
-    // IsDisposing is LayeredWidgetForm's own now - guards RenderAndPresent against a reentrant repaint
-    // triggered mid-teardown (WM_ACTIVATE firing synchronously from within base.Dispose(disposing)).
+    // Whether the drag that's about to start is a resize (as opposed to a move) - LayeredWidgetForm's
+    // own IsResizing now (set from OnNcLButtonDown's own base default); read back on OnDragEnd to
+    // decide whether OcdFenceSizing should auto-run "Both" now that the resize is done.
 
     public Guid FenceId => _model.Id;
+
+    /// <summary>Which model LayeredWidgetForm's own theme derivation (ThemedBody/Accent/etc) and
+    /// generic Settings-dropdown rows (Hide Title, Full Opacity When Active, the color grid/sliders)
+    /// read from - FenceModel already implements IWidgetStyle.</summary>
+    protected override IWidgetStyle Style => _model;
+
+    protected override bool HideTitle
+    {
+        get => _model.HideTitle;
+        set
+        {
+            _manager.SetHideTitle(FenceId, value);
+            // Changes GridTop (see its own comment), which OCD Fence Sizing's fit is based on - only
+            // height can possibly need to change here, never the columns/width.
+            if (_model.OcdFenceSizing)
+                FormatDimensions(adjustWidth: false, adjustHeight: true);
+            RenderAndPresent();
+        }
+    }
 
     /// <summary>Used only for the cross-fence "Move to {name}" drag hint (see ComputeDragHint) -
     /// every other cross-fence reference goes through FenceId/FenceManager instead.</summary>
     internal string FenceName => _model.Name;
-
-    /// <summary>The fence's own color (FenceModel.TintColor), or null for the plain default dark
-    /// theme - the single source every themed color below (body/title fill, margin, borders,
-    /// settings button, settings menu chrome) derives from. See Tint and ShowFenceOptionsMenu's
-    /// "Fence Color" submenu.</summary>
-    private Color? CurrentTint => _model.TintColor is { } argb ? Color.FromArgb(argb) : null;
-
-    /// <summary>Full-strength version of the fence's tint (falling back to a fixed blue) for
-    /// elements that need to read clearly rather than just hint at the theme - the active-fence
-    /// border, drag-target outline, settings button, and settings menu checkmarks/selection
-    /// ring.</summary>
-    private Color Accent => CurrentTint ?? DefaultAccentColor;
-
-    /// <summary>_model.TintStrength (0-100%) as the 0.0-1.0 fraction Tint's amount parameter needs -
-    /// how strongly a preset/Custom... pick blends into the fence's own body/border/title, adjustable
-    /// via the "Tint Strength" slider (see ShowFenceOptionsMenu). Never used for menu/button chrome -
-    /// see SafeChromeBlend.</summary>
-    private double TintAmount => _model.TintStrength / 100.0;
-
-    // Thin wrapper kept under this file's own name/call sites rather than switching every one of
-    // them to StyleTint.SafeChromeBlend directly - same behavior, smaller diff (same reasoning as
-    // DarkenTowardBlack/Tint's own wrappers above). See StyleTint.SafeChromeBlend's own doc comment
-    // for what this actually protects against - used anywhere fixed WhiteSmoke text or glyphs get
-    // drawn on top of a tinted fill (the settings dropdown, its tooltips, and the Settings/"+"/"x"
-    // buttons - see ChromeFill/ThemedMenuSelected and both DrawTooltip call sites).
-    private const double SafeChromeBlend = StyleTint.SafeChromeBlend;
-
-    /// <summary>Only meaningful when TintIsExact - dilutes an Eyedropper pick back toward
-    /// DefaultBodyColor by TintAmount, the *reverse* direction from the regular Tint(base, tint,
-    /// amount) call (there, amount=0 means "ignore the pick"; here, amount=0 means "keep the pick
-    /// exact"). PickEyedropperColor sets TintStrength to 0 at the moment of picking for exactly that
-    /// reason - a fresh pick starts pixel-exact, and dragging Tint Strength up from there is how you
-    /// deliberately mute it back toward the plain theme instead.</summary>
-    private Color DilutedExactTint(Color exact) => Tint(exact, DefaultBodyColor, TintAmount);
-
-    /// <summary>ThemedBody blends a preset/Custom... pick into DefaultBodyColor at TintAmount same as
-    /// always; an Eyedropper pick (TintIsExact) instead starts from the exact color and dilutes it
-    /// toward DefaultBodyColor by that same TintAmount (see DilutedExactTint) - both directions read
-    /// as "how much of the fence's own picked color survives" even though the blend runs opposite
-    /// ways under the hood.</summary>
-    private Color ThemedBody => _model.TintIsExact && CurrentTint is { } exactBodyTint ? DilutedExactTint(exactBodyTint) : Tint(DefaultBodyColor, CurrentTint, TintAmount);
-
-    /// <summary>Always SafeChromeBlend, even when TintIsExact, the pick is just a light preset/Custom...
-    /// color, or Tint Strength is turned all the way up - unlike ThemedBody/Accent, anything drawing
-    /// fixed WhiteSmoke text or glyphs on top of a fill needs to stay readable no matter how
-    /// light/bright the fence's own color is. Used for the settings dropdown's background
-    /// (ShowFenceOptionsMenu) and the Settings/"+"/"x" button fills (RenderAndPresent) instead of
-    /// ThemedBody/Accent for this reason.</summary>
-    private Color ChromeFill => Tint(DefaultBodyColor, CurrentTint, SafeChromeBlend);
-
-    /// <summary>_model.Opacity (0-100%) as the 0.0-1.0 fraction LayeredWidgetForm's own
-    /// RenderAndPresent/LayeredWindowPresenter.Present call needs - fully opaque instead whenever
-    /// FullOpacityOnHover is on and this fence is "in use": hovered (IsHovered), being dragged/
-    /// resized (IsMoving), or has its settings dropdown open (_dropdown is not null) - see the
-    /// field/RenderOpacity.BeginIfNeeded() call sites for each of those three. Not forced to 100% for
-    /// TintIsExact - PickEyedropperColor sets Opacity to 100 at the moment of picking instead, so a
-    /// fresh Eyedropper pick still starts pixel-exact, but the user can deliberately trade that
-    /// exactness away afterward via the Fence Opacity slider (see its own row) the same as any other
-    /// fence. Where RenderOpacity's own eased Value should end up, not necessarily what's rendered
-    /// right now.</summary>
-    protected override float TargetOpacity => _model.FullOpacityOnHover && (IsHovered || IsMoving || _dropdown is not null) ? 1f : _model.Opacity / 100f;
-
-    /// <summary>color blended toward black by amount (0.0-1.0) - shared by HeaderBaseColor (starting
-    /// from the fixed default body color) and ThemedTitle's exact-tint case (starting from the
-    /// Eyedropper's own picked color instead). Thin wrapper kept under this file's own name/call
-    /// sites rather than switching every one of them to StyleTint.DarkenTowardBlack directly - same
-    /// behavior, smaller diff.</summary>
-    private static Color DarkenTowardBlack(Color color, double amount) => StyleTint.DarkenTowardBlack(color, amount);
-
-    /// <summary>DefaultBodyColor blended toward black by _model.HeaderDarkness (0-100%) - the title
-    /// bar's own base color before CurrentTint's separate blend on top (see ThemedTitle), for every
-    /// tint source except an exact Eyedropper pick (which darkens its own exact color instead - see
-    /// ThemedTitle). Used to be a fixed near-black constant until "Header Darkness" made it
-    /// user-adjustable - see ShowFenceOptionsMenu's slider row.</summary>
-    private Color HeaderBaseColor => DarkenTowardBlack(DefaultBodyColor, _model.HeaderDarkness / 100.0);
-
-    /// <summary>Tints HeaderBaseColor same as every other Themed* color, but with TintAmount's own
-    /// strength shrinking as HeaderDarkness rises - otherwise a strongly tinted fence could never get
-    /// very dark even at 100% darkness, since the tint would keep pulling the result back toward the
-    /// (likely much brighter) tint color regardless of how dark the base started. At 100% darkness
-    /// the tint's influence drops to 0, reaching true black. An exact Eyedropper pick (see ThemedBody)
-    /// darkens its own ThemedBody color (DilutedExactTint's result, not the raw pick) by the same
-    /// HeaderDarkness amount instead, so Tint Strength affects the title the same way it does the
-    /// body.</summary>
-    private Color ThemedTitle
-    {
-        get
-        {
-            var darkness = _model.HeaderDarkness / 100.0;
-            if (_model.TintIsExact && CurrentTint is { } exactTitleTint)
-                return DarkenTowardBlack(DilutedExactTint(exactTitleTint), darkness);
-            return Tint(HeaderBaseColor, CurrentTint, TintAmount * (1 - darkness));
-        }
-    }
-    private Color ThemedBorder => Tint(DefaultBorderColor, CurrentTint, TintAmount);
-    // SafeChromeBlend, not TintAmount - hover-highlighted rows (this fence's own DropdownMenu, and
-    // the native right-click context menus via DrawMenuItem) draw fixed WhiteSmoke text on top, same
-    // readability reasoning as ChromeFill.
-    private Color ThemedMenuSelected => Tint(DefaultMenuSelectedColor, CurrentTint, SafeChromeBlend);
-    private Color ThemedCheckboxBorder => Tint(DefaultCheckboxBorderColor, CurrentTint, 0.4);
-
-    // MarginFillColor is LayeredWidgetForm's own now.
-
-    // Translucent rather than opaque, same as the old fixed silver active-border color it replaces -
-    // a fully opaque accent border read as too heavy/saturated against the tinted body beneath it.
-    private Color ThemedActiveBorder => Color.FromArgb(220, Accent);
 
     /// <summary>Item cell height when labels are hidden (FenceModel.HideLabels) - just the icon
     /// plus a little breathing room, since there's no label text to make room for underneath.</summary>
@@ -420,7 +238,7 @@ internal sealed class FenceForm : LayeredWidgetForm
     }
 
     public FenceForm(FenceModel model, FenceManager manager, IDesktopAnchorStrategy anchorStrategy)
-        : base(model.Opacity / 100f)
+        : base(model.Opacity / 100f, manager)
     {
         _model = model;
         _manager = manager;
@@ -430,6 +248,11 @@ internal sealed class FenceForm : LayeredWidgetForm
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         AllowDrop = true;
+        // LayeredWidgetForm's own default rename hit-testing/EditBox/title-context-menu (IsOverTitleRow,
+        // BeginRename, BuildTitleContextMenu) all measure against Control.Font - without this, they'd
+        // measure against the WinForms default (Microsoft Sans Serif) while PaintContent actually draws
+        // the title with _font (Segoe UI 9), so the rename hit-rect/box would be sized wrong.
+        Font = _font;
         _toolTip.Draw += DrawTooltip;
 
         Reanchor();
@@ -477,54 +300,13 @@ internal sealed class FenceForm : LayeredWidgetForm
         return Math.Max(0, rows * EffectiveCellHeight - availableHeight);
     }
 
-    /// <summary>Content-relative, positioned just outside the visible fence, in the taller band -
-    /// normally directly above it, but below instead once ButtonRowAtBottom flips there (see its
-    /// own comment) so the row stays reachable when the fence is flush with the top of the screen.
-    /// ButtonRowAtBottom is LayeredWidgetForm's own now.
-    /// Works the same whether or not FenceModel.HideTitle leaves a title bar underneath it. Only
-    /// meaningful while ShowsSettingsButton (the button isn't shown otherwise). Y is negative when above
-    /// content-space y=0, which is fine everywhere this is used (hit-testing, painting via ToWindow,
-    /// menu positioning) - painting the "below" case the same way just needs a positive Y past the
-    /// content's own bottom instead. Flush with the top-right corner by default; flipped to the
-    /// top-left corner instead when ShouldSettingsButtonOpenLeft says the options menu wouldn't fit
-    /// opening rightward from the right corner - see ShowFenceOptionsMenu, which reuses this same
-    /// rect's X to decide which side the menu itself opens on, so the two always agree.</summary>
-    private Rectangle GetSettingsButtonRect(int contentWidth)
-    {
-        var x = ShouldSettingsButtonOpenLeft(contentWidth) ? 0 : contentWidth - SettingsButtonWidth;
-        var y = ButtonRowAtBottom ? GetContentSize().Height + SettingsButtonGap : -(SettingsButtonHeight + SettingsButtonGap);
-        return new Rectangle(x, y, SettingsButtonWidth, SettingsButtonHeight);
-    }
-
-    /// <summary>Measures the actual options menu (see BuildOptionsMenuRows/DropdownMenu.Measure)
-    /// against the screen the fence is currently on, using the button's default top-right placement
-    /// as the anchor - i.e. "would the menu fit opening to the right of a right-corner button". Also
-    /// factors in the widest row tooltip (DropdownMenu.MaxTooltipWidth) - a row's own tooltip always
-    /// extends the same direction the menu itself opened (see DropdownMenu's _actualLeft), so it
-    /// reaches even further right than the menu's own edge, and needs accounting for here too or the
-    /// button/menu could end up correctly on-screen while a wide tooltip still didn't fit, only to be
-    /// discovered - and only fixable - by flipping everything live the moment that row got hovered.
-    /// Deciding it all here instead, before the button/menu/tooltip ever open, means they're already
-    /// on the correct corner together from the very first frame. Only true near the right edge of a
-    /// monitor, same trigger as the menu's own fallback flip inside DropdownMenu.ComputeBounds (a
-    /// second, independent safety net for whatever this couldn't foresee - see DropdownMenu.
-    /// UpdateTooltip's own defensive clamp).</summary>
-    private bool ShouldSettingsButtonOpenLeft(int contentWidth)
-    {
-        var rightAligned = new Rectangle(contentWidth - SettingsButtonWidth, -(SettingsButtonHeight + SettingsButtonGap),
-            SettingsButtonWidth, SettingsButtonHeight);
-        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(rightAligned.Location)), rightAligned.Size);
-        return StyleMenuRows.ShouldOpenLeft(buttonScreenRect, BuildOptionsMenuRows(), _font);
-    }
-
     /// <summary>Immediately inside the settings button (i.e. between it and the fence body) rather
-    /// than anchored to its own corner - moves and flips sides together with GetSettingsButtonRect as
-    /// a pair, always adjacent to it. Duplicates this fence's settings into a new, empty fence (see
-    /// FenceManager.CreateFenceLike) when clicked.</summary>
-    private Rectangle GetNewFenceButtonRect(int contentWidth)
+    /// than anchored to its own corner - moves and flips sides together with LayeredWidgetForm's own
+    /// GetSettingsButtonRect as a pair, always adjacent to it. Duplicates this fence's settings into
+    /// a new, empty fence (see FenceManager.CreateFenceLike) when clicked.</summary>
+    private Rectangle GetNewFenceButtonRect(int contentWidth, bool onLeft)
     {
-        var settingsRect = GetSettingsButtonRect(contentWidth);
-        var onLeft = settingsRect.X == 0;
+        var settingsRect = GetSettingsButtonRect(contentWidth, onLeft);
         var x = onLeft ? settingsRect.Right + ButtonSpacing : settingsRect.X - ButtonSpacing - SmallButtonSize;
         return new Rectangle(x, settingsRect.Y, SmallButtonSize, SettingsButtonHeight);
     }
@@ -534,10 +316,9 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// relative order (Settings outermost, then "+", then this one, innermost/closest to the fence
     /// body). Deletes the fence (with confirmation - see ConfirmDelete) when clicked; this replaces
     /// "Delete Fence" as a row inside the settings dropdown, which no longer has one.</summary>
-    private Rectangle GetDeleteButtonRect(int contentWidth)
+    private Rectangle GetDeleteButtonRect(int contentWidth, bool onLeft)
     {
-        var newFenceRect = GetNewFenceButtonRect(contentWidth);
-        var onLeft = GetSettingsButtonRect(contentWidth).X == 0;
+        var newFenceRect = GetNewFenceButtonRect(contentWidth, onLeft);
         var x = onLeft ? newFenceRect.Right + ButtonSpacing : newFenceRect.X - ButtonSpacing - SmallButtonSize;
         return new Rectangle(x, newFenceRect.Y, SmallButtonSize, SettingsButtonHeight);
     }
@@ -562,20 +343,18 @@ internal sealed class FenceForm : LayeredWidgetForm
         return new ScrollbarGeometry(trackX, trackTop, trackHeight, thumbY, thumbHeight);
     }
 
-    /// <summary>LayeredWidgetForm's own Dispose(bool) calls this (having already set IsDisposing=true -
-    /// see its own field comment on why that has to happen before anything here runs: destroying the
-    /// native window via DestroyWindow, as part of the OS's normal deactivate-before-destroy
-    /// sequence, synchronously delivers WM_ACTIVATE to this same window while WndProc is still hooked
-    /// up, reaching OnDeactivate -> RenderAndPresent -> PaintItems before this call even returns -
-    /// without that guard already set, that repaint would use _iconCache's Icon objects just disposed
-    /// a few lines down, which throws (Icon is an ObjectDisposedException-checked handle, same as
-    /// Control.Handle)) before disposing RenderOpacity/the theme brush itself.</summary>
+    /// <summary>LayeredWidgetForm's own Dispose(bool) calls this (having already set IsDisposing=true
+    /// and torn down the rename box/title menu/settings dropdown it now owns) before disposing
+    /// RenderOpacity/the theme brush itself. Destroying the native window via DestroyWindow, as part
+    /// of the OS's normal deactivate-before-destroy sequence, synchronously delivers WM_ACTIVATE to
+    /// this same window while WndProc is still hooked up, reaching OnDeactivate -> RenderAndPresent ->
+    /// PaintItems before this call even returns - without IsDisposing already set, that repaint would
+    /// use _iconCache's Icon objects just disposed a few lines down, which throws (Icon is an
+    /// ObjectDisposedException-checked handle, same as Control.Handle).</summary>
     protected override void DisposeOwnedResources()
     {
-        _renameBox?.Dispose();
         _itemRenameBox?.Dispose();
         _dragGhost?.Dispose();
-        _dropdown?.Dispose();
         _toolTip.Dispose();
         _font.Dispose();
         foreach (var icon in _iconCache.Values)
@@ -585,7 +364,7 @@ internal sealed class FenceForm : LayeredWidgetForm
     // Activation (settings button + drag-margin visibility, see WidgetActivation) is intentionally
     // NOT driven by OnActivated - that fires for any click that gives the window OS focus, including
     // a plain click on a shortcut just to use it. It's set explicitly instead, only for right-click
-    // (anywhere) or a title-bar click (either button) - see WndProc's WM_NCLBUTTONDOWN/
+    // (anywhere) or a title-bar click (either button) - see LayeredWidgetForm's own WM_NCLBUTTONDOWN/
     // WM_NCRBUTTONDOWN handling and ShowContextMenu. Resizing deliberately does NOT activate the
     // fence - HitTest turns the whole margin band into a move handle once already active, so resize
     // and move never contend for the same pixels, but that also means resize has to stay unavailable
@@ -617,10 +396,10 @@ internal sealed class FenceForm : LayeredWidgetForm
     {
         base.OnMouseDoubleClick(e);
 
-        // Rename is only reachable via the title text itself (double-click or right-click, see
-        // WM_NCLBUTTONDBLCLK/WM_NCRBUTTONDOWN - both gated on IsPointOverTitleText) - no fallback
-        // here when FenceModel.HideTitle leaves no title bar to click at all; renaming just isn't
-        // reachable that way then, rather than an empty double-click anywhere substituting for it.
+        // Rename is only reachable via the title text itself (double-click or right-click, gated on
+        // IsOverTitleRow - now LayeredWidgetForm's own) - no fallback here when FenceModel.HideTitle
+        // leaves no title bar to click at all; renaming just isn't reachable that way then, rather
+        // than an empty double-click anywhere substituting for it.
         if (IndexAtGridPosition(ToContent(e.Location)) is not int index)
             return;
         var item = _model.Files[index];
@@ -638,20 +417,21 @@ internal sealed class FenceForm : LayeredWidgetForm
 
         var contentPoint = ToContent(e.Location);
         var contentSize = GetContentSize();
+        var onLeft = ShouldSettingsButtonOpenLeft(contentSize.Width);
 
-        if (ShowsSettingsButton && GetSettingsButtonRect(contentSize.Width).Contains(contentPoint))
+        if (ShowsButtons && GetSettingsButtonRect(contentSize.Width, onLeft).Contains(contentPoint))
         {
             _settingsButtonArmed = true;
             return;
         }
 
-        if (ShowsSettingsButton && GetNewFenceButtonRect(contentSize.Width).Contains(contentPoint))
+        if (ShowsButtons && GetNewFenceButtonRect(contentSize.Width, onLeft).Contains(contentPoint))
         {
             _newFenceButtonArmed = true;
             return;
         }
 
-        if (ShowsSettingsButton && GetDeleteButtonRect(contentSize.Width).Contains(contentPoint))
+        if (ShowsButtons && GetDeleteButtonRect(contentSize.Width, onLeft).Contains(contentPoint))
         {
             _deleteButtonArmed = true;
             return;
@@ -742,7 +522,7 @@ internal sealed class FenceForm : LayeredWidgetForm
     }
 
     /// <summary>Shows/hides the "Copy Fence"/"Delete Fence" tooltip over the "+"/"x" buttons - only
-    /// meaningful while they're actually visible (ShowsSettingsButton), and only re-issued on an
+    /// meaningful while they're actually visible (ShowsButtons), and only re-issued on an
     /// actual change of which button (if any) is hovered, rather than on every mouse-move, so
     /// ToolTip.Show isn't re-triggered (and re-timed/re-flickered) for every pixel of movement while
     /// already hovering the same one.</summary>
@@ -750,17 +530,18 @@ internal sealed class FenceForm : LayeredWidgetForm
     {
         var contentSize = GetContentSize();
         var contentPoint = ToContent(windowLocation);
+        var onLeft = ShouldSettingsButtonOpenLeft(contentSize.Width);
 
         string? text = null;
         Rectangle buttonRect = default;
-        if (ShowsSettingsButton)
+        if (ShowsButtons)
         {
-            if (GetNewFenceButtonRect(contentSize.Width) is var newFenceRect && newFenceRect.Contains(contentPoint))
+            if (GetNewFenceButtonRect(contentSize.Width, onLeft) is var newFenceRect && newFenceRect.Contains(contentPoint))
             {
                 text = "Copy Fence";
                 buttonRect = newFenceRect;
             }
-            else if (GetDeleteButtonRect(contentSize.Width) is var deleteRect && deleteRect.Contains(contentPoint))
+            else if (GetDeleteButtonRect(contentSize.Width, onLeft) is var deleteRect && deleteRect.Contains(contentPoint))
             {
                 text = "Delete Fence";
                 buttonRect = deleteRect;
@@ -803,11 +584,11 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     /// <summary>OwnerDraw's paint hook (see _toolTip's own field comment for why this is needed at
     /// all) - dark background/border matching the rest of this fence's theme instead of a native
-    /// tooltip's white/light default. SafeChromeBlend, not TintAmount - same fixed-WhiteSmoke-text
-    /// reasoning as ChromeFill.</summary>
+    /// tooltip's white/light default. SettingsMenuTooltipColor (LayeredWidgetForm's own), not
+    /// ThemedBody - same fixed-WhiteSmoke-text reasoning as ChromeFill.</summary>
     private void DrawTooltip(object? sender, DrawToolTipEventArgs e)
     {
-        using (var background = new SolidBrush(Tint(Color.Black, CurrentTint, SafeChromeBlend)))
+        using (var background = new SolidBrush(SettingsMenuTooltipColor))
             e.Graphics.FillRectangle(background, e.Bounds);
         using (var borderPen = new Pen(Color.FromArgb(255, 20, 20, 24)))
             e.Graphics.DrawRectangle(borderPen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
@@ -834,7 +615,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         {
             var index = IndexAtGridPosition(contentPoint) ?? _model.Files.Count;
             if (_manager.IsRecycleBinAt(FenceId, index))
-                return "Move to Recycle Bin →";
+                return "Move to Recycle Bin â†’";
             // Landing back on (or adjacent to) its own starting cell isn't really a reorder, but
             // there's no cheap way to tell "would actually move" from "would land right back where
             // it started" here without duplicating MoveFile's own index-shift math - and showing the
@@ -848,8 +629,8 @@ internal sealed class FenceForm : LayeredWidgetForm
         {
             var index = targetForm.IndexForExternalDrop(screenPoint);
             return _manager.IsRecycleBinAt(targetForm.FenceId, index)
-                ? "Move to Recycle Bin →"
-                : $"Move to {targetForm.FenceName} →";
+                ? "Move to Recycle Bin â†’"
+                : $"Move to {targetForm.FenceName} â†’";
         }
 
         return "Remove from Fence";
@@ -861,18 +642,20 @@ internal sealed class FenceForm : LayeredWidgetForm
         if (e.Button != MouseButtons.Left)
             return;
 
+        var onLeft = ShouldSettingsButtonOpenLeft(GetContentSize().Width);
+
         if (_settingsButtonArmed)
         {
             _settingsButtonArmed = false;
-            if (ShowsSettingsButton && GetSettingsButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
-                ShowFenceOptionsMenu();
+            if (ShowsButtons && GetSettingsButtonRect(GetContentSize().Width, onLeft).Contains(ToContent(e.Location)))
+                OpenSettingsMenu();
             return;
         }
 
         if (_newFenceButtonArmed)
         {
             _newFenceButtonArmed = false;
-            if (ShowsSettingsButton && GetNewFenceButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+            if (ShowsButtons && GetNewFenceButtonRect(GetContentSize().Width, onLeft).Contains(ToContent(e.Location)))
                 _manager.CreateFenceLike(FenceId);
             return;
         }
@@ -880,7 +663,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         if (_deleteButtonArmed)
         {
             _deleteButtonArmed = false;
-            if (ShowsSettingsButton && GetDeleteButtonRect(GetContentSize().Width).Contains(ToContent(e.Location)))
+            if (ShowsButtons && GetDeleteButtonRect(GetContentSize().Width, onLeft).Contains(ToContent(e.Location)))
                 ConfirmDelete();
             return;
         }
@@ -971,87 +754,16 @@ internal sealed class FenceForm : LayeredWidgetForm
         RenderAndPresent();
     }
 
-    /// <summary>Everything with no shared home in LayeredWidgetForm: WM_MOVING/WM_SIZING (this
-    /// fence's own snap-drag math - resize has no base-level concept at all), WM_ERASEBKGND/WM_PAINT
-    /// (layered-window painting is pushed via UpdateLayeredWindow, not WM_PAINT), WM_RBUTTONUP (the
-    /// item context menu), WM_COMMAND, and the native owner-draw menu machinery
-    /// (WM_MEASUREITEM/WM_DRAWITEM - the settings dropdown/right-click menus here, none of which
-    /// LayoutLauncherWidget's own ContextMenuStrip-based equivalent needs). Everything else goes
-    /// through base.WndProc, which is where WM_NCHITTEST/WM_NCLBUTTONDBLCLK/WM_NCRBUTTONDOWN/
-    /// WM_CTLCOLOREDIT/WM_NCLBUTTONDOWN/WM_NCMOUSEMOVE/WM_NCMOUSELEAVE/WM_SIZE/WM_ENTERSIZEMOVE/
-    /// WM_EXITSIZEMOVE now live, routed through the abstract/virtual hooks below.</summary>
+    /// <summary>Everything with no shared home in LayeredWidgetForm: WM_ERASEBKGND/WM_PAINT
+    /// (layered-window painting is pushed via UpdateLayeredWindow, not WM_PAINT), WM_COMMAND (only
+    /// CmdRenameItem now - title rename no longer routes through a native menu, see Title/
+    /// ChromeMenuFieldColor below), and the native owner-draw menu machinery (WM_MEASUREITEM/
+    /// WM_DRAWITEM, still needed for the item-rename context menu). A right-click anywhere in the
+    /// item grid shows the item context menu via OnClientRightClick instead (LayeredWidgetForm's own
+    /// WM_RBUTTONUP handling calls it after activating). Everything else goes through base.WndProc,
+    /// which is where move/resize/snap/rename/hover/the Settings dropdown all live now.</summary>
     protected override void WndProc(ref Message m)
     {
-        // Sent repeatedly by the OS's own interactive move/resize loop (already running by the time
-        // either of these arrive - see WM_ENTERSIZEMOVE/HitTest); DefWindowProc has no default
-        // handling for either message, so mutating the RECT at lParam and returning here is enough -
-        // the outer loop (not DefWindowProc) is what reads it back. Deliberately NOT using that RECT
-        // as the basis for where the fence should propose to go, though (see
-        // LeftDragStartScreenPoint's own comment on why - it tracks incrementally off whatever this
-        // code last wrote back, not absolutely off the cursor) - body is instead computed fresh from
-        // the fixed drag-start anchor every single tick, and only ever re-inflated back into a raw
-        // window RECT (OuterMargin/TopBand padding added back on) once, right at the end, for the
-        // write-back.
-        if (m.Msg == NativeMethods.WM_MOVING)
-        {
-            var currentScreenPoint = Cursor.Position;
-            var body = new Rectangle(
-                _model.Bounds.X + (currentScreenPoint.X - LeftDragStartScreenPoint.X),
-                _model.Bounds.Y + (currentScreenPoint.Y - LeftDragStartScreenPoint.Y),
-                _model.Bounds.Width, _model.Bounds.Height);
-            // Both candidate sources by default - this fence's own custom lines (see SnapMove's
-            // default includeCustomLines: true) and every other fence's edges. Holding the right
-            // button down at the same time hides the fence-edge candidates for as long as it's
-            // held, leaving just the custom lines - checked live via Control.MouseButtons (a
-            // physical-state poll, not tied to any message actually having been dispatched for
-            // that button's own down-press, which DefWindowProc's own modal SC_MOVE loop may
-            // never route to this WndProc at all while it's running) rather than any button-down
-            // message. Used to be the reverse (fence edges only opted into by holding right, off
-            // by default) from when right-click was its own separate way to drag the fence, back
-            // when merging both by default made dragging feel "sticky" - now that that stickiness
-            // turned out to actually be drift from the OS's own incrementally-proposed rect (see
-            // LeftDragStartScreenPoint's comment) rather than the candidate set itself, merging
-            // both by default is fine again, and right-click is back to being a plain hide-the-
-            // fence-lines modifier instead of a whole separate drag mechanism.
-            IReadOnlyList<int> vCandidates = Array.Empty<int>();
-            IReadOnlyList<int> hCandidates = Array.Empty<int>();
-            if ((MouseButtons & MouseButtons.Right) == 0)
-                (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
-            var result = _manager.SnapLines.SnapMove(body, vCandidates, hCandidates, _model.Margin);
-            // Re-decided against the proposed rect's own new position - a drag that crosses the
-            // "would go off the top of the screen" threshold mid-tick flips right here, so
-            // WriteBackWindowRect (next) already inflates using whichever side the button row
-            // belongs on now, not wherever it was a moment ago.
-            ButtonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location, TopMargin);
-            WriteBackWindowRect(m.LParam, result.Rect);
-            m.Result = (IntPtr)1;
-            return;
-        }
-
-        if (m.Msg == NativeMethods.WM_SIZING)
-        {
-            // Same fixed-anchor reasoning as WM_MOVING above, just per-edge: whichever edges
-            // this particular resize handle doesn't control stay pinned exactly where the drag
-            // started (_model.Bounds, unchanging for the whole drag), and only the active ones
-            // move by the cursor's total delta since then.
-            var edges = SnapEdgesFromWmSz((int)m.WParam.ToInt64());
-            var currentScreenPoint = Cursor.Position;
-            var dx = currentScreenPoint.X - LeftDragStartScreenPoint.X;
-            var dy = currentScreenPoint.Y - LeftDragStartScreenPoint.Y;
-            var start = _model.Bounds;
-            var body = Rectangle.FromLTRB(
-                (edges & SnapEdges.Left) != 0 ? start.Left + dx : start.Left,
-                (edges & SnapEdges.Top) != 0 ? start.Top + dy : start.Top,
-                (edges & SnapEdges.Right) != 0 ? start.Right + dx : start.Right,
-                (edges & SnapEdges.Bottom) != 0 ? start.Bottom + dy : start.Bottom);
-            var (vCandidates, hCandidates) = _manager.GetOtherFenceEdges(FenceId);
-            var result = _manager.SnapLines.SnapResize(body, edges, vCandidates, hCandidates, _model.Margin);
-            ButtonRowAtBottom = ComputeButtonRowAtBottom(result.Rect.Location, TopMargin);
-            WriteBackWindowRect(m.LParam, result.Rect);
-            m.Result = (IntPtr)1;
-            return;
-        }
-
         if (m.Msg == WM_ERASEBKGND)
         {
             m.Result = (IntPtr)1;
@@ -1064,23 +776,6 @@ internal sealed class FenceForm : LayeredWidgetForm
             // response to WM_PAINT - just clear the update region so Windows stops re-posting it.
             NativeMethods.BeginPaint(Handle, out var ps);
             NativeMethods.EndPaint(Handle, ref ps);
-            return;
-        }
-
-        if (m.Msg == WM_RBUTTONUP)
-        {
-            // A real caption's right-click would show the system menu via the default proc - there's
-            // no such menu for this custom-drawn title bar, so WM_NCRBUTTONDOWN (now handled by
-            // LayeredWidgetForm) always swallows itself rather than falling through to
-            // base.WndProc/DefWindowProc, and DefWindowProc's own default handling for THIS message -
-            // which used to answer a resize-hit-test right-click by capturing the mouse, normally
-            // released again once DefWindowProc saw the matching button-up - never runs anymore
-            // either, and can't leave that capture dangling the way it used to (see the fix for
-            // that). Still releasing here defensively (a harmless no-op if nothing is actually
-            // captured) rather than relying on that root cause staying fixed.
-            Capture = false;
-            var clientPoint = new Point((short)(m.LParam.ToInt64() & 0xFFFF), (short)((m.LParam.ToInt64() >> 16) & 0xFFFF));
-            ShowContextMenu(ToContent(clientPoint));
             return;
         }
 
@@ -1117,195 +812,110 @@ internal sealed class FenceForm : LayeredWidgetForm
             Reanchor();
     }
 
-    private static bool IsResizeHitTest(int hitTest) =>
-        hitTest is HTLEFT or HTRIGHT or HTTOP or HTBOTTOM or HTTOPLEFT or HTTOPRIGHT or HTBOTTOMLEFT or HTBOTTOMRIGHT;
+    /// <summary>The fixed anchor LayeredWidgetForm's own WM_MOVING/WM_SIZING measure every tick
+    /// against - _model.Bounds itself, same as always.</summary>
+    protected override Rectangle GetCurrentBody() => _model.Bounds;
 
-    /// <summary>WM_SIZING's wParam - a flat enumeration, not a bitfield (the four corner values
-    /// don't decompose into their two edges by combining the single-edge values).</summary>
-    private static SnapEdges SnapEdgesFromWmSz(int wmsz) => wmsz switch
-    {
-        NativeMethods.WMSZ_LEFT => SnapEdges.Left,
-        NativeMethods.WMSZ_RIGHT => SnapEdges.Right,
-        NativeMethods.WMSZ_TOP => SnapEdges.Top,
-        NativeMethods.WMSZ_TOPLEFT => SnapEdges.Top | SnapEdges.Left,
-        NativeMethods.WMSZ_TOPRIGHT => SnapEdges.Top | SnapEdges.Right,
-        NativeMethods.WMSZ_BOTTOM => SnapEdges.Bottom,
-        NativeMethods.WMSZ_BOTTOMLEFT => SnapEdges.Bottom | SnapEdges.Left,
-        NativeMethods.WMSZ_BOTTOMRIGHT => SnapEdges.Bottom | SnapEdges.Right,
-        _ => SnapEdges.None,
-    };
+    protected override Guid SnapExcludeId => FenceId;
+    protected override int SnapMargin => _model.Margin;
 
-    /// <summary>Re-inflates a snapped visible-body rect back into raw window coordinates (the
-    /// inverse of WM_MOVING/WM_SIZING's own body conversion above) and writes it into the RECT at
-    /// lParam for the OS's own move/resize loop to pick up.</summary>
-    private void WriteBackWindowRect(IntPtr lParam, Rectangle body)
-    {
-        var snapped = new RECT
-        {
-            Left = body.Left - OuterMargin,
-            Top = body.Top - TopBand,
-            Right = body.Right + OuterMargin,
-            Bottom = body.Bottom + BottomBand,
-        };
-        Marshal.StructureToPtr(snapped, lParam, false);
-    }
-
-    // Remembered for OnDragEnd, which fires after a move just as much as a resize - OcdFenceSizing
-    // should only auto-run following an actual resize.
-    protected override void OnNcLButtonDown(int hitTestCode) => _resizeInProgress = IsResizeHitTest(hitTestCode);
-
-    /// <summary>Fires for both a move and a resize (see _resizeInProgress's own comment) - a resize
-    /// always shows both custom lines and fence edges (WM_SIZING has no right-click modifier, unlike
-    /// WM_MOVING - see its own comment), and a move shows both too unless right is already held
-    /// right at the start of the drag (the common case is checked live every tick in WM_MOVING
-    /// instead; this is only for the very first frame, before any movement has happened yet, so the
-    /// guides don't lag one tick behind).</summary>
-    protected override void BeginSnapDrag()
-    {
-        if (_resizeInProgress || (MouseButtons & MouseButtons.Right) == 0)
-        {
-            var (vGuides, hGuides) = _manager.GetOtherFenceEdges(FenceId);
-            var monitor = Screen.FromRectangle(_model.Bounds).Bounds;
-            _manager.SnapLines.BeginDrag(includeCustomLines: true, vGuides, hGuides, monitor);
-        }
-        else
-        {
-            _manager.SnapLines.BeginDrag();
-        }
-    }
+    // ComputeMovedBody/ComputeResizedBody/BeginSnapDrag all use LayeredWidgetForm's own defaults
+    // unchanged - this fence's own snapping (against other fences' edges and custom snap lines) is
+    // exactly what those defaults already do via SnapExcludeId/SnapMargin/Fences above.
 
     protected override void OnDragEnd()
     {
-        _manager.SnapLines.EndDrag();
-
         if (NativeMethods.GetWindowRect(Handle, out var rect))
             _manager.NotifyBoundsChanged(FenceId, Rectangle.FromLTRB(
                 rect.Left + OuterMargin, rect.Top + TopBand, rect.Right - OuterMargin, rect.Bottom - BottomBand));
 
         // OCD Fence Sizing: snap to the tightest fit right after a manual resize, on top of
-        // whatever size was just dragged to - not after a move, see _resizeInProgress. Done
-        // before the HWND_BOTTOM restack below (rather than after) so that restack is always
-        // the last z-order-relevant call in this handler - FormatDimensions makes its own
-        // SetWindowPos call (SWP_NOZORDER, meant to leave z-order untouched), but a resize
-        // followed by a move was still landing behind other fences with the restack first,
-        // so the z-order push now unconditionally comes last regardless of what ran before it.
-        if (_resizeInProgress && _model.OcdFenceSizing)
+        // whatever size was just dragged to - not after a move, see IsResizing. Done before the
+        // HWND_BOTTOM restack below (rather than after) so that restack is always the last
+        // z-order-relevant call in this handler - FormatDimensions makes its own SetWindowPos call
+        // (SWP_NOZORDER, meant to leave z-order untouched), but a resize followed by a move was
+        // still landing behind other fences with the restack first, so the z-order push now
+        // unconditionally comes last regardless of what ran before it.
+        if (IsResizing && _model.OcdFenceSizing)
             FormatDimensions(adjustWidth: true, adjustHeight: true);
-        _resizeInProgress = false;
 
-        // Dragging a fence via its caption (see HTCAPTION/WM_NCLBUTTONDOWN) goes through the
-        // OS's own window-move loop, which activates it like any normal window drag would -
-        // left alone, it'd then stay stacked on top of whatever window it was just dragged
-        // over, contradicting the whole point of a fence (a desktop-level widget that never
-        // covers what you're actually working in). Dropping it to the bottom of the z-order
-        // here restores that even though it was just OS-activated; SWP_NOACTIVATE keeps this
-        // restack itself from stealing focus back.
+        // Dragging a fence via its caption goes through the OS's own window-move loop, which
+        // activates it like any normal window drag would - left alone, it'd then stay stacked on
+        // top of whatever window it was just dragged over, contradicting the whole point of a fence
+        // (a desktop-level widget that never covers what you're actually working in). Dropping it
+        // to the bottom of the z-order here restores that even though it was just OS-activated;
+        // SWP_NOACTIVATE keeps this restack itself from stealing focus back.
         NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         // HWND_BOTTOM above means "underneath literally everything, including every other fence" -
         // left at just that, an actively-dragged (and still visually highlighted, see
-        // ShowsSettingsButton/ThemedActiveBorder) fence would disappear behind any other fence it
+        // ShowsButtons/ThemedActiveBorder) fence would disappear behind any other fence it
         // overlaps. Pushing every OTHER fence to the same HWND_BOTTOM afterward settles this one
         // back on top of its siblings without ever elevating any fence above a real window - see
         // RestackOtherFencesBehind's own comment for why order-of-calls is what makes that work.
         _manager.RestackOtherFencesBehind(FenceId);
 
-        IsMoving = false;
-        RenderOpacity.BeginIfNeeded();
-
-        // A pure move (no resize) never otherwise triggers a re-render - WM_SIZE already
-        // covers the resize case - but GetSettingsButtonRect now depends on the fence's
-        // absolute screen position (see ShouldSettingsButtonOpenLeft), so dragging a fence
-        // across the point where the button should flip corners left the old render on
-        // screen with the button drawn on its old side, while hit-testing (recomputed fresh
-        // on the next click) already expected the new side - a click on the visibly-drawn
-        // button landed nowhere. Re-rendering here keeps what's drawn and what's hit-tested
-        // in sync again once the move settles.
-        if (ShowsSettingsButton)
-            RenderAndPresent();
+        // RenderOpacity.BeginIfNeeded() and the Settings-button-corner repaint a pure move otherwise
+        // needs (see ShouldSettingsButtonOpenLeft) are both LayeredWidgetForm's own now - it calls
+        // both right after this method returns.
     }
 
-    /// <summary>WM_SIZE's own extra fence-specific follow-up, beyond the repaint LayeredWidgetForm's
-    /// own WM_SIZE handling already does - keeps the rename box and an already-open settings dropdown
-    /// in step with whatever this fence's window just resized to (most obviously the OCD flyout's own
-    /// resize commands, see FormatDimensions, which change bounds via SetWindowPos without otherwise
-    /// touching either).</summary>
-    protected override void OnResized()
-    {
-        _renameBox?.Resize(Math.Max(GetContentSize().Width - 12, 0));
-        RepositionDropdown();
-    }
+    // OnResized needs no override of its own - LayeredWidgetForm's own default (repositioning an
+    // already-open Settings dropdown after a resize) already covers the OCD flyout's own resize
+    // commands (FormatDimensions), the only thing that used to need this.
 
     protected override int HitTest(IntPtr lParam)
     {
-        long l = lParam.ToInt64();
-        short screenX = (short)(l & 0xFFFF);
-        short screenY = (short)((l >> 16) & 0xFFFF);
-
+        var rectPoint = lParam;
         if (!NativeMethods.GetWindowRect(Handle, out var rect))
             return HTCLIENT;
 
-        int x = screenX - rect.Left;
-        int y = screenY - rect.Top;
+        var windowPoint = ScreenLParamToWindowPoint(rectPoint, rect);
+        int x = windowPoint.X;
+        int y = windowPoint.Y;
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
 
         // The settings button (and the "+"/"x" buttons beside it) live above the fence, in the taller
-        // TopMargin band - check them first so none is shadowed by an HTTOP/HTTOPLEFT/HTTOPRIGHT
-        // resize result.
+        // TopMargin band - check them first so none is shadowed by a resize-band result.
         var contentWidth = width - OuterMargin * 2;
-        var contentPoint = ToContent(new Point(x, y));
-        if (ShowsSettingsButton && (GetSettingsButtonRect(contentWidth).Contains(contentPoint)
-            || GetNewFenceButtonRect(contentWidth).Contains(contentPoint)
-            || GetDeleteButtonRect(contentWidth).Contains(contentPoint)))
+        var contentPoint = ToContent(windowPoint);
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
+        if (ShowsButtons && (GetSettingsButtonRect(contentWidth, onLeft).Contains(contentPoint)
+            || GetNewFenceButtonRect(contentWidth, onLeft).Contains(contentPoint)
+            || GetDeleteButtonRect(contentWidth, onLeft).Contains(contentPoint)))
             return HTCLIENT;
 
-        int band = OuterMargin + ResizeMargin;
-        // Whichever side currently holds the button row is the taller one (see TopBand/
-        // ButtonRowAtBottom), so it's this pair - not always "top"/"bottom" - that gets the wider
-        // resize-grab threshold instead of sharing the plain one above.
-        int topZone = TopBand + ResizeMargin;
-        int bottomZone = BottomBand + ResizeMargin;
-
-        if (ShowsSettingsButton)
+        if (ShowsButtons)
         {
-            // ShowsSettingsButton (IsActive || MenuOpen), not just whether this fence is the active
+            // ShowsButtons (IsActive || MenuOpen), not just whether this fence is the active
             // window - opening the settings dropdown steals OS activation from the fence (it's a
             // separate top-level Form), which deactivates it via OnDeactivate even though the
-            // button/active border deliberately stay showing (see ShowsSettingsButton's own
+            // button/active border deliberately stay showing (see ShowsButtons's own
             // comment). Gating on plain activation alone let the resize hit-test codes below fire
             // while the dropdown was still open, so dragging an edge resized the fence out from
             // under its own still-open menu.
             //
             // The margin band is a move handle instead of a resize band while active - the same
             // footprint resize used to claim, just reassigned rather than split into two adjacent
-            // rings, so the drag margin can hug the fence's actual edge (see RenderAndPresent's
+            // rings, so the drag margin can hug the fence's actual edge (see PaintContent's own
             // ThemedActiveBorder highlight) without an ambiguous strip where both would apply.
             // Resizing an active fence isn't available until it's deactivated again.
+            var band = OuterMargin + ResizeMargin;
+            var topZone = TopBand + ResizeMargin;
+            var bottomZone = BottomBand + ResizeMargin;
             if (x <= band || x >= width - band || y <= topZone || y >= height - bottomZone)
                 return HTCAPTION;
         }
-        else
+        else if (ResizeHitTest(windowPoint, width, height) is int resizeCode)
         {
-            bool left = x <= band;
-            bool right = x >= width - band;
-            bool top = y <= topZone;
-            bool bottom = y >= height - bottomZone;
-
-            if (top && left) return HTTOPLEFT;
-            if (top && right) return HTTOPRIGHT;
-            if (bottom && left) return HTBOTTOMLEFT;
-            if (bottom && right) return HTBOTTOMRIGHT;
-            if (left) return HTLEFT;
-            if (right) return HTRIGHT;
-            if (top) return HTTOP;
-            if (bottom) return HTBOTTOM;
+            return resizeCode;
         }
 
         // Empty space within the title bar itself (content-relative, not the margin above), for a
         // fence that still has one - HTBORDER, not HTCAPTION, so a left-button drag from here no
         // longer moves the fence (only the margin does, and only once already active - see the
-        // ShowsSettingsButton branch above). Right-click/double-click (rename) and hover still work
+        // ShowsButtons branch above). Right-click/double-click (rename) and hover still work
         // the same as any other non-client area - see HTBORDER's own comment.
         if (!_model.HideTitle && y - TopBand <= TitleBarHeight)
             return HTBORDER;
@@ -1315,75 +925,23 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     /// <summary>
     /// Everything LayeredWidgetForm's own RenderAndPresent doesn't already handle: body, title bar,
-    /// Settings/"+"/"x" buttons, and this fence's own items (see PaintItems) - moved here verbatim
-    /// from what used to be this class's own RenderAndPresent, now that the base owns the bitmap
-    /// allocation/margin fill/smoothing setup/final UpdateLayeredWindow push around it.
+    /// Settings/"+"/"x" buttons, and this fence's own items (see PaintItems).
     /// </summary>
     protected override void PaintContent(Graphics g, int contentWidth, int contentHeight)
     {
         _scrollOffset = Math.Clamp(_scrollOffset, 0, GetMaxScroll(contentWidth, contentHeight));
+        var onLeft = ShouldSettingsButtonOpenLeft(contentWidth);
 
-        // Coordinates below are content-relative (see Offset) rather than using
-        // Graphics.TranslateTransform - TextRenderer.DrawText (GDI, not GDI+) doesn't reliably
-        // respect a GDI+ world transform, which left title/item text rendered OuterMargin
-        // pixels too high while shapes and images (which do respect it) looked fine.
-        using var body = RoundedRect(ToWindow(new Rectangle(0, 0, contentWidth - 1, contentHeight - 1)), CornerRadius);
-        using var bodyFill = new SolidBrush(ThemedBody);
-        g.FillPath(bodyFill, body);
+        // Body/title fill, border, title text, and the Settings button itself are all
+        // LayeredWidgetForm's own now - this only draws what's genuinely fence-specific: the "+"/"x"
+        // buttons chained off Settings, and the item grid (see PaintItems).
+        PaintChrome(g, contentWidth, contentHeight, CornerRadius);
 
-        if (!_model.HideTitle)
+        if (ShowsButtons)
         {
-            using var titleFill = new SolidBrush(ThemedTitle);
-            using var titlePath = RoundedRectTop(ToWindow(new Rectangle(0, 0, contentWidth - 1, TitleBarHeight)), CornerRadius);
-            g.FillPath(titleFill, titlePath);
-        }
-
-        // A brighter, thicker border signals the fence is active (or its settings dropdown is
-        // still open, see ShowsSettingsButton) - the margin band around it is now a move handle
-        // while genuinely activated (see HitTest), and this highlight hugs the fence's actual
-        // edge directly rather than a separate frame floating out in the margin.
-        using var borderPen = new Pen(ShowsSettingsButton ? ThemedActiveBorder : ThemedBorder, ShowsSettingsButton ? ActiveBorderWidth : 1f);
-        // Pen.LineJoin defaults to Miter, which squares off the outer edge of a thick stroke at
-        // the rounded corners instead of following their curve - Round keeps it hugging the arc.
-        borderPen.LineJoin = LineJoin.Round;
-        g.DrawPath(borderPen, body);
-
-        if (!_model.HideTitle && _renameBox is null)
-        {
-            TextRenderer.DrawText(g, _model.Name, _font, ToWindow(new Rectangle(14, 0, contentWidth - 22, TitleBarHeight)),
-                Color.WhiteSmoke, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-        }
-
-        if (ShowsSettingsButton)
-        {
-            // Filled first so the button reads as fully opaque - it lives in the near-transparent
-            // TopMargin band (see MarginFillColor's own comment), and TextRenderer.DrawText below
-            // only ever writes RGB, never alpha, so without an opaque backing shape under it the
-            // label would inherit the margin's near-zero alpha and vanish once
-            // WritePremultipliedPixels scales it down.
-            var buttonRect = ToWindow(GetSettingsButtonRect(contentWidth));
-            using var buttonPath = RoundedRect(buttonRect, 6);
-            // ChromeFill, not Accent - same fixed-WhiteSmoke-text-needs-to-stay-readable reasoning
-            // as the dropdown's own background (see ChromeFill's doc comment).
-            using var buttonFill = new SolidBrush(ChromeFill);
-            g.FillPath(buttonFill, buttonPath);
-            using var buttonBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
-            g.DrawPath(buttonBorderPen, buttonPath);
-
-            // GDI+'s DrawString instead of the GDI TextRenderer.DrawText used everywhere else in
-            // this method - GDI's own ClearType antialiasing assumes a neutral/opaque background
-            // and fringes with visible red/blue "shadow" pixels along each glyph's edge against a
-            // saturated color like Accent; GDI+'s AntiAlias hint is plain grayscale, so it doesn't.
-            var previousTextHint = g.TextRenderingHint;
-            g.TextRenderingHint = TextRenderingHint.AntiAlias;
-            using (var textBrush = new SolidBrush(Color.WhiteSmoke))
-            using (var textFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString("Settings", _font, textBrush, buttonRect, textFormat);
-            g.TextRenderingHint = previousTextHint;
-
-            // Same opaque-backing reasoning as the Settings button above - filled before the copy
-            // glyph is stroked on top.
-            var newFenceRect = ToWindow(GetNewFenceButtonRect(contentWidth));
+            // Same opaque-backing reasoning as PaintChrome's own Settings button - filled before the
+            // copy glyph is stroked on top (see MarginFillColor's own comment).
+            var newFenceRect = ToWindow(GetNewFenceButtonRect(contentWidth, onLeft));
             using var newFencePath = RoundedRect(newFenceRect, 6);
             using var newFenceFill = new SolidBrush(ChromeFill);
             g.FillPath(newFenceFill, newFencePath);
@@ -1411,7 +969,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             // fence's own color theme instead of a fixed color, while staying readable against
             // fixed WhiteSmoke; the "x" glyph itself already reads as destructive without needing
             // a separate warning color too.
-            var deleteRect = ToWindow(GetDeleteButtonRect(contentWidth));
+            var deleteRect = ToWindow(GetDeleteButtonRect(contentWidth, onLeft));
             using var deletePath = RoundedRect(deleteRect, 6);
             g.FillPath(newFenceFill, deletePath);
             using var deleteBorderPen = new Pen(Color.FromArgb(255, 20, 20, 24), 1f);
@@ -1633,20 +1191,25 @@ internal sealed class FenceForm : LayeredWidgetForm
         return index >= 0 && index < _model.Files.Count ? index : null;
     }
 
-    /// <summary>Right-click on an item's label text specifically (see FileAtLabelPosition) - not
-    /// its icon, not empty grid space. Fence-level actions live elsewhere now: Rename only on the
-    /// header (see ShowHeaderContextMenu) and Delete Fence only as the "x" button next to Settings
-    /// (see GetDeleteButtonRect/ConfirmDelete) - a right-click anywhere else has nothing of its own to
+    /// <summary>LayeredWidgetForm's own WM_RBUTTONUP handling has already activated the fence by the
+    /// time this runs (see its own comment) - only a right-click on an item's label text specifically
+    /// (see FileAtLabelPosition) has anything further to show. Not its icon, not empty grid space.
+    /// Fence-level actions live elsewhere now: Rename only on the header (see LayeredWidgetForm's own
+    /// title-rename) and Delete Fence only as the "x" button next to Settings (see
+    /// GetDeleteButtonRect/ConfirmDelete) - a right-click anywhere else has nothing of its own to
     /// offer, so it just activates the fence without popping up a menu. Open and Remove From Fence
-    /// used to live here too; both stayed reachable another way (double-click, drag off the fence)
-    /// so removing them from this menu didn't remove the functionality, just this shortcut to it.</summary>
-    private void ShowContextMenu(Point clientPoint)
+    /// used to live here too; both stayed reachable another way (double-click, drag off the fence) so
+    /// removing them from this menu didn't remove the functionality, just this shortcut to it.</summary>
+    protected override void OnClientRightClick(Point contentPoint)
     {
-        Activation.Activate();
-        _contextItem = FileAtLabelPosition(clientPoint);
+        _contextItem = FileAtLabelPosition(contentPoint);
         if (_contextItem is null)
             return;
+        ShowContextMenu(contentPoint);
+    }
 
+    private void ShowContextMenu(Point contentPoint)
+    {
         NativeMethods.GetCursorPos(out var pt);
 
         var hMenu = NativeMethods.CreatePopupMenu();
@@ -1665,122 +1228,27 @@ internal sealed class FenceForm : LayeredWidgetForm
         }
     }
 
-    /// <summary>Whether an NC-message screen point (see WM_NCRBUTTONDOWN) lands specifically on the
-    /// fence's own rendered title text - not just anywhere in the caption/move-margin area that
-    /// reports HTCAPTION - gating right-click-to-rename to the text itself (see
-    /// ShowTitleContextMenu). Always false with FenceModel.HideTitle set, since there's no title
-    /// text drawn anywhere in that case (see PaintContent). Mirrors the actual TextRenderer.DrawText
-    /// call there - same rect origin/font - but measured to the text's real width rather than its
-    /// full reserved rect, so a click past the end of a short name doesn't count as "on" it.</summary>
-    protected override bool IsOverTitleRow(IntPtr lParam)
+    // Title/TitleRowHeight below are the only rename-related hooks left with a fence-specific
+    // answer - TitleVisible (derived from HideTitle), ChromeMenuFieldColor/HoverColor, and
+    // EditBoxTextColor/BackgroundColor are all LayeredWidgetForm's own defaults now (ChromeFill/
+    // ThemedMenuSelected/ThemedBody, exactly what this used to override them to).
+
+    protected override string Title
     {
-        if (_model.HideTitle || !NativeMethods.GetWindowRect(Handle, out var rect))
-            return false;
-
-        long l = lParam.ToInt64();
-        short screenX = (short)(l & 0xFFFF);
-        short screenY = (short)((l >> 16) & 0xFFFF);
-        var content = ToContent(new Point(screenX - rect.Left, screenY - rect.Top));
-
-        var maxWidth = Math.Max(0, GetContentSize().Width - 22);
-        var textWidth = Math.Min(maxWidth, TextRenderer.MeasureText(_model.Name, _font).Width);
-        return new Rectangle(14, 0, textWidth, TitleBarHeight).Contains(content);
+        get => _model.Name;
+        set => _manager.NotifyRenamed(FenceId, value);
     }
 
-    /// <summary>Right-click on the title text specifically (see IsOverTitleRow) - the only
-    /// fence-level action tied to this specific spot rather than the fence generally.</summary>
-    protected override void ShowTitleContextMenu()
-    {
-        NativeMethods.GetCursorPos(out var pt);
+    protected override int TitleRowHeight => TitleBarHeight;
 
-        var hMenu = NativeMethods.CreatePopupMenu();
-        try
-        {
-            AppendItem(hMenu, CmdRename, false);
-
-            ApplyDarkMenuTheme(hMenu);
-
-            NativeMethods.SetForegroundWindow(Handle);
-            NativeMethods.TrackPopupMenuEx(hMenu, NativeMethods.TPM_RIGHTBUTTON, pt.X, pt.Y, Handle, IntPtr.Zero);
-        }
-        finally
-        {
-            NativeMethods.DestroyMenu(hMenu);
-        }
-    }
-
-    /// <summary>Per-fence settings, opened via the settings button that appears once this fence is
-    /// active (see OnDeactivate and the settings-button hit-test carve-out). A DropdownMenu (see its
-    /// own class comment for why this isn't a native popup menu) - "Fence Color" is inlined directly
-    /// as a flat group (its own header already says what it is, without needing an outer flyout-
-    /// anchor row to name it too), while "Fence Dimensions" is nested behind an "OCD" flyout (see
-    /// DropdownMenu.Row.Submenu) instead. "Delete Fence" isn't a row here - it's the "x" button next
-    /// to Settings (see GetDeleteButtonRect/ConfirmDelete), same as "Rename" lives in the header's own
-    /// context menu rather than here - see ShowContextMenu/ShowHeaderContextMenu.</summary>
-    private void ShowFenceOptionsMenu()
-    {
-        _dropdown?.Dispose();
-
-        var contentSize = GetContentSize();
-        var buttonRect = GetSettingsButtonRect(contentSize.Width);
-        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(buttonRect.Location)), buttonRect.Size);
-        // GetSettingsButtonRect already picked whichever corner has room for the menu (see
-        // ShouldSettingsButtonOpenLeft) - reuse that same decision here instead of re-deriving it, so
-        // the button and the menu it opens always agree on which side they're on.
-        var preferLeft = buttonRect.X == 0;
-
-        var rows = BuildOptionsMenuRows();
-
-        // Tooltip background blends from black rather than DefaultBodyColor (unlike every other
-        // ThemedXxx color) - black for an untinted fence, and leaning more visibly toward a tinted
-        // fence's own color at the same blend amount than starting from dark gray would, since
-        // there's more contrast for Tint() to work with between black and a bright pick.
-        // SafeChromeBlend, not TintAmount - same fixed-WhiteSmoke-text reasoning as ChromeFill.
-        _dropdown = new DropdownMenu(rows, buttonScreenRect, preferLeft, _font, () => ChromeFill, () => ThemedMenuSelected, () => Accent, () => ThemedCheckboxBorder,
-            () => Tint(Color.Black, CurrentTint, SafeChromeBlend));
-        // Activation.MenuOpen mirrors _dropdown's own non-null state (see ShowsSettingsButton's own
-        // comment) - its Changed handler (wired to RenderAndPresent in LayeredWidgetForm's own
-        // constructor) covers the repaint this used to do explicitly, both here and in FormClosed
-        // below. RenderAndPresent already no-ops via IsDisposing if the fence itself is going away too.
-        Activation.MenuOpen = true;
-        _dropdown.ItemClicked += id =>
-        {
-            HandleCommand(id);
-            _dropdown?.RefreshChecks();
-        };
-        _dropdown.FormClosed += (_, _) =>
-        {
-            _dropdown = null;
-            Activation.MenuOpen = false;
-            // TargetOpacity depends on _dropdown being non-null - now that it's closing, ease back
-            // down off Full Opacity if nothing else (hover, a drag) is still keeping it up.
-            RenderOpacity.BeginIfNeeded();
-        };
-        _dropdown.Show(this);
-        // TargetOpacity depends on _dropdown being non-null - opening it may need to start easing
-        // toward Full Opacity right away, not wait for some unrelated repaint to notice.
-        RenderOpacity.BeginIfNeeded();
-    }
-
-    /// <summary>Keeps an already-open settings dropdown anchored to its button after the fence's own
-    /// window moves or resizes out from under it (see WM_SIZE) - most obviously the OCD flyout's own
-    /// resize commands (FormatDimensions), which change this fence's bounds via SetWindowPos without
-    /// otherwise touching the dropdown at all. Without this the menu was left floating wherever the
-    /// button used to be instead of following it.</summary>
-    private void RepositionDropdown()
-    {
-        if (_dropdown is null)
-            return;
-        var contentSize = GetContentSize();
-        var buttonRect = GetSettingsButtonRect(contentSize.Width);
-        var buttonScreenRect = new Rectangle(PointToScreen(ToWindow(buttonRect.Location)), buttonRect.Size);
-        _dropdown.RepositionRelativeTo(buttonScreenRect, preferLeft: buttonRect.X == 0);
-    }
-
-    /// <summary>The settings dropdown's row list, factored out of ShowFenceOptionsMenu so
-    /// ShouldSettingsButtonOpenLeft can measure it (via DropdownMenu.Measure) to decide which corner
-    /// the button itself belongs in before the menu exists to measure.</summary>
-    private List<DropdownMenu.Row> BuildOptionsMenuRows()
+    /// <summary>Per-fence settings, opened via LayeredWidgetForm's own OpenSettingsMenu once this
+    /// fence is active (see OnDeactivate and the settings-button hit-test carve-out). "Fence Color"
+    /// is inlined directly as a flat group (its own header already says what it is, without needing
+    /// an outer flyout-anchor row to name it too), while "Fence Dimensions" is nested behind an
+    /// "OCD" flyout (see DropdownMenu.Row.Submenu) instead. "Delete Fence" isn't a row here - it's
+    /// the "x" button next to Settings (see GetDeleteButtonRect/ConfirmDelete), same as "Rename"
+    /// lives in the header's own context menu rather than here.</summary>
+    protected override List<DropdownMenu.Row> BuildSettingsRows()
     {
         var rows = new List<DropdownMenu.Row>
         {
@@ -1838,6 +1306,10 @@ internal sealed class FenceForm : LayeredWidgetForm
         return rows;
     }
 
+    // SettingsMenuFieldColor/HoverColor/AccentColor/BorderColor/TooltipColor and the dropdown's own
+    // reposition-on-resize are all LayeredWidgetForm's own defaults now (ChromeFill/ThemedMenuSelected/
+    // Accent/ThemedCheckboxBorder, and OnResized - exactly what this used to override them to).
+
     /// <summary>WM_DRAWITEM only paints each item's own row - the popup's outer margin/border is
     /// separately filled by the menu's own background brush, which defaults to the system's (light)
     /// COLOR_MENU and shows through as a stray light border around the dark rows unless replaced
@@ -1862,27 +1334,16 @@ internal sealed class FenceForm : LayeredWidgetForm
     private readonly record struct MenuRowStyle(string Text, bool HasCheckbox, bool IsHeader, Color? Swatch = null);
 
     /// <summary>Every owner-draw row's label, keyed by the item id carried in its itemData (see
-    /// AppendItem) - only "Rename" for the two single-item native menus this still serves
-    /// (ShowContextMenu/ShowHeaderContextMenu) now that ShowFenceOptionsMenu's own dropdown draws
-    /// itself directly from its Row list instead of going through this lookup.</summary>
+    /// AppendItem) - only "Rename" for the one single-item native menu this still serves
+    /// (ShowContextMenu's item-rename) now that the Settings dropdown draws itself directly from its
+    /// Row list, and title-rename uses a plain ContextMenuStrip instead of a native menu.</summary>
     private static MenuRowStyle GetMenuRowStyle(int tag) => tag switch
     {
         CmdRenameItem => new MenuRowStyle("Rename", false, false),
-        CmdRename => new MenuRowStyle("Rename", false, false),
         _ => new MenuRowStyle(string.Empty, false, false),
     };
 
-    // ColorRef is LayeredWidgetForm's own now.
-
-    /// <summary>Blends a user-picked fence color into one of the fixed dark-theme fill colors
-    /// (body/title) rather than replacing it outright - keeps the tint recognizable while the fence
-    /// still reads as part of the same dark theme even when the picked color is fully saturated
-    /// (e.g. a pure ColorDialog pick), since only part of it makes it into the final fill. amount has
-    /// no default on purpose - every call site below deliberately picks either TintAmount (the fence's
-    /// own adjustable look) or SafeChromeBlend (menu/tooltip/button chrome, pinned regardless of
-    /// TintStrength so fixed WhiteSmoke text/icons on top always stay readable). Thin wrapper over
-    /// StyleTint.Tint, same reasoning as DarkenTowardBlack above.</summary>
-    private static Color Tint(Color baseColor, Color? tint, double amount) => StyleTint.Tint(baseColor, tint, amount);
+    // ColorRef/Tint/DarkenTowardBlack/SafeChromeBlend are all LayeredWidgetForm's own now.
 
     /// <summary>Only rows worth explaining get one - most menu items are self-explanatory from
     /// their label alone.</summary>
@@ -1893,9 +1354,9 @@ internal sealed class FenceForm : LayeredWidgetForm
         _ => null,
     };
 
-    /// <summary>WM_MEASUREITEM handler for the two remaining native single-item menus (Rename, see
-    /// ShowContextMenu/ShowHeaderContextMenu) - ShowFenceOptionsMenu's own dropdown measures its rows
-    /// directly (see DropdownMenu.MeasureLayout) instead of going through this.</summary>
+    /// <summary>WM_MEASUREITEM handler for the one remaining native single-item menu (item-rename,
+    /// see ShowContextMenu) - the Settings dropdown measures its own rows directly (see
+    /// DropdownMenu.MeasureLayout) instead of going through this.</summary>
     private void MeasureMenuItem(ref MEASUREITEMSTRUCT mis)
     {
         var style = GetMenuRowStyle((int)mis.itemData);
@@ -1908,7 +1369,7 @@ internal sealed class FenceForm : LayeredWidgetForm
         mis.itemHeight = (uint)Math.Max(size.Height + 8, 22);
     }
 
-    /// <summary>WM_DRAWITEM handler for the two remaining native single-item menus (see
+    /// <summary>WM_DRAWITEM handler for the one remaining native single-item menu (see
     /// MeasureMenuItem's own comment) - paints a row to match the fence's own dark theme instead of
     /// the native Windows menu look.</summary>
     private void DrawMenuItem(DRAWITEMSTRUCT dis)
@@ -1955,19 +1416,33 @@ internal sealed class FenceForm : LayeredWidgetForm
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
     }
 
+    /// <summary>WM_COMMAND dispatch for the one remaining native single-item menu (item-rename, see
+    /// ShowContextMenu) - everything else (the Settings dropdown's rows, title-rename) is handled
+    /// directly by LayeredWidgetForm now (see HandleSettingsCommand for the dropdown's own commands),
+    /// never routed through WM_COMMAND at all.</summary>
     private void HandleCommand(int id)
+    {
+        if (id == CmdRenameItem)
+            BeginRenameItem(_contextItem);
+    }
+
+    /// <summary>Dispatches a clicked Settings-dropdown row id - see LayeredWidgetForm.OpenSettingsMenu,
+    /// which calls this directly (not via WM_COMMAND).</summary>
+    protected override void HandleSettingsCommand(int id)
     {
         switch (id)
         {
-            case CmdRename: BeginRename(); break;
-            case CmdRenameItem: BeginRenameItem(_contextItem); break;
             case CmdToggleHideLabels: ToggleHideLabels(); break;
-            case CmdToggleHideTitle: ToggleHideTitle(); break;
+            case CmdToggleHideTitle: HideTitle = !HideTitle; break;
             case CmdResizeBoth: FormatDimensions(adjustWidth: true, adjustHeight: true); break;
             case CmdResizeLeftRight: FormatDimensions(adjustWidth: true, adjustHeight: false); break;
             case CmdResizeTopDown: FormatDimensions(adjustWidth: false, adjustHeight: true); break;
             case CmdToggleOcdSizing: ToggleOcdFenceSizing(); break;
-            case CmdToggleFullOpacityOnHover: ToggleFullOpacityOnHover(); break;
+            case CmdToggleFullOpacityOnHover:
+                SetFullOpacityOnHover(!_model.FullOpacityOnHover);
+                RenderOpacity.SnapToTarget();
+                RenderAndPresent();
+                break;
             case CmdColorDefault:
             case CmdColorCustom:
             case CmdColorEyedrop:
@@ -1977,7 +1452,7 @@ internal sealed class FenceForm : LayeredWidgetForm
                 // comment). The Eyedropper pick also resets Opacity/Tint Strength so it starts out
                 // pixel-exact, same as this used to do inline via PickEyedropperColor.
                 StyleMenuRows.TryHandleColorCommand(id, CmdColorDefault, CmdColorCustom, CmdColorEyedrop, CmdColorPresetBase,
-                    DefaultBodyColor, this, CurrentTint, color => SetTintColor(color), color =>
+                    DefaultBodyColor, this, CurrentTint, color => SetTintColor(color, exact: false), color =>
                     {
                         SetTintColor(color, exact: true);
                         SetOpacity(100);
@@ -1989,11 +1464,11 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     /// <summary>exact is only ever true from PickEyedropperColor - see FenceModel.TintIsExact. A
     /// non-exact pick also resets Opacity back to its default as a side effect (see
-    /// FenceManager.SetTintColor) - _opacity needs to snap to match immediately, the same
+    /// FenceManager.SetTintColor) - RenderOpacity needs to snap to match immediately, the same
     /// reasoning as SetOpacity's own snap, or the fence would keep rendering at whatever opacity it
     /// was at right before this pick until something else (hover, the dropdown closing) happened to
     /// notice the mismatch.</summary>
-    private void SetTintColor(Color? color, bool exact = false)
+    protected override void SetTintColor(Color? color, bool exact)
     {
         _manager.SetTintColor(FenceId, color, exact);
         RenderOpacity.SnapToTarget();
@@ -2001,11 +1476,11 @@ internal sealed class FenceForm : LayeredWidgetForm
     }
 
     /// <summary>"Header Darkness" slider - called directly from DropdownMenu.Row.OnSliderChange
-    /// (not routed through HandleCommand/ItemClicked the way every other row is, since a slider needs
-    /// a live value rather than a single command id) on mouse-down and on every subsequent mouse-move
-    /// while dragging, so the header repaints continuously as it's dragged rather than only once on
-    /// release.</summary>
-    private void SetHeaderDarkness(int darkness)
+    /// (not routed through HandleSettingsCommand/ItemClicked the way every other row is, since a
+    /// slider needs a live value rather than a single command id) on mouse-down and on every
+    /// subsequent mouse-move while dragging, so the header repaints continuously as it's dragged
+    /// rather than only once on release.</summary>
+    protected override void SetHeaderDarkness(int darkness)
     {
         _manager.SetHeaderDarkness(FenceId, darkness);
         RenderAndPresent();
@@ -2013,10 +1488,10 @@ internal sealed class FenceForm : LayeredWidgetForm
 
     /// <summary>"Fence Opacity" slider - same live-drag pattern as SetHeaderDarkness above.
     /// FenceManager.SetOpacity enforces a safe minimum, so a value dragged below it snaps back on the
-    /// next repaint rather than the fence actually going invisible. Snaps _opacity straight to
-    /// the new TargetOpacity instead of animating (see its own field comment) - a slider drag needs
-    /// to track the cursor immediately, an animated lag here would feel unresponsive.</summary>
-    private void SetOpacity(int opacity)
+    /// next repaint rather than the fence actually going invisible. Snaps RenderOpacity straight to
+    /// the new TargetOpacity instead of animating - a slider drag needs to track the cursor
+    /// immediately, an animated lag here would feel unresponsive.</summary>
+    protected override void SetOpacity(int opacity)
     {
         _manager.SetOpacity(FenceId, opacity);
         RenderOpacity.SnapToTarget();
@@ -2026,7 +1501,7 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// <summary>"Tint Strength" slider - same live-drag pattern as SetHeaderDarkness/SetOpacity above.
     /// Affects both a preset/Custom... pick (TintAmount) and an Eyedropper's exact pick
     /// (DilutedExactTint), just in opposite directions - see either one's own doc comment.</summary>
-    private void SetTintStrength(int strength)
+    protected override void SetTintStrength(int strength)
     {
         _manager.SetTintStrength(FenceId, strength);
         RenderAndPresent();
@@ -2036,11 +1511,17 @@ internal sealed class FenceForm : LayeredWidgetForm
     /// above, nothing this fence draws depends on its own Margin value - it only affects candidates
     /// offered to OTHER fences' drags via FenceManager.GetOtherFenceEdges) but RenderAndPresent
     /// stays for consistency and to keep anything else the dropdown reflects in sync.</summary>
-    private void SetMargin(int margin)
+    protected override void SetMargin(int margin)
     {
         _manager.SetMargin(FenceId, margin);
         RenderAndPresent();
     }
+
+    /// <summary>LayeredWidgetForm's own required mutator hook - plumbed straight through to
+    /// FenceManager, same as the sliders above; the Render/opacity side effects live at each call
+    /// site instead (see HandleSettingsCommand's own CmdToggleFullOpacityOnHover case) since this is
+    /// also reused, unmodified, by nothing else.</summary>
+    protected override void SetFullOpacityOnHover(bool enabled) => _manager.SetFullOpacityOnHover(FenceId, enabled);
 
     private void OpenItem(string? path)
     {
@@ -2067,30 +1548,13 @@ internal sealed class FenceForm : LayeredWidgetForm
         RenderAndPresent();
     }
 
-    private void ToggleHideTitle()
-    {
-        _manager.SetHideTitle(FenceId, !_model.HideTitle);
-        // Changes GridTop (see its own comment), which OCD Fence Sizing's fit is based on - only
-        // height can possibly need to change here, never the columns/width.
-        if (_model.OcdFenceSizing)
-            FormatDimensions(adjustWidth: false, adjustHeight: true);
-        RenderAndPresent();
-    }
-
     private void ToggleOcdFenceSizing()
     {
         _manager.SetOcdFenceSizing(FenceId, !_model.OcdFenceSizing);
-        // Otherwise this only ever takes effect after the next manual resize (see WM_EXITSIZEMOVE) -
+        // Otherwise this only ever takes effect after the next manual resize (see OnDragEnd) -
         // turning it on should tidy up the fence right away instead of waiting for that.
         if (_model.OcdFenceSizing)
             FormatDimensions(adjustWidth: true, adjustHeight: true);
-        RenderAndPresent();
-    }
-
-    private void ToggleFullOpacityOnHover()
-    {
-        _manager.SetFullOpacityOnHover(FenceId, !_model.FullOpacityOnHover);
-        RenderOpacity.SnapToTarget();
         RenderAndPresent();
     }
 
@@ -2140,52 +1604,12 @@ internal sealed class FenceForm : LayeredWidgetForm
             return;
 
         // WM_SIZE (already handled in WndProc) re-renders with the new size once this returns -
-        // NotifyBoundsChanged just needs to persist it, the same way WM_EXITSIZEMOVE does after an
+        // NotifyBoundsChanged just needs to persist it, the same way OnDragEnd does after an
         // interactive drag-resize.
         NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
             newBounds.Width + OuterMargin * 2, newBounds.Height + TopBand + BottomBand,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
         _manager.NotifyBoundsChanged(FenceId, newBounds);
-    }
-
-    protected override void BeginRename()
-    {
-        if (_renameBox is not null)
-            return;
-
-        var contentWidth = GetContentSize().Width;
-        if (contentWidth <= 0)
-            return;
-
-        var rect = ToWindow(new Rectangle(6, 3, Math.Max(contentWidth - 12, 0), 20));
-        _renameBox = new EditBox(Handle, _model.Name, ToScreen(rect), _font);
-        _renameBox.Commit += OnRenameCommit;
-        _renameBox.Cancel += OnRenameCancel;
-    }
-
-    // Backs LayeredWidgetForm's own WM_CTLCOLOREDIT handling (the rename EditBox above) - same
-    // fixed WhiteSmoke text on this fence's own ThemedBody background every owner-draw popup menu
-    // here (ApplyDarkMenuTheme) also themes to.
-    protected override Color EditBoxTextColor => Color.WhiteSmoke;
-    protected override Color EditBoxBackgroundColor => ThemedBody;
-
-    private void OnRenameCommit(string newName)
-    {
-        _renameBox?.Dispose();
-        _renameBox = null;
-
-        newName = newName.Trim();
-        if (!string.IsNullOrEmpty(newName) && newName != _model.Name)
-            _manager.NotifyRenamed(FenceId, newName);
-
-        RenderAndPresent();
-    }
-
-    private void OnRenameCancel()
-    {
-        _renameBox?.Dispose();
-        _renameBox = null;
-        RenderAndPresent();
     }
 
     private void BeginRenameItem(string? path)
@@ -2255,10 +1679,7 @@ internal sealed class FenceForm : LayeredWidgetForm
             _manager.DeleteFence(FenceId);
     }
 
-    // Thin wrappers kept under this file's own name/call sites rather than switching every one of
-    // them to RoundedRectPath.Full/Top directly - same behavior, smaller diff (same reasoning as
-    // DarkenTowardBlack/Tint's own wrappers over StyleTint above).
+    // Thin wrapper kept under this file's own name/call sites rather than switching every one of
+    // them to RoundedRectPath.Full directly - same behavior, smaller diff.
     private static GraphicsPath RoundedRect(Rectangle bounds, int radius) => RoundedRectPath.Full(bounds, radius);
-
-    private static GraphicsPath RoundedRectTop(Rectangle bounds, int radius) => RoundedRectPath.Top(bounds, radius);
 }
